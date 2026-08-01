@@ -2,8 +2,21 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, 'feat/**', 'fix/**', 'hotfix/**', 'refactor/**']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,6 +24,7 @@ env:
 
 jobs:
   build-test:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +46,7 @@ jobs:
         run: cargo test --workspace -j2
 
   clippy:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +65,7 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
   fmt:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
