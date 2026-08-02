@@ -20,6 +20,12 @@ pub struct JobResult {
     pub elapsed_ms: u64,
     pub reason: Option<String>,
     pub skipped: bool,
+    /// Wasm compile phase (0 = not measured or skipped job).
+    pub compile_us: u64,
+    /// Component instantiate phase.
+    pub instantiate_us: u64,
+    /// Guest execute phase.
+    pub execute_us: u64,
 }
 
 impl RunResult {
@@ -42,6 +48,28 @@ impl JobResult {
             elapsed_ms: elapsed.as_millis() as u64,
             reason: None,
             skipped,
+            compile_us: 0,
+            instantiate_us: 0,
+            execute_us: 0,
+        }
+    }
+
+    pub fn from_succeeded_with_metrics(
+        job_id: String,
+        elapsed: Duration,
+        compile_us: u64,
+        instantiate_us: u64,
+        execute_us: u64,
+    ) -> Self {
+        Self {
+            job_id,
+            status: "succeeded".into(),
+            elapsed_ms: elapsed.as_millis() as u64,
+            reason: None,
+            skipped: false,
+            compile_us,
+            instantiate_us,
+            execute_us,
         }
     }
 
@@ -52,6 +80,9 @@ impl JobResult {
             elapsed_ms: elapsed.as_millis() as u64,
             reason: Some(reason),
             skipped: false,
+            compile_us: 0,
+            instantiate_us: 0,
+            execute_us: 0,
         }
     }
 }

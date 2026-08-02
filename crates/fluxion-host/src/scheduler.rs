@@ -194,10 +194,12 @@ async fn execute(
 
         match &event.status {
             JobStatus::Succeeded { elapsed } => {
-                job_results.push(JobResult::from_succeeded(
+                job_results.push(JobResult::from_succeeded_with_metrics(
                     event.job_id.clone(),
                     *elapsed,
-                    false,
+                    event.compile_us,
+                    event.instantiate_us,
+                    event.execute_us,
                 ));
             }
             JobStatus::Failed { elapsed, reason } => {
@@ -269,6 +271,10 @@ async fn execute(
 struct JobEvent {
     job_id: String,
     status: JobStatus,
+    /// Phase metrics for succeeded jobs; all zeros for failures/skips.
+    compile_us: u64,
+    instantiate_us: u64,
+    execute_us: u64,
 }
 
 fn launch(
@@ -294,34 +300,63 @@ fn launch(
             let start = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs),
-                tokio::task::spawn_blocking(move || host.run_component(&component, input, &perms)),
+                tokio::task::spawn_blocking(move || {
+                    host.run_component_measured(&component, input, &perms)
+                }),
             )
             .await;
 
             let elapsed = start.elapsed();
-            let status = match result {
-                Err(_) => JobStatus::Failed {
-                    elapsed,
-                    reason: format!("Timeout after {}s", timeout_secs),
-                },
-                Ok(Ok(Ok(_))) => JobStatus::Succeeded { elapsed },
-                Ok(Ok(Err(e))) => JobStatus::Failed {
-                    elapsed,
-                    reason: e.to_string(),
-                },
-                Ok(Err(e)) => JobStatus::Failed {
-                    elapsed,
-                    reason: e.to_string(),
-                },
+            let (status, compile_us, instantiate_us, execute_us) = match result {
+                Err(_) => (
+                    JobStatus::Failed {
+                        elapsed,
+                        reason: format!("Timeout after {}s", timeout_secs),
+                    },
+                    0,
+                    0,
+                    0,
+                ),
+                Ok(Ok(Ok((_, m)))) => (
+                    JobStatus::Succeeded { elapsed },
+                    m.compile.as_micros() as u64,
+                    m.instantiate.as_micros() as u64,
+                    m.execute.as_micros() as u64,
+                ),
+                Ok(Ok(Err(e))) => (
+                    JobStatus::Failed {
+                        elapsed,
+                        reason: e.to_string(),
+                    },
+                    0,
+                    0,
+                    0,
+                ),
+                Ok(Err(e)) => (
+                    JobStatus::Failed {
+                        elapsed,
+                        reason: e.to_string(),
+                    },
+                    0,
+                    0,
+                    0,
+                ),
             };
 
             tracing::info!(
                 status = status.label(),
                 elapsed_ms = elapsed.as_millis() as u64,
+                compile_us,
                 "job finished"
             );
 
-            let _ = tx.send(JobEvent { job_id, status });
+            let _ = tx.send(JobEvent {
+                job_id,
+                status,
+                compile_us,
+                instantiate_us,
+                execute_us,
+            });
         }
         .instrument(span),
     );

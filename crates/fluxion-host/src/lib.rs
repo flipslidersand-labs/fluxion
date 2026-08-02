@@ -1,13 +1,34 @@
+pub mod cache;
 pub mod scheduler;
 
 use anyhow::{Context, Result};
+use cache::ComponentCache;
 use fluxion_core::workflow::PermissionSet;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
 use wasmtime_wasi::{DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+
+/// Per-invocation timing breakdown for a single component run.
+#[derive(Debug, Clone)]
+pub struct JobMetrics {
+    /// Time to load and compile the .wasm file via wasmtime.
+    pub compile: Duration,
+    /// Time to link and instantiate the compiled component.
+    pub instantiate: Duration,
+    /// Time spent inside the guest `process()` call.
+    pub execute: Duration,
+}
+
+impl JobMetrics {
+    pub fn total(&self) -> Duration {
+        self.compile + self.instantiate + self.execute
+    }
+}
 
 // Epoch ticker resolution: 10 ticks per second → 100ms granularity.
 const TICKS_PER_SEC: u64 = 10;
@@ -34,6 +55,12 @@ impl WasiView for HostState {
 
 pub struct FluxionHost {
     engine: Engine,
+    /// L2: disk-backed compiled artifact cache (~/.cache/fluxion/components/).
+    disk_cache: ComponentCache,
+    /// L1: in-memory compiled component cache — avoids disk I/O on hot paths.
+    mem_cache: RwLock<HashMap<String, Arc<Component>>>,
+    /// L0: pre-linked instantiation cache — skips linker setup on repeated instantiate calls.
+    pre_cache: RwLock<HashMap<String, Arc<TaskComponentPre<HostState>>>>,
 }
 
 impl FluxionHost {
@@ -55,7 +82,12 @@ impl FluxionHost {
             }
         });
 
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            disk_cache: ComponentCache::new(),
+            mem_cache: RwLock::new(HashMap::new()),
+            pre_cache: RwLock::new(HashMap::new()),
+        })
     }
 
     pub fn run_component(
@@ -64,9 +96,17 @@ impl FluxionHost {
         input: Vec<u8>,
         perms: &PermissionSet,
     ) -> Result<Vec<u8>> {
-        let mut linker: Linker<HostState> = Linker::new(&self.engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+        let (output, _) = self.run_component_measured(wasm_path, input, perms)?;
+        Ok(output)
+    }
 
+    /// Like `run_component` but also returns per-phase timing metrics.
+    pub fn run_component_measured(
+        &self,
+        wasm_path: impl AsRef<Path>,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
         let ctx = build_wasi_ctx(perms)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
@@ -86,33 +126,68 @@ impl FluxionHost {
         store.set_epoch_deadline(perms.limits.timeout_secs * TICKS_PER_SEC);
         store.epoch_deadline_trap();
 
-        let component = Component::from_file(&self.engine, wasm_path)?;
-        let instance =
-            TaskComponent::instantiate(&mut store, &component, &linker).map_err(|e| {
-                if is_oom_error(&e) {
-                    anyhow::anyhow!(
-                        "OOM: component exceeded memory_mb={} limit ({})",
-                        perms.limits.memory_mb,
-                        e
-                    )
-                } else {
+        let wasm_bytes = std::fs::read(wasm_path.as_ref())?;
+        let key = cache::wasm_key(&wasm_bytes);
+
+        // ── compile phase (L1 mem → L2 disk → full compile) ──────────────────
+        let t0 = Instant::now();
+        let component: Arc<Component> = {
+            if let Some(c) = self.mem_cache.read().unwrap().get(&key) {
+                Arc::clone(c)
+            } else {
+                let c = Arc::new(match self.disk_cache.load(&self.engine, &wasm_bytes) {
+                    Some(c) => c,
+                    None => self.disk_cache.store(&self.engine, &wasm_bytes)?,
+                });
+                self.mem_cache.write().unwrap().insert(key.clone(), Arc::clone(&c));
+                c
+            }
+        };
+        let compile = t0.elapsed();
+
+        // ── instantiate phase (L0 pre_cache → build once per component) ──────
+        let t1 = Instant::now();
+        let pre: Arc<TaskComponentPre<HostState>> = {
+            if let Some(p) = self.pre_cache.read().unwrap().get(&key) {
+                Arc::clone(p)
+            } else {
+                let mut linker: Linker<HostState> = Linker::new(&self.engine);
+                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&*component)?)?);
+                self.pre_cache.write().unwrap().insert(key, Arc::clone(&p));
+                p
+            }
+        };
+        let instance = pre.instantiate(&mut store).map_err(|e| {
+            if is_oom_error(&e) {
+                anyhow::anyhow!(
+                    "OOM: component exceeded memory_mb={} limit ({})",
+                    perms.limits.memory_mb,
                     e
-                }
-            })?;
+                )
+            } else {
+                e
+            }
+        })?;
+        let instantiate = t1.elapsed();
 
         let task_input = exports::fluxion::task::processor::TaskInput {
             content: input,
             metadata: vec![],
         };
 
+        let t2 = Instant::now();
         let call_result = instance
             .fluxion_task_processor()
             .call_process(&mut store, &task_input);
+        let execute = t2.elapsed();
+
+        let metrics = JobMetrics { compile, instantiate, execute };
 
         match call_result {
             // Clean component-level error (returned via Result<_, String>)
             Ok(Err(e)) => anyhow::bail!("Component error: {}", e),
-            Ok(Ok(output)) => Ok(output.content),
+            Ok(Ok(output)) => Ok((output.content, metrics)),
             // Trap from the Wasm runtime — distinguish timeout from other traps
             Err(trap) => {
                 if is_epoch_trap(&trap) {

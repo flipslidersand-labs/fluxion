@@ -28,6 +28,9 @@ enum Commands {
     Run {
         /// Path to the workflow YAML file
         path: String,
+        /// Print per-job compile/instantiate/execute breakdown after the run
+        #[arg(long)]
+        metrics: bool,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -55,6 +58,20 @@ enum Commands {
     Runs {
         #[command(subcommand)]
         action: RunsCommands,
+    },
+    /// Benchmark a Wasm component — compile / instantiate / execute breakdown
+    Bench {
+        /// Path to the .wasm component file
+        path: String,
+        /// Number of timed runs
+        #[arg(long, default_value = "50")]
+        runs: usize,
+        /// Number of warmup runs (excluded from stats)
+        #[arg(long, default_value = "3")]
+        warmup: usize,
+        /// Input payload passed to the component
+        #[arg(long, default_value = "")]
+        input: String,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -99,14 +116,17 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path } => {
+        Commands::Run { path, metrics } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
             let host = Arc::new(FluxionHost::new()?);
-            scheduler::run(&wf, &workflow_path, host).await?;
+            let result = scheduler::run(&wf, &workflow_path, host).await?;
+            if metrics {
+                print_metrics_table(&result.jobs);
+            }
         }
 
         Commands::Retry { run_id, from } => {
@@ -158,12 +178,149 @@ async fn run(command: Commands) -> Result<()> {
             }
         },
 
+        Commands::Bench {
+            path,
+            runs,
+            warmup,
+            input,
+        } => {
+            cmd_bench(&path, runs, warmup, &input)?;
+        }
+
         Commands::McpServe => {
             mcp::serve().await?;
         }
     }
 
     Ok(())
+}
+
+// ── fluxion run --metrics ─────────────────────────────────────────────────────
+
+fn print_metrics_table(jobs: &[fluxion_core::runner::JobResult]) {
+    let measured: Vec<_> = jobs.iter().filter(|j| !j.skipped).collect();
+    if measured.is_empty() {
+        return;
+    }
+
+    let pad = measured.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+
+    println!();
+    println!(
+        "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "job", "compile", "instantiate", "execute", "total",
+        pad = pad
+    );
+    println!("  {}", "-".repeat(pad + 46));
+
+    for j in &measured {
+        let total_us = j.compile_us + j.instantiate_us + j.execute_us;
+        println!(
+            "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+            j.job_id,
+            fmt_us(j.compile_us),
+            fmt_us(j.instantiate_us),
+            fmt_us(j.execute_us),
+            fmt_us(total_us),
+            pad = pad
+        );
+    }
+}
+
+// ── fluxion bench ─────────────────────────────────────────────────────────────
+
+fn cmd_bench(path: &str, runs: usize, warmup: usize, input: &str) -> Result<()> {
+    anyhow::ensure!(runs > 0, "--runs must be at least 1");
+
+    let host = FluxionHost::new()?;
+    let perms = PermissionSet::default();
+    let input_bytes = input.as_bytes().to_vec();
+
+    println!(
+        "Benchmarking: {}  ({} runs, {} warmup)\n",
+        path, runs, warmup
+    );
+
+    for i in 0..warmup {
+        print!("\r  warmup {}/{} ...", i + 1, warmup);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        host.run_component_measured(path, input_bytes.clone(), &perms)
+            .map_err(|e| anyhow::anyhow!("warmup run failed: {}", e))?;
+    }
+    if warmup > 0 {
+        println!("\r  warmup done           ");
+    }
+
+    let mut compile_us: Vec<u64> = Vec::with_capacity(runs);
+    let mut instantiate_us: Vec<u64> = Vec::with_capacity(runs);
+    let mut execute_us: Vec<u64> = Vec::with_capacity(runs);
+
+    for i in 0..runs {
+        print!("\r  run {}/{} ...", i + 1, runs);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let (_, m) = host
+            .run_component_measured(path, input_bytes.clone(), &perms)
+            .map_err(|e| anyhow::anyhow!("run {} failed: {}", i + 1, e))?;
+        compile_us.push(m.compile.as_micros() as u64);
+        instantiate_us.push(m.instantiate.as_micros() as u64);
+        execute_us.push(m.execute.as_micros() as u64);
+    }
+    println!("\r  done ({} runs)         \n", runs);
+
+    let total_us: Vec<u64> = compile_us
+        .iter()
+        .zip(&instantiate_us)
+        .zip(&execute_us)
+        .map(|((c, i), e)| c + i + e)
+        .collect();
+
+    // Header
+    println!(
+        "{:<12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "phase", "avg", "p50", "p95", "p99", "min", "max"
+    );
+    println!("{}", "-".repeat(72));
+    print_bench_row("compile", &compile_us);
+    print_bench_row("instantiate", &instantiate_us);
+    print_bench_row("execute", &execute_us);
+    println!("{}", "-".repeat(72));
+    print_bench_row("total", &total_us);
+
+    Ok(())
+}
+
+fn print_bench_row(label: &str, us_values: &[u64]) {
+    let mut sorted = us_values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+
+    let avg = sorted.iter().sum::<u64>() / n as u64;
+    let p50 = sorted[n / 2];
+    let p95 = sorted[(n * 95 / 100).min(n - 1)];
+    let p99 = sorted[(n * 99 / 100).min(n - 1)];
+    let min = sorted[0];
+    let max = sorted[n - 1];
+
+    println!(
+        "{:<12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        label,
+        fmt_us(avg),
+        fmt_us(p50),
+        fmt_us(p95),
+        fmt_us(p99),
+        fmt_us(min),
+        fmt_us(max),
+    );
+}
+
+fn fmt_us(us: u64) -> String {
+    if us >= 1_000_000 {
+        format!("{:.2}s", us as f64 / 1_000_000.0)
+    } else if us >= 1_000 {
+        format!("{:.2}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{}µs", us)
+    }
 }
 
 // ── fluxion status ────────────────────────────────────────────────────────────
