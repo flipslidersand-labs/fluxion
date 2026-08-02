@@ -251,7 +251,8 @@ async fn sandbox_network_cap() {
         .expect("connect-allowed");
     assert_eq!(
         allowed.status, "succeeded",
-        "connect-allowed should connect (cap passed, real listener)"
+        "connect-allowed should connect (cap passed, real listener): reason={:?}",
+        allowed.reason
     );
     let denied = result
         .jobs
