@@ -89,7 +89,7 @@ impl Workflow {
         let src = std::fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read {:?}", path.as_ref()))?;
         let wf: Self =
-            serde_yaml::from_str(&src).with_context(|| "Failed to parse workflow YAML")?;
+            serde_yml::from_str(&src).with_context(|| "Failed to parse workflow YAML")?;
         wf.validate()?;
         Ok(wf)
     }
@@ -130,7 +130,7 @@ jobs:
     input: "127.0.0.1:19999"
     depends_on: [connect-allowed]
 "#;
-        let result: Result<Workflow, _> = serde_yaml::from_str(src);
+        let result: Result<Workflow, _> = serde_yml::from_str(src);
         println!("result: {result:?}");
         assert!(result.is_ok());
     }
