@@ -39,12 +39,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install wasm32-wasip1 target
-        run: rustup target add wasm32-wasip1
-
-      - name: Build hello component (required by cache tests)
-        run: cargo build -j2 --manifest-path components/hello/Cargo.toml --target wasm32-wasip1
-
       - name: Build
         run: cargo build --workspace -j2
 
