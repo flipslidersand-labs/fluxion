@@ -212,11 +212,17 @@ async fn sandbox_fs_cap() {
     let _ = std::fs::remove_file(&test_file);
 }
 
-/// network-sandbox: connect-allowed reaches 127.0.0.1:19999 (ECONNREFUSED = OK, cap passed),
+/// network-sandbox: connect-allowed succeeds (real listener, cap passed),
 /// connect-denied is blocked before reaching the network (empty allowlist).
 #[tokio::test]
 #[ignore = "requires pre-built Wasm components"]
 async fn sandbox_network_cap() {
+    // Bind on a random port so connect-allowed gets an actual TCP connection.
+    // The kernel accept-backlog handles the SYN without calling accept(), so
+    // the Wasm TcpStream::connect returns Ok even before we drop the listener.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
     let host = Arc::new(FluxionHost::new().unwrap());
     let wf_path = workspace_root()
         .join("examples")
@@ -225,9 +231,17 @@ async fn sandbox_network_cap() {
     let probe = wasm2("network-probe");
     for job in wf.jobs.values_mut() {
         job.component = probe.clone();
+        job.input = Some(addr.clone());
     }
+    wf.jobs
+        .get_mut("connect-allowed")
+        .unwrap()
+        .permissions
+        .network
+        .allow = vec![addr.clone()];
 
     let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    drop(listener);
 
     assert!(!result.success, "workflow should fail at connect-denied");
     let allowed = result
@@ -237,7 +251,7 @@ async fn sandbox_network_cap() {
         .expect("connect-allowed");
     assert_eq!(
         allowed.status, "succeeded",
-        "connect-allowed should reach the address (ECONNREFUSED = cap passed)"
+        "connect-allowed should connect (cap passed, real listener)"
     );
     let denied = result
         .jobs
