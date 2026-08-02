@@ -417,8 +417,7 @@ mod tests {
         use std::num::NonZeroUsize;
 
         let cap = 4usize;
-        let mut cache: LruCache<String, u32> =
-            LruCache::new(NonZeroUsize::new(cap).unwrap());
+        let mut cache: LruCache<String, u32> = LruCache::new(NonZeroUsize::new(cap).unwrap());
 
         for i in 0u32..10 {
             cache.put(format!("key-{i}"), i);
@@ -429,11 +428,17 @@ mod tests {
 
         // The 4 most recently inserted entries must be present.
         for i in 6u32..10 {
-            assert!(cache.contains(&format!("key-{i}")), "key-{i} should be in cache");
+            assert!(
+                cache.contains(&format!("key-{i}")),
+                "key-{i} should be in cache"
+            );
         }
         // Older entries should have been evicted.
         for i in 0u32..6 {
-            assert!(!cache.contains(&format!("key-{i}")), "key-{i} should be evicted");
+            assert!(
+                !cache.contains(&format!("key-{i}")),
+                "key-{i} should be evicted"
+            );
         }
     }
 
