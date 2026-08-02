@@ -156,7 +156,7 @@ impl FluxionHost {
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
                 wasmtime_wasi::add_to_linker_sync(&mut linker)?;
-                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&*component)?)?);
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
                 self.pre_cache.write().unwrap().insert(key, Arc::clone(&p));
                 p
             }

@@ -13,6 +13,12 @@ pub struct ComponentCache {
     pub(crate) dir: PathBuf,
 }
 
+impl Default for ComponentCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ComponentCache {
     pub fn new() -> Self {
         let dir = cache_base_dir().join("fluxion").join("components");
