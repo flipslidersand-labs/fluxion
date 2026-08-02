@@ -28,6 +28,9 @@ enum Commands {
     Run {
         /// Path to the workflow YAML file
         path: String,
+        /// Print per-job compile/instantiate/execute breakdown after the run
+        #[arg(long)]
+        metrics: bool,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -113,14 +116,17 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path } => {
+        Commands::Run { path, metrics } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
             let host = Arc::new(FluxionHost::new()?);
-            scheduler::run(&wf, &workflow_path, host).await?;
+            let result = scheduler::run(&wf, &workflow_path, host).await?;
+            if metrics {
+                print_metrics_table(&result.jobs);
+            }
         }
 
         Commands::Retry { run_id, from } => {
@@ -187,6 +193,38 @@ async fn run(command: Commands) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── fluxion run --metrics ─────────────────────────────────────────────────────
+
+fn print_metrics_table(jobs: &[fluxion_core::runner::JobResult]) {
+    let measured: Vec<_> = jobs.iter().filter(|j| !j.skipped).collect();
+    if measured.is_empty() {
+        return;
+    }
+
+    let pad = measured.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+
+    println!();
+    println!(
+        "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "job", "compile", "instantiate", "execute", "total",
+        pad = pad
+    );
+    println!("  {}", "-".repeat(pad + 46));
+
+    for j in &measured {
+        let total_us = j.compile_us + j.instantiate_us + j.execute_us;
+        println!(
+            "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+            j.job_id,
+            fmt_us(j.compile_us),
+            fmt_us(j.instantiate_us),
+            fmt_us(j.execute_us),
+            fmt_us(total_us),
+            pad = pad
+        );
+    }
 }
 
 // ── fluxion bench ─────────────────────────────────────────────────────────────
