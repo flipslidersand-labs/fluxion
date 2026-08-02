@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use wasmtime::{component::Component, Engine};
+use wasmtime::{Engine, component::Component};
 
 /// Disk-backed cache for precompiled Wasm components (.cwasm).
 ///
@@ -11,6 +11,12 @@ use wasmtime::{component::Component, Engine};
 ///   recompile), preventing UB from loading a stale artifact with `deserialize_file`.
 pub struct ComponentCache {
     pub(crate) dir: PathBuf,
+}
+
+impl Default for ComponentCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ComponentCache {
@@ -124,6 +130,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"]
     fn miss_then_hit_roundtrip() {
         let engine = test_engine();
         let wasm = hello_wasm();
@@ -142,6 +149,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"]
     fn stale_artifact_is_evicted() {
         let engine = test_engine();
         let wasm = hello_wasm();
