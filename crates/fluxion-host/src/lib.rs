@@ -57,8 +57,10 @@ pub struct FluxionHost {
     engine: Engine,
     /// L2: disk-backed compiled artifact cache (~/.cache/fluxion/components/).
     disk_cache: ComponentCache,
-    /// L1: in-memory cache — avoids disk I/O and artifact parsing on hot paths.
+    /// L1: in-memory compiled component cache — avoids disk I/O on hot paths.
     mem_cache: RwLock<HashMap<String, Arc<Component>>>,
+    /// L0: pre-linked instantiation cache — skips linker setup on repeated instantiate calls.
+    pre_cache: RwLock<HashMap<String, Arc<TaskComponentPre<HostState>>>>,
 }
 
 impl FluxionHost {
@@ -84,6 +86,7 @@ impl FluxionHost {
             engine,
             disk_cache: ComponentCache::new(),
             mem_cache: RwLock::new(HashMap::new()),
+            pre_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -104,9 +107,6 @@ impl FluxionHost {
         input: Vec<u8>,
         perms: &PermissionSet,
     ) -> Result<(Vec<u8>, JobMetrics)> {
-        let mut linker: Linker<HostState> = Linker::new(&self.engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
-
         let ctx = build_wasi_ctx(perms)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
@@ -129,36 +129,46 @@ impl FluxionHost {
         let wasm_bytes = std::fs::read(wasm_path.as_ref())?;
         let key = cache::wasm_key(&wasm_bytes);
 
+        // ── compile phase (L1 mem → L2 disk → full compile) ──────────────────
         let t0 = Instant::now();
         let component: Arc<Component> = {
-            // L1: in-memory — no disk I/O, sub-ms on hot path.
             if let Some(c) = self.mem_cache.read().unwrap().get(&key) {
                 Arc::clone(c)
             } else {
-                // L2: disk cache → full compile (miss).
                 let c = Arc::new(match self.disk_cache.load(&self.engine, &wasm_bytes) {
                     Some(c) => c,
                     None => self.disk_cache.store(&self.engine, &wasm_bytes)?,
                 });
-                self.mem_cache.write().unwrap().insert(key, Arc::clone(&c));
+                self.mem_cache.write().unwrap().insert(key.clone(), Arc::clone(&c));
                 c
             }
         };
         let compile = t0.elapsed();
 
+        // ── instantiate phase (L0 pre_cache → build once per component) ──────
         let t1 = Instant::now();
-        let instance =
-            TaskComponent::instantiate(&mut store, &*component, &linker).map_err(|e| {
-                if is_oom_error(&e) {
-                    anyhow::anyhow!(
-                        "OOM: component exceeded memory_mb={} limit ({})",
-                        perms.limits.memory_mb,
-                        e
-                    )
-                } else {
+        let pre: Arc<TaskComponentPre<HostState>> = {
+            if let Some(p) = self.pre_cache.read().unwrap().get(&key) {
+                Arc::clone(p)
+            } else {
+                let mut linker: Linker<HostState> = Linker::new(&self.engine);
+                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&*component)?)?);
+                self.pre_cache.write().unwrap().insert(key, Arc::clone(&p));
+                p
+            }
+        };
+        let instance = pre.instantiate(&mut store).map_err(|e| {
+            if is_oom_error(&e) {
+                anyhow::anyhow!(
+                    "OOM: component exceeded memory_mb={} limit ({})",
+                    perms.limits.memory_mb,
                     e
-                }
-            })?;
+                )
+            } else {
+                e
+            }
+        })?;
         let instantiate = t1.elapsed();
 
         let task_input = exports::fluxion::task::processor::TaskInput {

@@ -56,7 +56,7 @@ impl ComponentCache {
         Ok(unsafe { Component::deserialize_file(engine, &path)? })
     }
 
-    fn artifact_path(&self, wasm_bytes: &[u8]) -> PathBuf {
+    pub(crate) fn artifact_path(&self, wasm_bytes: &[u8]) -> PathBuf {
         self.dir.join(format!("{}.cwasm", cache_key(wasm_bytes)))
     }
 }
