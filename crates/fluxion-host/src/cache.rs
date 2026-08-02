@@ -187,8 +187,14 @@ mod tests {
 
         let result = cache.load(&engine, wasm_bytes);
 
-        assert!(result.is_none(), "stale artifact should yield None, not a Component");
-        assert!(!path.exists(), "stale artifact must be deleted after eviction");
+        assert!(
+            result.is_none(),
+            "stale artifact should yield None, not a Component"
+        );
+        assert!(
+            !path.exists(),
+            "stale artifact must be deleted after eviction"
+        );
     }
 
     #[test]
