@@ -64,6 +64,53 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
+  e2e:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo (host + components)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-component
+            target
+            components/alloc-bomb/target
+            components/file-reader/target
+            components/hello/target
+            components/network-probe/target
+            components/pipeline-stage/target
+            components/spin/target
+          key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-e2e-
+
+      - name: Install Wasm targets
+        run: |
+          rustup target add wasm32-wasip1
+          rustup target add wasm32-wasip2
+
+      - name: Install cargo-component
+        run: |
+          if ! command -v cargo-component &>/dev/null; then
+            cargo install cargo-component --locked -j2
+          fi
+
+      - name: Build Wasm components
+        run: |
+          for comp in alloc-bomb file-reader hello pipeline-stage spin; do
+            (cd components/$comp && cargo component build -j2)
+          done
+          (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
+
+      - name: Build host
+        run: cargo build -p fluxion-host -j2
+
+      - name: E2E tests
+        run: cargo test -p fluxion-host --test e2e -- --ignored
+
   fmt:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
