@@ -139,7 +139,10 @@ impl FluxionHost {
                     Some(c) => c,
                     None => self.disk_cache.store(&self.engine, &wasm_bytes)?,
                 });
-                self.mem_cache.write().unwrap().insert(key.clone(), Arc::clone(&c));
+                self.mem_cache
+                    .write()
+                    .unwrap()
+                    .insert(key.clone(), Arc::clone(&c));
                 c
             }
         };
@@ -182,7 +185,11 @@ impl FluxionHost {
             .call_process(&mut store, &task_input);
         let execute = t2.elapsed();
 
-        let metrics = JobMetrics { compile, instantiate, execute };
+        let metrics = JobMetrics {
+            compile,
+            instantiate,
+            execute,
+        };
 
         match call_result {
             // Clean component-level error (returned via Result<_, String>)

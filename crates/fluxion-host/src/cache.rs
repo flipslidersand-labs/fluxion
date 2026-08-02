@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use wasmtime::{component::Component, Engine};
+use wasmtime::{Engine, component::Component};
 
 /// Disk-backed cache for precompiled Wasm components (.cwasm).
 ///

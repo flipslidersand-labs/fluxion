@@ -208,7 +208,11 @@ fn print_metrics_table(jobs: &[fluxion_core::runner::JobResult]) {
     println!();
     println!(
         "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
-        "job", "compile", "instantiate", "execute", "total",
+        "job",
+        "compile",
+        "instantiate",
+        "execute",
+        "total",
         pad = pad
     );
     println!("  {}", "-".repeat(pad + 46));
