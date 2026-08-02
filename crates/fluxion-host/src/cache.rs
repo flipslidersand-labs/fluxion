@@ -167,6 +167,30 @@ mod tests {
         assert!(!path.exists(), "stale artifact should be removed");
     }
 
+    // Verifies the eviction path triggered by a wasmtime version upgrade.
+    // A real version mismatch causes deserialize_file to return Err — we simulate
+    // that with fake bytes so the test runs in CI without pre-built components.
+    #[test]
+    fn stale_artifact_evicted_on_version_mismatch() {
+        let engine = test_engine();
+        let wasm_bytes = b"fake wasm for version mismatch simulation";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+
+        let path = cache.artifact_path(wasm_bytes);
+
+        // Write bytes that look like a .cwasm artifact from an older wasmtime version.
+        // Any bytes that fail Component::deserialize_file trigger the eviction path.
+        std::fs::write(&path, b"\0asm\x01stale-version-artifact").unwrap();
+        assert!(path.exists(), "pre-condition: artifact file must exist");
+
+        let result = cache.load(&engine, wasm_bytes);
+
+        assert!(result.is_none(), "stale artifact should yield None, not a Component");
+        assert!(!path.exists(), "stale artifact must be deleted after eviction");
+    }
+
     #[test]
     fn artifact_path_contains_hash() {
         let tmp = tempfile::tempdir().unwrap();
