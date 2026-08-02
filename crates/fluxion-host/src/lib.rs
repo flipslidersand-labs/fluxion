@@ -4,10 +4,12 @@ pub mod scheduler;
 use anyhow::{Context, Result};
 use cache::ComponentCache;
 use fluxion_core::workflow::PermissionSet;
-use std::collections::HashMap;
+use lru::LruCache;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
@@ -53,17 +55,38 @@ impl WasiView for HostState {
     }
 }
 
+// Default LRU capacities. Large enough for typical workflows; evicts least-recently-used
+// entries when the limit is reached to prevent unbounded memory growth.
+const MEM_CACHE_CAP: usize = 64;
+const PRE_CACHE_CAP: usize = 64;
+
 pub struct FluxionHost {
     engine: Engine,
     /// L2: disk-backed compiled artifact cache (~/.cache/fluxion/components/).
     disk_cache: ComponentCache,
-    /// L1: in-memory compiled component cache — avoids disk I/O on hot paths.
-    mem_cache: RwLock<HashMap<String, Arc<Component>>>,
-    /// L0: pre-linked instantiation cache — skips linker setup on repeated instantiate calls.
-    pre_cache: RwLock<HashMap<String, Arc<TaskComponentPre<HostState>>>>,
+    /// L1: LRU cache of compiled components — avoids disk I/O on hot paths.
+    mem_cache: Mutex<LruCache<String, Arc<Component>>>,
+    /// L0: LRU pre-instantiate cache — skips linker setup on repeated calls.
+    pre_cache: Mutex<LruCache<String, Arc<TaskComponentPre<HostState>>>>,
+    /// Signals the epoch ticker thread to stop on drop.
+    ticker_shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for FluxionHost {
+    fn drop(&mut self) {
+        // The ticker thread wakes every 100ms and exits on the next iteration.
+        self.ticker_shutdown.store(true, Ordering::Relaxed);
+    }
 }
 
 impl FluxionHost {
+    /// Returns a weak reference to the ticker shutdown flag.
+    /// Upgrades to None once the ticker thread exits after drop.
+    #[cfg(test)]
+    pub(crate) fn ticker_weak(&self) -> std::sync::Weak<AtomicBool> {
+        Arc::downgrade(&self.ticker_shutdown)
+    }
+
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -73,20 +96,25 @@ impl FluxionHost {
         let engine = Engine::new(&config)?;
 
         // Background thread advances the epoch counter every 100ms.
-        // The ticker runs for the process lifetime (detached thread is fine here).
-        let ticker = engine.clone();
+        // Exits when ticker_shutdown is set (FluxionHost::drop).
+        let ticker_shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&ticker_shutdown);
+        let ticker_engine = engine.clone();
         std::thread::spawn(move || {
-            loop {
+            while !thread_shutdown.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(1000 / TICKS_PER_SEC));
-                ticker.increment_epoch();
+                if !thread_shutdown.load(Ordering::Relaxed) {
+                    ticker_engine.increment_epoch();
+                }
             }
         });
 
         Ok(Self {
             engine,
             disk_cache: ComponentCache::new(),
-            mem_cache: RwLock::new(HashMap::new()),
-            pre_cache: RwLock::new(HashMap::new()),
+            mem_cache: Mutex::new(LruCache::new(NonZeroUsize::new(MEM_CACHE_CAP).unwrap())),
+            pre_cache: Mutex::new(LruCache::new(NonZeroUsize::new(PRE_CACHE_CAP).unwrap())),
+            ticker_shutdown,
         })
     }
 
@@ -129,10 +157,10 @@ impl FluxionHost {
         let wasm_bytes = std::fs::read(wasm_path.as_ref())?;
         let key = cache::wasm_key(&wasm_bytes);
 
-        // ── compile phase (L1 mem → L2 disk → full compile) ──────────────────
+        // ── compile phase (L1 LRU mem → L2 disk → full compile) ─────────────
         let t0 = Instant::now();
         let component: Arc<Component> = {
-            if let Some(c) = self.mem_cache.read().unwrap().get(&key) {
+            if let Some(c) = self.mem_cache.lock().unwrap().get(&key) {
                 Arc::clone(c)
             } else {
                 let c = Arc::new(match self.disk_cache.load(&self.engine, &wasm_bytes) {
@@ -140,24 +168,24 @@ impl FluxionHost {
                     None => self.disk_cache.store(&self.engine, &wasm_bytes)?,
                 });
                 self.mem_cache
-                    .write()
+                    .lock()
                     .unwrap()
-                    .insert(key.clone(), Arc::clone(&c));
+                    .put(key.clone(), Arc::clone(&c));
                 c
             }
         };
         let compile = t0.elapsed();
 
-        // ── instantiate phase (L0 pre_cache → build once per component) ──────
+        // ── instantiate phase (L0 LRU pre_cache → build once per component) ──
         let t1 = Instant::now();
         let pre: Arc<TaskComponentPre<HostState>> = {
-            if let Some(p) = self.pre_cache.read().unwrap().get(&key) {
+            if let Some(p) = self.pre_cache.lock().unwrap().get(&key) {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
                 wasmtime_wasi::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
-                self.pre_cache.write().unwrap().insert(key, Arc::clone(&p));
+                self.pre_cache.lock().unwrap().put(key, Arc::clone(&p));
                 p
             }
         };
@@ -352,5 +380,89 @@ mod tests {
         assert!(matches!(e, NetworkEntry::Exact(_)));
         assert!(e.matches("[::1]:8080".parse().unwrap()));
         assert!(!e.matches("[::1]:9090".parse().unwrap()));
+    }
+
+    // Verify that the epoch ticker thread exits after FluxionHost is dropped.
+    // Previously the ticker ran forever (detached), causing thread accumulation
+    // when tests created multiple hosts.
+    #[test]
+    fn ticker_thread_stops_after_host_drop() {
+        let host = FluxionHost::new().expect("FluxionHost::new");
+        let weak = host.ticker_weak();
+
+        // Ticker should be alive while the host is alive.
+        assert!(weak.upgrade().is_some(), "ticker not running before drop");
+
+        drop(host);
+
+        // Give the ticker thread up to 500ms (5 ticks) to notice the shutdown
+        // flag and exit. The thread sleeps 100ms per iteration, so this is
+        // generous even under load.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        panic!("epoch ticker thread is still alive 500ms after FluxionHost drop");
+    }
+
+    // LRU mem_cache eviction: inserting more than MEM_CACHE_CAP entries must
+    // not panic and must keep the cache at exactly MEM_CACHE_CAP capacity.
+    #[test]
+    fn lru_mem_cache_evicts_at_capacity() {
+        use lru::LruCache;
+        use std::num::NonZeroUsize;
+
+        let cap = 4usize;
+        let mut cache: LruCache<String, u32> = LruCache::new(NonZeroUsize::new(cap).unwrap());
+
+        for i in 0u32..10 {
+            cache.put(format!("key-{i}"), i);
+        }
+
+        // Cache should never exceed its capacity.
+        assert_eq!(cache.len(), cap, "cache must be capped at {cap}");
+
+        // The 4 most recently inserted entries must be present.
+        for i in 6u32..10 {
+            assert!(
+                cache.contains(&format!("key-{i}")),
+                "key-{i} should be in cache"
+            );
+        }
+        // Older entries should have been evicted.
+        for i in 0u32..6 {
+            assert!(
+                !cache.contains(&format!("key-{i}")),
+                "key-{i} should be evicted"
+            );
+        }
+    }
+
+    // Confirm that creating and dropping multiple hosts does not accumulate
+    // threads indefinitely (the regression from issue #18).
+    #[test]
+    fn multiple_hosts_do_not_accumulate_tickers() {
+        let mut weaks = Vec::new();
+        for _ in 0..5 {
+            let host = FluxionHost::new().expect("FluxionHost::new");
+            weaks.push(host.ticker_weak());
+            drop(host);
+        }
+
+        // All tickers must stop within 500ms of the last drop.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if weaks.iter().all(|w| w.upgrade().is_none()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let still_alive = weaks.iter().filter(|w| w.upgrade().is_some()).count();
+        panic!("{still_alive}/5 ticker threads still alive 500ms after all hosts dropped");
     }
 }

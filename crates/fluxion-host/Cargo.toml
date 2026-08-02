@@ -11,6 +11,7 @@ tracing       = { workspace = true }
 wasmtime      = { workspace = true }
 wasmtime-wasi = { workspace = true }
 sha2          = { workspace = true }
+lru           = { workspace = true }
 fluxion-core  = { path = "../fluxion-core" }
 
 [dev-dependencies]
