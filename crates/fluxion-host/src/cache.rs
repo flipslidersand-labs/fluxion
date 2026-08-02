@@ -10,7 +10,7 @@ use wasmtime::{component::Component, Engine};
 /// - A wasmtime upgrade automatically invalidates all entries (new key → cache miss →
 ///   recompile), preventing UB from loading a stale artifact with `deserialize_file`.
 pub struct ComponentCache {
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
 }
 
 impl ComponentCache {
@@ -88,4 +88,86 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmtime::{Config, Engine};
+
+    fn test_engine() -> Engine {
+        let mut cfg = Config::new();
+        cfg.wasm_component_model(true);
+        Engine::new(&cfg).unwrap()
+    }
+
+    fn hello_wasm() -> Vec<u8> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../components/hello/target/wasm32-wasip1/debug/hello.wasm");
+        std::fs::read(&root).expect("hello.wasm not built — run `cargo build` in components/hello")
+    }
+
+    #[test]
+    fn cache_key_is_stable() {
+        let bytes = b"fake wasm";
+        let k1 = wasm_key(bytes);
+        let k2 = wasm_key(bytes);
+        assert_eq!(k1, k2);
+        assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
+    }
+
+    #[test]
+    fn different_bytes_give_different_keys() {
+        let k1 = wasm_key(b"wasm_a");
+        let k2 = wasm_key(b"wasm_b");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn miss_then_hit_roundtrip() {
+        let engine = test_engine();
+        let wasm = hello_wasm();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+
+        // Cold miss
+        assert!(cache.load(&engine, &wasm).is_none());
+
+        // Populate
+        let _c = cache.store(&engine, &wasm).unwrap();
+
+        // Warm hit
+        assert!(cache.load(&engine, &wasm).is_some());
+    }
+
+    #[test]
+    fn stale_artifact_is_evicted() {
+        let engine = test_engine();
+        let wasm = hello_wasm();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+
+        // Write garbage bytes at the artifact path.
+        let path = cache.artifact_path(&wasm);
+        std::fs::write(&path, b"not a valid cwasm artifact").unwrap();
+
+        // load() must evict the file and return None, not panic.
+        let result = cache.load(&engine, &wasm);
+        assert!(result.is_none());
+        assert!(!path.exists(), "stale artifact should be removed");
+    }
+
+    #[test]
+    fn artifact_path_contains_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+        let bytes = b"some wasm bytes";
+        let key = wasm_key(bytes);
+        let path = cache.artifact_path(bytes);
+        assert!(path.to_string_lossy().contains(&key));
+        assert!(path.extension().unwrap() == "cwasm");
+    }
 }
