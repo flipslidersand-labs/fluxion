@@ -167,6 +167,35 @@ mod tests {
         assert!(!path.exists(), "stale artifact should be removed");
     }
 
+    /// Verifies that a corrupted (or stale-wasmtime) .cwasm file is evicted and
+    /// causes load() to return None, not panic. This covers the upgrade scenario
+    /// where an artifact compiled by an older wasmtime version fails deserialization.
+    ///
+    /// Unlike `stale_artifact_is_evicted` (which needs a real compiled .wasm),
+    /// this test works with any key bytes — the eviction path is independent of
+    /// whether the source .wasm is valid.
+    #[test]
+    fn stale_artifact_evicted_without_real_wasm() {
+        let engine = test_engine();
+        let fake_wasm = b"synthetic key bytes - not real wasm";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+
+        // Plant a garbage artifact at the expected cache path.
+        let path = cache.artifact_path(fake_wasm);
+        std::fs::write(&path, b"\x00STALE").unwrap();
+        assert!(path.exists(), "artifact file should exist before load()");
+
+        let result = cache.load(&engine, fake_wasm);
+
+        assert!(
+            result.is_none(),
+            "stale artifact must yield None, not panic"
+        );
+        assert!(!path.exists(), "load() must delete the stale artifact");
+    }
+
     #[test]
     fn artifact_path_contains_hash() {
         let tmp = tempfile::tempdir().unwrap();
