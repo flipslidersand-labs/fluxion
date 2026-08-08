@@ -11,7 +11,7 @@ use fluxion_core::{
     store::RunStore,
     workflow::Workflow,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
 
 use crate::FluxionHost;
@@ -66,8 +66,11 @@ async fn run_inner(
         println!("Run ID: {run_id}");
     }
 
+    let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
+    let sem = Arc::new(Semaphore::new(permits));
+
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name);
-    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress)
+    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress, sem)
         .instrument(span)
         .await?;
     store.complete_run(&run_id, result.success)?;
@@ -103,8 +106,11 @@ async fn retry_inner(
         );
     }
 
+    let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
+    let sem = Arc::new(Semaphore::new(permits));
+
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name, retry = true);
-    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress)
+    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress, sem)
         .instrument(span)
         .await?;
     store.complete_run(&run_id, result.success)?;
@@ -119,6 +125,7 @@ async fn execute(
     run_id: &str,
     pre_succeeded: HashMap<String, JobStatus>,
     print_progress: bool,
+    sem: Arc<Semaphore>,
 ) -> Result<RunResult> {
     let dag = Dag::build(wf)?;
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
@@ -159,7 +166,7 @@ async fn execute(
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        launch(&job_id, wf, host.clone(), tx.clone());
+        launch(&job_id, wf, host.clone(), tx.clone(), sem.clone());
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
     }
@@ -173,7 +180,7 @@ async fn execute(
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            launch(job_id, wf, host.clone(), tx.clone());
+            launch(job_id, wf, host.clone(), tx.clone(), sem.clone());
             statuses.insert(job_id.clone(), JobStatus::Running);
             in_flight += 1;
         }
@@ -233,7 +240,7 @@ async fn execute(
                         print_running(dep, pad);
                     }
                     store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                    launch(dep, wf, host.clone(), tx.clone());
+                    launch(dep, wf, host.clone(), tx.clone(), sem.clone());
                     statuses.insert(dep.clone(), JobStatus::Running);
                     in_flight += 1;
                 }
@@ -282,6 +289,7 @@ fn launch(
     wf: &Workflow,
     host: Arc<FluxionHost>,
     tx: mpsc::UnboundedSender<JobEvent>,
+    sem: Arc<Semaphore>,
 ) {
     let job_id = job_id.to_string();
     let component = wf.jobs[&job_id].component.clone();
@@ -298,6 +306,7 @@ fn launch(
 
     tokio::spawn(
         async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let start = Instant::now();
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs),

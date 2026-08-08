@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 pub struct Workflow {
     pub name: String,
     pub jobs: IndexMap<String, JobDefinition>,
+    /// Maximum number of jobs that may execute concurrently. None = unbounded.
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

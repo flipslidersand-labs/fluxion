@@ -292,6 +292,9 @@ fn build_wasi_ctx(
 ) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stdout().inherit_stderr();
+    for (k, v) in env {
+        builder.env(k, v);
+    }
 
     for (k, v) in env {
         builder.env(k, v);
