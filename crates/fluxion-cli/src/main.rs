@@ -95,6 +95,12 @@ enum RunsCommands {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Delete runs older than N days
+    Prune {
+        /// Delete runs older than this many days (default: 30)
+        #[arg(long, default_value = "30")]
+        before: u64,
+    },
 }
 
 #[tokio::main]
@@ -175,6 +181,11 @@ async fn run(command: Commands) -> Result<()> {
                         println!("{:<28}  {:<20}  {}", r.id, r.workflow_name, r.status);
                     }
                 }
+            }
+            RunsCommands::Prune { before } => {
+                let store = RunStore::open()?;
+                let deleted = store.prune(before)?;
+                println!("Pruned {} run(s) older than {} days.", deleted, before);
             }
         },
 
