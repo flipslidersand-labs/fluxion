@@ -10,3 +10,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 rusqlite   = { workspace = true }
 indexmap   = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
