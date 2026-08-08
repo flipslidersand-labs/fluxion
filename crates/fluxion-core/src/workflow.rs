@@ -10,6 +10,9 @@ pub struct Workflow {
     /// Remote worker URLs for distributed execution (round-robin if job has no explicit worker).
     #[serde(default)]
     pub workers: Vec<String>,
+    /// Maximum number of jobs that may execute concurrently. None = unbounded.
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +27,9 @@ pub struct JobDefinition {
     /// Pin this job to a specific worker URL. Overrides round-robin assignment.
     #[serde(default)]
     pub worker: Option<String>,
+    /// Environment variables injected into the Wasm component via WASI.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

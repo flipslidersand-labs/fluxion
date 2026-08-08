@@ -4,6 +4,7 @@ mod telemetry;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fluxion_core::{
+    dag::Dag,
     store::RunStore,
     workflow::{PermissionSet, Workflow},
 };
@@ -31,6 +32,9 @@ enum Commands {
         /// Print per-job compile/instantiate/execute breakdown after the run
         #[arg(long)]
         metrics: bool,
+        /// Parse the workflow and show execution order without running anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -43,7 +47,12 @@ enum Commands {
     /// Show detailed status of a previous run
     Status { run_id: String },
     /// Show job timeline and failure reasons for a previous run
-    Logs { run_id: String },
+    Logs {
+        run_id: String,
+        /// Output structured JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show interface and capability requirements of a Wasm component
     Inspect {
         /// Path to the .wasm component file
@@ -73,6 +82,11 @@ enum Commands {
         #[arg(long, default_value = "")]
         input: String,
     },
+    /// Emit a Graphviz DOT graph of a workflow's job dependency DAG
+    Dot {
+        /// Path to the workflow YAML file
+        path: String,
+    },
     /// Start a remote worker HTTP server
     Worker {
         #[command(subcommand)]
@@ -98,8 +112,12 @@ enum ComponentCommands {
     Run {
         /// Path to the .wasm component file
         path: String,
-        #[arg(long, default_value = "")]
-        input: String,
+        /// Input string passed to the component (mutually exclusive with --input-file)
+        #[arg(long, conflicts_with = "input_file")]
+        input: Option<String>,
+        /// Read input from a file (mutually exclusive with --input)
+        #[arg(long, conflicts_with = "input")]
+        input_file: Option<PathBuf>,
     },
 }
 
@@ -109,6 +127,12 @@ enum RunsCommands {
     List {
         #[arg(long, default_value = "20")]
         limit: usize,
+    },
+    /// Delete runs older than N days
+    Prune {
+        /// Delete runs older than this many days (default: 30)
+        #[arg(long, default_value = "30")]
+        before: u64,
     },
 }
 
@@ -131,9 +155,13 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path, metrics } => {
+        Commands::Run { path, metrics, dry_run } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+            if dry_run {
+                cmd_dry_run(&wf)?;
+                return Ok(());
+            }
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
@@ -159,8 +187,8 @@ async fn run(command: Commands) -> Result<()> {
             cmd_status(&run_id)?;
         }
 
-        Commands::Logs { run_id } => {
-            cmd_logs(&run_id)?;
+        Commands::Logs { run_id, json } => {
+            cmd_logs(&run_id, json)?;
         }
 
         Commands::Inspect { path } => {
@@ -168,10 +196,11 @@ async fn run(command: Commands) -> Result<()> {
         }
 
         Commands::Component { action } => match action {
-            ComponentCommands::Run { path, input } => {
+            ComponentCommands::Run { path, input, input_file } => {
+                let input_bytes = resolve_input(input, input_file)?;
                 let host = FluxionHost::new()?;
                 let output = host
-                    .run_component(&path, input.into_bytes(), &PermissionSet::default())
+                    .run_component(&path, input_bytes, &PermissionSet::default())
                     .map_err(|e| anyhow::anyhow!("Failed to run '{}': {}", path, e))?;
                 println!("{}", String::from_utf8_lossy(&output));
             }
@@ -191,6 +220,11 @@ async fn run(command: Commands) -> Result<()> {
                     }
                 }
             }
+            RunsCommands::Prune { before } => {
+                let store = RunStore::open()?;
+                let deleted = store.prune(before)?;
+                println!("Pruned {} run(s) older than {} days.", deleted, before);
+            }
         },
 
         Commands::Bench {
@@ -200,6 +234,10 @@ async fn run(command: Commands) -> Result<()> {
             input,
         } => {
             cmd_bench(&path, runs, warmup, &input)?;
+        }
+
+        Commands::Dot { path } => {
+            cmd_dot(&path)?;
         }
 
         Commands::Worker { action } => match action {
@@ -214,6 +252,67 @@ async fn run(command: Commands) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── input resolution (#33 --input-file / #37 stdin) ──────────────────────────
+
+fn resolve_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<Vec<u8>> {
+    if let Some(s) = input {
+        return Ok(s.into_bytes());
+    }
+    if let Some(path) = input_file {
+        return std::fs::read(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", path.display(), e));
+    }
+    // Neither flag given: read stdin if it is a pipe/redirect, otherwise return empty.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+        return Ok(buf);
+    }
+    Ok(vec![])
+}
+
+// ── fluxion run --dry-run (#29) ───────────────────────────────────────────────
+
+fn cmd_dry_run(wf: &Workflow) -> Result<()> {
+    let dag = Dag::build(wf)?;
+    println!("Workflow: {} ({} jobs)\n", wf.name, dag.topo_order.len());
+    println!("Execution order:");
+    for (i, job_id) in dag.topo_order.iter().enumerate() {
+        let deps = &dag.deps[job_id];
+        if deps.is_empty() {
+            println!("  {}. {}  (no deps)", i + 1, job_id);
+        } else {
+            println!("  {}. {}  (depends: {})", i + 1, job_id, deps.join(", "));
+        }
+    }
+    Ok(())
+}
+
+// ── fluxion dot ───────────────────────────────────────────────────────────────
+
+fn cmd_dot(path: &str) -> Result<()> {
+    let wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+    let dag = Dag::build(&wf)?;
+
+    println!("digraph {} {{", dot_id(&wf.name));
+    for job_id in &dag.topo_order {
+        println!("  {};", dot_id(job_id));
+    }
+    for (job_id, deps) in &dag.deps {
+        for dep in deps {
+            println!("  {} -> {};", dot_id(dep), dot_id(job_id));
+        }
+    }
+    println!("}}");
+    Ok(())
+}
+
+fn dot_id(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
 }
 
 // ── fluxion run --metrics ─────────────────────────────────────────────────────
@@ -395,10 +494,32 @@ fn cmd_status(run_id: &str) -> Result<()> {
 
 // ── fluxion logs ──────────────────────────────────────────────────────────────
 
-fn cmd_logs(run_id: &str) -> Result<()> {
+fn cmd_logs(run_id: &str, json: bool) -> Result<()> {
     let store = RunStore::open()?;
     let run = store.get_run(run_id)?;
     let jobs = store.get_run_jobs(run_id)?;
+
+    if json {
+        use serde_json::json;
+        let out = json!({
+            "run": {
+                "id": run.id,
+                "workflow_name": run.workflow_name,
+                "workflow_path": run.workflow_path,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "status": run.status,
+            },
+            "jobs": jobs.iter().map(|j| json!({
+                "job_id": j.job_id,
+                "status": j.status,
+                "elapsed_ms": j.elapsed_ms,
+                "reason": j.reason,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     let pad = jobs.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
 

@@ -12,7 +12,7 @@ use fluxion_core::{
     store::RunStore,
     workflow::Workflow,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
 
 use crate::{FluxionHost, remote};
@@ -67,8 +67,11 @@ async fn run_inner(
         println!("Run ID: {run_id}");
     }
 
+    let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
+    let sem = Arc::new(Semaphore::new(permits));
+
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name);
-    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress)
+    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress, sem)
         .instrument(span)
         .await?;
     store.complete_run(&run_id, result.success)?;
@@ -104,8 +107,11 @@ async fn retry_inner(
         );
     }
 
+    let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
+    let sem = Arc::new(Semaphore::new(permits));
+
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name, retry = true);
-    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress)
+    let result = execute(wf, host, &store, &run_id, pre_succeeded, print_progress, sem)
         .instrument(span)
         .await?;
     store.complete_run(&run_id, result.success)?;
@@ -120,6 +126,7 @@ async fn execute(
     run_id: &str,
     pre_succeeded: HashMap<String, JobStatus>,
     print_progress: bool,
+    sem: Arc<Semaphore>,
 ) -> Result<RunResult> {
     let dag = Dag::build(wf)?;
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
@@ -162,7 +169,7 @@ async fn execute(
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
         let worker_url = resolve_worker(&job_id, wf, &rr);
-        launch(&job_id, wf, host.clone(), tx.clone(), worker_url);
+        launch(&job_id, wf, host.clone(), tx.clone(), worker_url, sem.clone());
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
     }
@@ -177,7 +184,7 @@ async fn execute(
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
             let worker_url = resolve_worker(job_id, wf, &rr);
-            launch(job_id, wf, host.clone(), tx.clone(), worker_url);
+            launch(job_id, wf, host.clone(), tx.clone(), worker_url, sem.clone());
             statuses.insert(job_id.clone(), JobStatus::Running);
             in_flight += 1;
         }
@@ -238,7 +245,7 @@ async fn execute(
                     }
                     store.upsert_job(run_id, dep, &JobStatus::Running)?;
                     let worker_url = resolve_worker(dep, wf, &rr);
-                    launch(dep, wf, host.clone(), tx.clone(), worker_url);
+                    launch(dep, wf, host.clone(), tx.clone(), worker_url, sem.clone());
                     statuses.insert(dep.clone(), JobStatus::Running);
                     in_flight += 1;
                 }
@@ -301,6 +308,7 @@ fn launch(
     host: Arc<FluxionHost>,
     tx: mpsc::UnboundedSender<JobEvent>,
     worker_url: Option<String>,
+    sem: Arc<Semaphore>,
 ) {
     let job_id = job_id.to_string();
     let component = wf.jobs[&job_id].component.clone();
@@ -310,13 +318,14 @@ fn launch(
         .unwrap_or_default()
         .into_bytes();
     let perms = wf.jobs[&job_id].permissions.clone();
-    let env = std::collections::HashMap::<String, String>::new();
+    let env = wf.jobs[&job_id].env.clone();
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
 
     tokio::spawn(
         async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let start = Instant::now();
 
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> =
@@ -405,6 +414,16 @@ fn timestamp() -> String {
 fn print_running(job_id: &str, pad: usize) {
     println!("[{}] {:<pad$}  RUNNING", timestamp(), job_id, pad = pad);
 }
+
+// ── #31 max_parallel ─────────────────────────────────────────────────────────
+// Tests live here once Workflow gains `max_parallel: Option<usize>`.
+//
+// Verification approach (to be added in the PR):
+//   1. Add `max_parallel: Option<usize>` to Workflow struct.
+//   2. Wrap execute()'s job-launch in Arc<Semaphore> acquired from max_parallel.
+//   3. In tests: use an AtomicUsize to track peak concurrency and assert ≤ N.
+//
+// CLI-level smoke test is in crates/fluxion-cli/tests/cli_tests.rs (#31).
 
 fn print_result(event: &JobEvent, pad: usize) {
     match &event.status {
