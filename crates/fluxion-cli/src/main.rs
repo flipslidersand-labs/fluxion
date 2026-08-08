@@ -4,6 +4,7 @@ mod telemetry;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fluxion_core::{
+    dag::Dag,
     store::RunStore,
     workflow::{PermissionSet, Workflow},
 };
@@ -31,6 +32,9 @@ enum Commands {
         /// Print per-job compile/instantiate/execute breakdown after the run
         #[arg(long)]
         metrics: bool,
+        /// Parse the workflow and show execution order without running anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -72,6 +76,11 @@ enum Commands {
         /// Input payload passed to the component
         #[arg(long, default_value = "")]
         input: String,
+    },
+    /// Emit a Graphviz DOT graph of a workflow's job dependency DAG
+    Dot {
+        /// Path to the workflow YAML file
+        path: String,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -120,9 +129,13 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path, metrics } => {
+        Commands::Run { path, metrics, dry_run } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+            if dry_run {
+                cmd_dry_run(&wf)?;
+                return Ok(());
+            }
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
@@ -192,6 +205,10 @@ async fn run(command: Commands) -> Result<()> {
             cmd_bench(&path, runs, warmup, &input)?;
         }
 
+        Commands::Dot { path } => {
+            cmd_dot(&path)?;
+        }
+
         Commands::McpServe => {
             mcp::serve().await?;
         }
@@ -218,6 +235,47 @@ fn resolve_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<V
         return Ok(buf);
     }
     Ok(vec![])
+}
+
+// ── fluxion run --dry-run (#29) ───────────────────────────────────────────────
+
+fn cmd_dry_run(wf: &Workflow) -> Result<()> {
+    let dag = Dag::build(wf)?;
+    println!("Workflow: {} ({} jobs)\n", wf.name, dag.topo_order.len());
+    println!("Execution order:");
+    for (i, job_id) in dag.topo_order.iter().enumerate() {
+        let deps = &dag.deps[job_id];
+        if deps.is_empty() {
+            println!("  {}. {}  (no deps)", i + 1, job_id);
+        } else {
+            println!("  {}. {}  (depends: {})", i + 1, job_id, deps.join(", "));
+        }
+    }
+    Ok(())
+}
+
+// ── fluxion dot ───────────────────────────────────────────────────────────────
+
+fn cmd_dot(path: &str) -> Result<()> {
+    let wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+    let dag = Dag::build(&wf)?;
+
+    println!("digraph {} {{", dot_id(&wf.name));
+    for job_id in &dag.topo_order {
+        println!("  {};", dot_id(job_id));
+    }
+    for (job_id, deps) in &dag.deps {
+        for dep in deps {
+            println!("  {} -> {};", dot_id(dep), dot_id(job_id));
+        }
+    }
+    println!("}}");
+    Ok(())
+}
+
+fn dot_id(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
 }
 
 // ── fluxion run --metrics ─────────────────────────────────────────────────────
