@@ -77,6 +77,11 @@ enum Commands {
         #[arg(long, default_value = "")]
         input: String,
     },
+    /// Emit a Graphviz DOT graph of a workflow's job dependency DAG
+    Dot {
+        /// Path to the workflow YAML file
+        path: String,
+    },
     /// Start the MCP server (stdio transport)
     McpServe,
 }
@@ -195,6 +200,10 @@ async fn run(command: Commands) -> Result<()> {
             cmd_bench(&path, runs, warmup, &input)?;
         }
 
+        Commands::Dot { path } => {
+            cmd_dot(&path)?;
+        }
+
         Commands::McpServe => {
             mcp::serve().await?;
         }
@@ -218,6 +227,30 @@ fn cmd_dry_run(wf: &Workflow) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── fluxion dot ───────────────────────────────────────────────────────────────
+
+fn cmd_dot(path: &str) -> Result<()> {
+    let wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+    let dag = Dag::build(&wf)?;
+
+    println!("digraph {} {{", dot_id(&wf.name));
+    for job_id in &dag.topo_order {
+        println!("  {};", dot_id(job_id));
+    }
+    for (job_id, deps) in &dag.deps {
+        for dep in deps {
+            println!("  {} -> {};", dot_id(dep), dot_id(job_id));
+        }
+    }
+    println!("}}");
+    Ok(())
+}
+
+fn dot_id(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
 }
 
 // ── fluxion run --metrics ─────────────────────────────────────────────────────

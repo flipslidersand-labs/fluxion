@@ -229,7 +229,7 @@ async fn sandbox_network_cap() {
     let probe = wasm2("network-probe");
 
     // Remove connect-allowed and its dependency from the workflow.
-    wf.jobs.remove("connect-allowed");
+    wf.jobs.shift_remove("connect-allowed");
     let denied_job = wf
         .jobs
         .get_mut("connect-denied")
