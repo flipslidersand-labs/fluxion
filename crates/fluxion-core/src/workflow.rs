@@ -18,6 +18,9 @@ pub struct JobDefinition {
     pub input: Option<String>,
     #[serde(default)]
     pub permissions: PermissionSet,
+    /// Environment variables injected into the Wasm component via WASI.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

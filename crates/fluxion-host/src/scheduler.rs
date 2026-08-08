@@ -291,6 +291,7 @@ fn launch(
         .unwrap_or_default()
         .into_bytes();
     let perms = wf.jobs[&job_id].permissions.clone();
+    let env = wf.jobs[&job_id].env.clone();
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -301,7 +302,7 @@ fn launch(
             let result = tokio::time::timeout(
                 Duration::from_secs(timeout_secs),
                 tokio::task::spawn_blocking(move || {
-                    host.run_component_measured(&component, input, &perms)
+                    host.run_component_measured(&component, input, &perms, &env)
                 }),
             )
             .await;
