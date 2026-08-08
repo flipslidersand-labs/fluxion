@@ -21,3 +21,8 @@ opentelemetry-stdout  = { workspace = true }
 fluxion-core          = { path = "../fluxion-core" }
 fluxion-host          = { path = "../fluxion-host" }
 wasmtime              = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile   = { workspace = true }
