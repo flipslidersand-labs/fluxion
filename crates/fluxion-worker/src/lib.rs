@@ -1,13 +1,13 @@
 use anyhow::Result;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get, routing::post};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use axum::{extract::State, http::StatusCode, routing::get, routing::post, Json, Router};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxion_core::workflow::PermissionSet;
 use fluxion_host::FluxionHost;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
-use std::io::Write;
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -46,23 +46,37 @@ async fn handle_run(
     let component_bytes = B64.decode(&req.component).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: format!("invalid component base64: {e}") }),
+            Json(ErrorResponse {
+                error: format!("invalid component base64: {e}"),
+            }),
         )
     })?;
 
     let input = B64.decode(&req.input).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: format!("invalid input base64: {e}") }),
+            Json(ErrorResponse {
+                error: format!("invalid input base64: {e}"),
+            }),
         )
     })?;
 
     // Write the component bytes to a temp file so FluxionHost can read them.
     let mut tmp = NamedTempFile::new().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
     })?;
     tmp.write_all(&component_bytes).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
     })?;
     let tmp_path = tmp.path().to_path_buf();
 
@@ -74,10 +88,20 @@ async fn handle_run(
     })
     .await
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
     })?
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
     })?;
 
     let (output, metrics) = result;
