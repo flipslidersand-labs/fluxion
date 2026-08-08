@@ -47,7 +47,12 @@ enum Commands {
     /// Show detailed status of a previous run
     Status { run_id: String },
     /// Show job timeline and failure reasons for a previous run
-    Logs { run_id: String },
+    Logs {
+        run_id: String,
+        /// Output structured JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show interface and capability requirements of a Wasm component
     Inspect {
         /// Path to the .wasm component file
@@ -167,8 +172,8 @@ async fn run(command: Commands) -> Result<()> {
             cmd_status(&run_id)?;
         }
 
-        Commands::Logs { run_id } => {
-            cmd_logs(&run_id)?;
+        Commands::Logs { run_id, json } => {
+            cmd_logs(&run_id, json)?;
         }
 
         Commands::Inspect { path } => {
@@ -468,10 +473,32 @@ fn cmd_status(run_id: &str) -> Result<()> {
 
 // ── fluxion logs ──────────────────────────────────────────────────────────────
 
-fn cmd_logs(run_id: &str) -> Result<()> {
+fn cmd_logs(run_id: &str, json: bool) -> Result<()> {
     let store = RunStore::open()?;
     let run = store.get_run(run_id)?;
     let jobs = store.get_run_jobs(run_id)?;
+
+    if json {
+        use serde_json::json;
+        let out = json!({
+            "run": {
+                "id": run.id,
+                "workflow_name": run.workflow_name,
+                "workflow_path": run.workflow_path,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "status": run.status,
+            },
+            "jobs": jobs.iter().map(|j| json!({
+                "job_id": j.job_id,
+                "status": j.status,
+                "elapsed_ms": j.elapsed_ms,
+                "reason": j.reason,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     let pad = jobs.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
 

@@ -231,6 +231,7 @@ pub struct RunSummary {
     pub status: String,
 }
 
+#[derive(serde::Serialize)]
 pub struct RunDetail {
     pub id: String,
     pub workflow_name: String,
@@ -240,6 +241,7 @@ pub struct RunDetail {
     pub status: String,
 }
 
+#[derive(serde::Serialize)]
 pub struct JobDetail {
     pub job_id: String,
     pub status: String,
