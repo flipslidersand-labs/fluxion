@@ -296,6 +296,10 @@ fn build_wasi_ctx(
         builder.env(k, v);
     }
 
+    for (k, v) in env {
+        builder.env(k, v);
+    }
+
     // Filesystem: preopen read dirs
     for path in &perms.filesystem.read {
         if path.exists() {

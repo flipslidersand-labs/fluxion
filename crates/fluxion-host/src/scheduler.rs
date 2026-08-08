@@ -402,6 +402,16 @@ fn print_running(job_id: &str, pad: usize) {
     println!("[{}] {:<pad$}  RUNNING", timestamp(), job_id, pad = pad);
 }
 
+// ── #31 max_parallel ─────────────────────────────────────────────────────────
+// Tests live here once Workflow gains `max_parallel: Option<usize>`.
+//
+// Verification approach (to be added in the PR):
+//   1. Add `max_parallel: Option<usize>` to Workflow struct.
+//   2. Wrap execute()'s job-launch in Arc<Semaphore> acquired from max_parallel.
+//   3. In tests: use an AtomicUsize to track peak concurrency and assert ≤ N.
+//
+// CLI-level smoke test is in crates/fluxion-cli/tests/cli_tests.rs (#31).
+
 fn print_result(event: &JobEvent, pad: usize) {
     match &event.status {
         JobStatus::Succeeded { elapsed } => println!(
