@@ -254,6 +254,72 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn open_tmp() -> RunStore {
+        // Each test gets its own in-file DB via tempfile (rusqlite needs a real file for bundled).
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        // Keep tempfile alive for the duration of the test by leaking it intentionally.
+        // tempfile deletes on drop; we need the file to outlive the connection.
+        std::mem::forget(f);
+        RunStore { conn }
+    }
+
+    // ── #30 prune — before: method does not exist → compile error
+    //               after:  old rows deleted, recent rows kept ───────────────
+
+    // ── #30 prune — before: prune() method does not exist
+    //               after:  old rows deleted, recent rows kept ───────────────
+    //
+    // These tests call store.prune() which is added in the #30 PR.
+    // Enable (remove todo!/panic) once the method is implemented.
+
+    #[test]
+    #[ignore = "feature not yet implemented (#30)"]
+    fn prune_deletes_old_runs_and_keeps_recent() {
+        let store = open_tmp();
+        let old_id = "run-old";
+        let new_id = "run-new";
+
+        let old_ts = now_secs() - 31 * 86400;
+        store.conn.execute(
+            "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+             VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
+            params![old_id, old_ts],
+        ).unwrap();
+        store.create_run(new_id, "wf", std::path::Path::new("wf.yaml")).unwrap();
+
+        // -- replace todo! with the real call once #30 is implemented --
+        todo!("store.prune(30) → assert deleted==1, list_runs returns only new_id");
+    }
+
+    #[test]
+    #[ignore = "feature not yet implemented (#30)"]
+    fn prune_also_deletes_orphaned_job_states() {
+        let store = open_tmp();
+        let old_id = "run-orphan";
+        let old_ts = now_secs() - 40 * 86400;
+
+        store.conn.execute(
+            "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+             VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
+            params![old_id, old_ts],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO job_states (run_id, job_id, status) VALUES (?1, 'fetch', 'succeeded')",
+            params![old_id],
+        ).unwrap();
+
+        // -- replace todo! with the real call once #30 is implemented --
+        todo!("store.prune(30) → assert job_states count for old_id == 0");
+    }
+}
+
 fn serialize_status(s: &JobStatus) -> (&'static str, Option<u64>, Option<String>) {
     match s {
         JobStatus::Succeeded { elapsed } => ("succeeded", Some(elapsed.as_millis() as u64), None),
