@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 pub struct Workflow {
     pub name: String,
     pub jobs: IndexMap<String, JobDefinition>,
+    /// Remote worker URLs for distributed execution (round-robin if job has no explicit worker).
+    #[serde(default)]
+    pub workers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +21,9 @@ pub struct JobDefinition {
     pub input: Option<String>,
     #[serde(default)]
     pub permissions: PermissionSet,
+    /// Pin this job to a specific worker URL. Overrides round-robin assignment.
+    #[serde(default)]
+    pub worker: Option<String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

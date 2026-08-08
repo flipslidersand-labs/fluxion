@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod remote;
 pub mod scheduler;
 
 use anyhow::{Context, Result};
@@ -124,7 +125,9 @@ impl FluxionHost {
         input: Vec<u8>,
         perms: &PermissionSet,
     ) -> Result<Vec<u8>> {
-        let (output, _) = self.run_component_measured(wasm_path, input, perms)?;
+        let (output, _) = self.run_component_measured(
+            wasm_path, input, perms, &std::collections::HashMap::new(),
+        )?;
         Ok(output)
     }
 
@@ -134,8 +137,9 @@ impl FluxionHost {
         wasm_path: impl AsRef<Path>,
         input: Vec<u8>,
         perms: &PermissionSet,
+        env: &std::collections::HashMap<String, String>,
     ) -> Result<(Vec<u8>, JobMetrics)> {
-        let ctx = build_wasi_ctx(perms)?;
+        let ctx = build_wasi_ctx(perms, env)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
             .build();
@@ -283,9 +287,15 @@ fn parse_network_entry(s: &str) -> Option<NetworkEntry> {
     None
 }
 
-fn build_wasi_ctx(perms: &PermissionSet) -> Result<WasiCtx> {
+fn build_wasi_ctx(
+    perms: &PermissionSet,
+    env: &std::collections::HashMap<String, String>,
+) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stdout().inherit_stderr();
+    for (k, v) in env {
+        builder.env(k, v);
+    }
 
     // Filesystem: preopen read dirs
     for path in &perms.filesystem.read {

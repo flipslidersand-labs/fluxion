@@ -12,6 +12,9 @@ wasmtime      = { workspace = true }
 wasmtime-wasi = { workspace = true }
 sha2          = { workspace = true }
 lru           = { workspace = true }
+reqwest       = { workspace = true }
+base64        = { workspace = true }
+serde_json    = { workspace = true }
 fluxion-core  = { path = "../fluxion-core" }
 
 [dev-dependencies]

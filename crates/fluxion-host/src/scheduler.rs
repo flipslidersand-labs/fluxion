@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,7 +15,7 @@ use fluxion_core::{
 use tokio::sync::mpsc;
 use tracing::{Instrument, info_span};
 
-use crate::FluxionHost;
+use crate::{FluxionHost, remote};
 
 /// Run a workflow from scratch, printing progress to stdout.
 pub async fn run(wf: &Workflow, workflow_path: &Path, host: Arc<FluxionHost>) -> Result<RunResult> {
@@ -149,6 +150,7 @@ async fn execute(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<JobEvent>();
+    let rr = Arc::new(AtomicUsize::new(0));
 
     let mut in_flight = 0usize;
     for job_id in dag.roots() {
@@ -159,7 +161,8 @@ async fn execute(
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        launch(&job_id, wf, host.clone(), tx.clone());
+        let worker_url = resolve_worker(&job_id, wf, &rr);
+        launch(&job_id, wf, host.clone(), tx.clone(), worker_url);
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
     }
@@ -173,7 +176,8 @@ async fn execute(
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            launch(job_id, wf, host.clone(), tx.clone());
+            let worker_url = resolve_worker(job_id, wf, &rr);
+            launch(job_id, wf, host.clone(), tx.clone(), worker_url);
             statuses.insert(job_id.clone(), JobStatus::Running);
             in_flight += 1;
         }
@@ -233,7 +237,8 @@ async fn execute(
                         print_running(dep, pad);
                     }
                     store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                    launch(dep, wf, host.clone(), tx.clone());
+                    let worker_url = resolve_worker(dep, wf, &rr);
+                    launch(dep, wf, host.clone(), tx.clone(), worker_url);
                     statuses.insert(dep.clone(), JobStatus::Running);
                     in_flight += 1;
                 }
@@ -277,11 +282,25 @@ struct JobEvent {
     execute_us: u64,
 }
 
+/// Resolve which worker URL to use for a job.
+/// Priority: job.worker → round-robin from wf.workers → None (local).
+fn resolve_worker(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Option<String> {
+    if let Some(url) = &wf.jobs[job_id].worker {
+        return Some(url.clone());
+    }
+    if wf.workers.is_empty() {
+        return None;
+    }
+    let idx = rr.fetch_add(1, Ordering::Relaxed) % wf.workers.len();
+    Some(wf.workers[idx].clone())
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
     host: Arc<FluxionHost>,
     tx: mpsc::UnboundedSender<JobEvent>,
+    worker_url: Option<String>,
 ) {
     let job_id = job_id.to_string();
     let component = wf.jobs[&job_id].component.clone();
@@ -291,6 +310,7 @@ fn launch(
         .unwrap_or_default()
         .into_bytes();
     let perms = wf.jobs[&job_id].permissions.clone();
+    let env = std::collections::HashMap::<String, String>::new();
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -298,45 +318,38 @@ fn launch(
     tokio::spawn(
         async move {
             let start = Instant::now();
-            let result = tokio::time::timeout(
-                Duration::from_secs(timeout_secs),
-                tokio::task::spawn_blocking(move || {
-                    host.run_component_measured(&component, input, &perms)
-                }),
-            )
-            .await;
+
+            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> =
+                if let Some(ref url) = worker_url {
+                    remote::run_remote(url, &component, input, &perms, &env).await
+                } else {
+                    let c = component.clone();
+                    let p = perms.clone();
+                    let e = env.clone();
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            host.run_component_measured(&c, input, &p, &e)
+                        }),
+                    )
+                    .await
+                    {
+                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                        Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
+                        Ok(Ok(r)) => r,
+                    }
+                };
 
             let elapsed = start.elapsed();
-            let (status, compile_us, instantiate_us, execute_us) = match result {
-                Err(_) => (
-                    JobStatus::Failed {
-                        elapsed,
-                        reason: format!("Timeout after {}s", timeout_secs),
-                    },
-                    0,
-                    0,
-                    0,
-                ),
-                Ok(Ok(Ok((_, m)))) => (
+            let (status, compile_us, instantiate_us, execute_us) = match run_result {
+                Ok((_, m)) => (
                     JobStatus::Succeeded { elapsed },
                     m.compile.as_micros() as u64,
                     m.instantiate.as_micros() as u64,
                     m.execute.as_micros() as u64,
                 ),
-                Ok(Ok(Err(e))) => (
-                    JobStatus::Failed {
-                        elapsed,
-                        reason: e.to_string(),
-                    },
-                    0,
-                    0,
-                    0,
-                ),
-                Ok(Err(e)) => (
-                    JobStatus::Failed {
-                        elapsed,
-                        reason: e.to_string(),
-                    },
+                Err(e) => (
+                    JobStatus::Failed { elapsed, reason: e.to_string() },
                     0,
                     0,
                     0,
@@ -347,6 +360,7 @@ fn launch(
                 status = status.label(),
                 elapsed_ms = elapsed.as_millis() as u64,
                 compile_us,
+                worker = worker_url.as_deref().unwrap_or("local"),
                 "job finished"
             );
 
