@@ -185,6 +185,24 @@ impl RunStore {
         Ok(jobs)
     }
 
+    /// Delete runs older than `before_days` days and their job records.
+    /// Returns the number of runs deleted.
+    pub fn prune(&self, before_days: u64) -> Result<usize> {
+        let cutoff = now_secs().saturating_sub(before_days * 86400);
+        // Delete orphaned job_states first (no FK cascade in schema).
+        self.conn.execute(
+            "DELETE FROM job_states WHERE run_id IN (
+                SELECT id FROM runs WHERE started_at < ?1
+             )",
+            params![cutoff],
+        )?;
+        let deleted = self.conn.execute(
+            "DELETE FROM runs WHERE started_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(deleted)
+    }
+
     /// List recent runs, newest first.
     pub fn list_runs(&self, limit: usize) -> Result<Vec<RunSummary>> {
         let mut stmt = self.conn.prepare(
