@@ -196,10 +196,9 @@ impl RunStore {
              )",
             params![cutoff],
         )?;
-        let deleted = self.conn.execute(
-            "DELETE FROM runs WHERE started_at < ?1",
-            params![cutoff],
-        )?;
+        let deleted = self
+            .conn
+            .execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])?;
         Ok(deleted)
     }
 
@@ -289,12 +288,17 @@ mod tests {
         let new_id = "run-new";
 
         let old_ts = now_secs() - 31 * 86400;
-        store.conn.execute(
-            "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
              VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
-            params![old_id, old_ts],
-        ).unwrap();
-        store.create_run(new_id, "wf", std::path::Path::new("wf.yaml")).unwrap();
+                params![old_id, old_ts],
+            )
+            .unwrap();
+        store
+            .create_run(new_id, "wf", std::path::Path::new("wf.yaml"))
+            .unwrap();
 
         // -- replace todo! with the real call once #30 is implemented --
         todo!("store.prune(30) → assert deleted==1, list_runs returns only new_id");
@@ -307,15 +311,21 @@ mod tests {
         let old_id = "run-orphan";
         let old_ts = now_secs() - 40 * 86400;
 
-        store.conn.execute(
-            "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
              VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
-            params![old_id, old_ts],
-        ).unwrap();
-        store.conn.execute(
-            "INSERT INTO job_states (run_id, job_id, status) VALUES (?1, 'fetch', 'succeeded')",
-            params![old_id],
-        ).unwrap();
+                params![old_id, old_ts],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO job_states (run_id, job_id, status) VALUES (?1, 'fetch', 'succeeded')",
+                params![old_id],
+            )
+            .unwrap();
 
         // -- replace todo! with the real call once #30 is implemented --
         todo!("store.prune(30) → assert job_states count for old_id == 0");

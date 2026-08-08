@@ -126,7 +126,10 @@ impl FluxionHost {
         perms: &PermissionSet,
     ) -> Result<Vec<u8>> {
         let (output, _) = self.run_component_measured(
-            wasm_path, input, perms, &std::collections::HashMap::new(),
+            wasm_path,
+            input,
+            perms,
+            &std::collections::HashMap::new(),
         )?;
         Ok(output)
     }

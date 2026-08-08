@@ -155,7 +155,11 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path, metrics, dry_run } => {
+        Commands::Run {
+            path,
+            metrics,
+            dry_run,
+        } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
             if dry_run {
@@ -196,7 +200,11 @@ async fn run(command: Commands) -> Result<()> {
         }
 
         Commands::Component { action } => match action {
-            ComponentCommands::Run { path, input, input_file } => {
+            ComponentCommands::Run {
+                path,
+                input,
+                input_file,
+            } => {
                 let input_bytes = resolve_input(input, input_file)?;
                 let host = FluxionHost::new()?;
                 let output = host

@@ -1,11 +1,42 @@
-use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use fluxion_core::workflow::PermissionSet;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
 use crate::JobMetrics;
+
+/// Failure modes when dispatching to a remote worker.
+///
+/// `Unreachable` means the worker could not be contacted (connection refused,
+/// DNS failure, request timeout) — the job should be retried on another worker.
+/// `Execution` means the worker was reached but the job itself failed (a 5xx
+/// carrying the guest's error, or a malformed response) — retrying elsewhere
+/// would just reproduce the same component bug, so we do NOT fail over.
+#[derive(Debug)]
+pub enum RemoteError {
+    Unreachable(anyhow::Error),
+    Execution(anyhow::Error),
+}
+
+impl RemoteError {
+    /// Whether this failure should trigger failover to another worker.
+    pub fn is_failover(&self) -> bool {
+        matches!(self, RemoteError::Unreachable(_))
+    }
+}
+
+impl fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoteError::Unreachable(e) => write!(f, "unreachable: {e}"),
+            RemoteError::Execution(e) => write!(f, "execution failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RemoteError {}
 
 /// Dispatch a Wasm job to a remote worker via HTTP POST /run.
 pub async fn run_remote(
@@ -14,8 +45,11 @@ pub async fn run_remote(
     input: Vec<u8>,
     perms: &PermissionSet,
     env: &HashMap<String, String>,
-) -> Result<(Vec<u8>, JobMetrics)> {
-    let wasm_bytes = std::fs::read(wasm_path.as_ref())?;
+) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
+    // Reading the local .wasm file is an orchestrator-side error, not a worker
+    // fault — surface it as Execution so we don't pointlessly try every worker.
+    let wasm_bytes =
+        std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
 
     let body = serde_json::json!({
         "component": B64.encode(&wasm_bytes),
@@ -26,24 +60,39 @@ pub async fn run_remote(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(perms.limits.timeout_secs + 10))
-        .build()?;
+        .build()
+        .map_err(|e| RemoteError::Execution(e.into()))?;
 
     let url = format!("{}/run", worker_url.trim_end_matches('/'));
-    let resp = client.post(&url).json(&body).send().await?;
+
+    // A send() error is a transport failure (refused/timeout/DNS) → failover.
+    let resp =
+        client.post(&url).json(&body).send().await.map_err(|e| {
+            RemoteError::Unreachable(anyhow::anyhow!("worker {}: {}", worker_url, e))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("worker {} returned {}: {}", worker_url, status, text);
+        // The worker answered — this is the guest's failure, not the worker's.
+        return Err(RemoteError::Execution(anyhow::anyhow!(
+            "worker {} returned {}: {}",
+            worker_url,
+            status,
+            text
+        )));
     }
 
-    let json: serde_json::Value = resp.json().await?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| RemoteError::Execution(e.into()))?;
 
-    let output = B64.decode(
-        json["output"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing output field in worker response"))?,
-    )?;
+    let output = B64
+        .decode(json["output"].as_str().ok_or_else(|| {
+            RemoteError::Execution(anyhow::anyhow!("missing output field in worker response"))
+        })?)
+        .map_err(|e| RemoteError::Execution(e.into()))?;
 
     let metrics = JobMetrics {
         compile: Duration::from_millis(json["compile_ms"].as_u64().unwrap_or(0)),
