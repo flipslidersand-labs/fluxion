@@ -3,6 +3,7 @@ members = [
     "crates/fluxion-cli",
     "crates/fluxion-core",
     "crates/fluxion-host",
+    "crates/fluxion-worker",
 ]
 exclude = ["components/hello", "components/file-reader", "components/network-probe", "components/pipeline-stage", "components/spin", "components/alloc-bomb"]
 resolver = "2"
@@ -26,6 +27,9 @@ wasmtime-wasi = "28"
 cap-std       = "3"
 sha2          = "0.10"
 lru           = "0.12"
+axum          = "0.7"
+reqwest       = { version = "0.12", features = ["json"] }
+base64        = "0.22"
 assert_cmd    = "2"
 predicates    = "3"
 tempfile      = "3"

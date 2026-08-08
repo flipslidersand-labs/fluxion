@@ -87,8 +87,23 @@ enum Commands {
         /// Path to the workflow YAML file
         path: String,
     },
+    /// Start a remote worker HTTP server
+    Worker {
+        #[command(subcommand)]
+        action: WorkerCommands,
+    },
     /// Start the MCP server (stdio transport)
     McpServe,
+}
+
+#[derive(Subcommand)]
+enum WorkerCommands {
+    /// Listen for remote job dispatch requests
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "7777")]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,6 +239,12 @@ async fn run(command: Commands) -> Result<()> {
         Commands::Dot { path } => {
             cmd_dot(&path)?;
         }
+
+        Commands::Worker { action } => match action {
+            WorkerCommands::Serve { port } => {
+                fluxion_worker::serve(port).await?;
+            }
+        },
 
         Commands::McpServe => {
             mcp::serve().await?;
