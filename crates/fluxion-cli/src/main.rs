@@ -32,6 +32,9 @@ enum Commands {
         /// Print per-job compile/instantiate/execute breakdown after the run
         #[arg(long)]
         metrics: bool,
+        /// Parse the workflow and show execution order without running anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -122,9 +125,13 @@ async fn main() -> Result<()> {
 
 async fn run(command: Commands) -> Result<()> {
     match command {
-        Commands::Run { path, metrics } => {
+        Commands::Run { path, metrics, dry_run } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+            if dry_run {
+                cmd_dry_run(&wf)?;
+                return Ok(());
+            }
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
@@ -202,6 +209,23 @@ async fn run(command: Commands) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── fluxion run --dry-run (#29) ───────────────────────────────────────────────
+
+fn cmd_dry_run(wf: &Workflow) -> Result<()> {
+    let dag = Dag::build(wf)?;
+    println!("Workflow: {} ({} jobs)\n", wf.name, dag.topo_order.len());
+    println!("Execution order:");
+    for (i, job_id) in dag.topo_order.iter().enumerate() {
+        let deps = &dag.deps[job_id];
+        if deps.is_empty() {
+            println!("  {}. {}  (no deps)", i + 1, job_id);
+        } else {
+            println!("  {}. {}  (depends: {})", i + 1, job_id, deps.join(", "));
+        }
+    }
     Ok(())
 }
 
