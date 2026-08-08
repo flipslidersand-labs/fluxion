@@ -83,8 +83,12 @@ enum ComponentCommands {
     Run {
         /// Path to the .wasm component file
         path: String,
-        #[arg(long, default_value = "")]
-        input: String,
+        /// Input string passed to the component (mutually exclusive with --input-file)
+        #[arg(long, conflicts_with = "input_file")]
+        input: Option<String>,
+        /// Read input from a file (mutually exclusive with --input)
+        #[arg(long, conflicts_with = "input")]
+        input_file: Option<PathBuf>,
     },
 }
 
@@ -153,10 +157,11 @@ async fn run(command: Commands) -> Result<()> {
         }
 
         Commands::Component { action } => match action {
-            ComponentCommands::Run { path, input } => {
+            ComponentCommands::Run { path, input, input_file } => {
+                let input_bytes = resolve_input(input, input_file)?;
                 let host = FluxionHost::new()?;
                 let output = host
-                    .run_component(&path, input.into_bytes(), &PermissionSet::default())
+                    .run_component(&path, input_bytes, &PermissionSet::default())
                     .map_err(|e| anyhow::anyhow!("Failed to run '{}': {}", path, e))?;
                 println!("{}", String::from_utf8_lossy(&output));
             }
@@ -193,6 +198,26 @@ async fn run(command: Commands) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── input resolution (#33 --input-file / #37 stdin) ──────────────────────────
+
+fn resolve_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<Vec<u8>> {
+    if let Some(s) = input {
+        return Ok(s.into_bytes());
+    }
+    if let Some(path) = input_file {
+        return std::fs::read(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", path.display(), e));
+    }
+    // Neither flag given: read stdin if it is a pipe/redirect, otherwise return empty.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+        return Ok(buf);
+    }
+    Ok(vec![])
 }
 
 // ── fluxion run --metrics ─────────────────────────────────────────────────────
