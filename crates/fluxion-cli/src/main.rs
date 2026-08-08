@@ -248,7 +248,7 @@ fn cmd_bench(path: &str, runs: usize, warmup: usize, input: &str) -> Result<()> 
     for i in 0..warmup {
         print!("\r  warmup {}/{} ...", i + 1, warmup);
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        host.run_component_measured(path, input_bytes.clone(), &perms)
+        host.run_component_measured(path, input_bytes.clone(), &perms, &Default::default())
             .map_err(|e| anyhow::anyhow!("warmup run failed: {}", e))?;
     }
     if warmup > 0 {
@@ -263,7 +263,7 @@ fn cmd_bench(path: &str, runs: usize, warmup: usize, input: &str) -> Result<()> 
         print!("\r  run {}/{} ...", i + 1, runs);
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let (_, m) = host
-            .run_component_measured(path, input_bytes.clone(), &perms)
+            .run_component_measured(path, input_bytes.clone(), &perms, &Default::default())
             .map_err(|e| anyhow::anyhow!("run {} failed: {}", i + 1, e))?;
         compile_us.push(m.compile.as_micros() as u64);
         instantiate_us.push(m.instantiate.as_micros() as u64);

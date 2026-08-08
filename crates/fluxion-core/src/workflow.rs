@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 pub struct Workflow {
     pub name: String,
     pub jobs: IndexMap<String, JobDefinition>,
+    /// Maximum number of jobs that may execute concurrently. None = unbounded.
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +21,9 @@ pub struct JobDefinition {
     pub input: Option<String>,
     #[serde(default)]
     pub permissions: PermissionSet,
+    /// Environment variables injected into the Wasm component via WASI.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────
