@@ -642,4 +642,162 @@ mod tests {
         // Must also contain at least one resolved localhost IP.
         assert!(resolved.len() > 1, "should have IP + resolved localhost: {resolved:?}");
     }
+
+    // ── Phase 1: アドレス形式の基本解決 (#78) ────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_hostname_without_port() {
+        // "localhost" without a port should resolve to IP-only strings (no ":port" suffix).
+        let allow = vec!["localhost".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        for entry in &resolved {
+            // Must parse as a valid IP (AnyPort variant, no port suffix).
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+            // Must NOT contain a colon that would indicate an IP:port (IPv4 case).
+            // IPv6 addresses may contain colons but parse_network_entry handles them.
+            if let Ok(ip) = entry.parse::<IpAddr>() {
+                // Plain IP — correct.
+                let _ = ip;
+            } else if entry.starts_with('[') {
+                // IPv6 with brackets — also acceptable as AnyPort.
+            } else {
+                panic!("unexpected format for port-less entry: {entry}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv6_entries_pass_through() {
+        let cases = vec![
+            "[::1]:8080".to_string(),
+            "::1".to_string(),
+        ];
+        for input in &cases {
+            let resolved = resolve_network_allow(&[input.clone()]).await;
+            assert_eq!(
+                resolved,
+                vec![input.clone()],
+                "IPv6 entry {input:?} must pass through unchanged"
+            );
+            assert!(
+                parse_network_entry(input).is_some(),
+                "IPv6 entry must be parseable by parse_network_entry: {input}"
+            );
+        }
+    }
+
+    // ── Phase 2: 失敗・混在エントリの安全 fallback (#79) ─────────────────────
+
+    #[tokio::test]
+    async fn resolve_mixed_entries_with_failure() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "localhost:8080".to_string(),
+            "this.invalid.host.example:443".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+
+        // IP entry must be present unchanged.
+        assert!(
+            resolved.contains(&"192.0.2.1:443".to_string()),
+            "IP entry must survive: {resolved:?}"
+        );
+        // At least one localhost IP:8080 must be present.
+        assert!(
+            resolved.iter().any(|e| e.ends_with(":8080")),
+            "resolved localhost entry must be present: {resolved:?}"
+        );
+        // Unresolvable entry must NOT appear in any form.
+        assert!(
+            !resolved.iter().any(|e| e.contains("invalid.host")),
+            "unresolvable hostname must be excluded: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP addresses.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "every entry in result must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    // ── Phase 3: TTL キャッシュ期限切れ後の再解決 (#80) ──────────────────────
+
+    #[tokio::test]
+    async fn dns_cache_expires_after_ttl() {
+        let key = "localhost:19191".to_string();
+        let allow = vec![key.clone()];
+
+        // First call — populates cache.
+        let first = resolve_network_allow(&allow).await;
+        assert!(!first.is_empty(), "first resolution must succeed");
+
+        // Backdate the cache entry to simulate TTL expiry.
+        {
+            let mut cache = DNS_CACHE.lock().unwrap();
+            if let Some(entry) = cache.get_mut(&key) {
+                entry.1 = Instant::now() - DNS_CACHE_TTL - Duration::from_millis(1);
+            }
+        }
+
+        // Second call must re-resolve (not serve stale data).
+        let second = resolve_network_allow(&allow).await;
+        assert!(!second.is_empty(), "re-resolution after TTL expiry must succeed");
+
+        // Verify the cache timestamp was refreshed.
+        {
+            let cache = DNS_CACHE.lock().unwrap();
+            let age = cache.get(&key).map(|(_, ts)| ts.elapsed()).unwrap_or(Duration::MAX);
+            assert!(
+                age < Duration::from_secs(5),
+                "cache timestamp must be refreshed after TTL expiry, age={age:?}"
+            );
+        }
+    }
+
+    // ── Phase 4: 並行解決の Mutex 安全性 (#81) ───────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_concurrent_same_host() {
+        let allow = vec!["localhost:12345".to_string()];
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let a = allow.clone();
+                tokio::spawn(async move { resolve_network_allow(&a).await })
+            })
+            .collect();
+
+        let results = futures::future::join_all(handles).await;
+        for (i, r) in results.iter().enumerate() {
+            let resolved = r.as_ref().expect("task must not panic");
+            assert!(
+                !resolved.is_empty(),
+                "task {i} returned empty result — concurrent resolution failed"
+            );
+            // All entries must be valid IP:port strings.
+            for entry in resolved {
+                assert!(
+                    parse_network_entry(entry).is_some(),
+                    "task {i} returned invalid entry: {entry}"
+                );
+            }
+        }
+
+        // All tasks must agree on the same IP set.
+        let first_set: std::collections::HashSet<_> =
+            results[0].as_ref().unwrap().iter().cloned().collect();
+        for (i, r) in results.iter().enumerate().skip(1) {
+            let set: std::collections::HashSet<_> =
+                r.as_ref().unwrap().iter().cloned().collect();
+            assert_eq!(
+                first_set, set,
+                "task {i} returned different IPs than task 0: {set:?} vs {first_set:?}"
+            );
+        }
+    }
 }
