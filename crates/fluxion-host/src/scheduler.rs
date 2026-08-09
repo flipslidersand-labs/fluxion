@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use fluxion_core::{
     dag::Dag,
+    expand::expand_foreach,
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
@@ -144,6 +145,11 @@ async fn execute(
     print_progress: bool,
     sem: Arc<Semaphore>,
 ) -> Result<RunResult> {
+    // ── Expand foreach jobs ─────────────────────────────────────────────────
+    let expanded = expand_foreach(wf, None)?;
+    let wf = &expanded.workflow;
+    let foreach_map = &expanded.foreach_map;
+
     let dag = Dag::build(wf)?;
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
 
@@ -154,6 +160,8 @@ async fn execute(
         .collect();
 
     let mut job_results: Vec<JobResult> = Vec::new();
+    // Per-job output bytes (only stored when needed for fan-in).
+    let mut job_outputs: HashMap<String, Vec<u8>> = HashMap::new();
 
     // Seed pre-succeeded jobs
     for (id, status) in &pre_succeeded {
@@ -185,7 +193,7 @@ async fn execute(
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
         let workers = resolve_workers(&job_id, wf, &rr);
-        launch(&job_id, wf, host.clone(), tx.clone(), workers, sem.clone());
+        launch(&job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), None);
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
     }
@@ -200,7 +208,9 @@ async fn execute(
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
             let workers = resolve_workers(job_id, wf, &rr);
-            launch(job_id, wf, host.clone(), tx.clone(), workers, sem.clone());
+            // Check if this is a fan-in job that needs assembled input
+            let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
+            launch(job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
             statuses.insert(job_id.clone(), JobStatus::Running);
             in_flight += 1;
         }
@@ -228,6 +238,10 @@ async fn execute(
                 crate::metrics::JOB_DURATION
                     .with_label_values(&[&event.job_id])
                     .observe(elapsed.as_secs_f64());
+                // Store output if this job is a foreach child (needed for fan-in)
+                if let Some(output) = event.output.clone() {
+                    job_outputs.insert(event.job_id.clone(), output);
+                }
                 job_results.push(JobResult::from_succeeded_with_metrics(
                     event.job_id.clone(),
                     *elapsed,
@@ -235,6 +249,11 @@ async fn execute(
                     event.instantiate_us,
                     event.execute_us,
                 ));
+
+                // Print foreach group progress if applicable
+                if print_progress {
+                    print_foreach_progress(&event.job_id, foreach_map, &statuses, pad);
+                }
             }
             JobStatus::Failed { elapsed, reason } => {
                 crate::metrics::ACTIVE_JOBS.dec();
@@ -269,19 +288,46 @@ async fn execute(
                 // All deps must be in a terminal done state (Succeeded OR Skipped).
                 let all_done = dag.deps[dep]
                     .iter()
-                    .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped));
+                    .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled));
                 if all_done {
+                    let job_def = &wf.jobs[dep];
+
+                    // Cancel fan-in if any foreach child failed.
+                    let foreach_child_failed = if let Some(src) = &job_def.input_from {
+                        if let Some(children) = foreach_map.get(src) {
+                            children.iter().any(|c| {
+                                matches!(statuses.get(c), Some(JobStatus::Failed { .. }))
+                            })
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if foreach_child_failed {
+                        let cancel_status = JobStatus::Cancelled;
+                        store.upsert_job(run_id, dep, &cancel_status)?;
+                        statuses.insert(dep.clone(), cancel_status);
+                        if print_progress {
+                            println!(
+                                "[{}] {:<pad$}  CANCELLED (foreach child failed)",
+                                timestamp(),
+                                dep,
+                                pad = pad
+                            );
+                        }
+                        continue;
+                    }
+
                     // Check if any dep is Skipped and no `when:` guard is present → propagate skip.
                     let any_dep_skipped = dag.deps[dep]
                         .iter()
                         .any(|d| matches!(statuses[d], JobStatus::Skipped));
-                    let job_def = &wf.jobs[dep];
 
                     let should_skip = if let Some(when_expr) = &job_def.when {
-                        // Explicit `when:` — evaluate it.
                         !eval_when(when_expr, &statuses)
                     } else {
-                        // No `when:` — skip if any dependency was skipped.
                         any_dep_skipped
                     };
 
@@ -296,9 +342,7 @@ async fn execute(
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Skipped)?;
                         statuses.insert(dep.clone(), JobStatus::Skipped);
-                        // A skipped job is not in_flight, but we still need to propagate
-                        // downstream. Re-emit a synthetic event by re-triggering the dependent
-                        // check is complex, so instead we directly cascade here via a BFS.
+                        // BFS cascade: propagate Skipped to all downstream jobs.
                         let mut cascade_queue: std::collections::VecDeque<String> =
                             std::collections::VecDeque::new();
                         cascade_queue.push_back(dep.clone());
@@ -315,13 +359,13 @@ async fn execute(
                                 if matches!(statuses[downstream.as_str()], JobStatus::Pending) {
                                     let all_cascade_done = dag.deps[downstream.as_str()]
                                         .iter()
-                                        .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped));
+                                        .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled));
                                     if all_cascade_done {
                                         let downstream_def = &wf.jobs[downstream.as_str()];
                                         let cascade_skip = if let Some(when_expr) = &downstream_def.when {
                                             !eval_when(when_expr, &statuses)
                                         } else {
-                                            true // any dep skipped and no when: → skip
+                                            true
                                         };
                                         if cascade_skip {
                                             if print_progress {
@@ -341,7 +385,8 @@ async fn execute(
                                             }
                                             store.upsert_job(run_id, downstream, &JobStatus::Running)?;
                                             let workers = resolve_workers(downstream, wf, &rr);
-                                            launch(downstream, wf, host.clone(), tx.clone(), workers, sem.clone());
+                                            let fanin_input = build_fanin_input(downstream, wf, foreach_map, &job_outputs);
+                                            launch(downstream, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
                                             statuses.insert(downstream.clone(), JobStatus::Running);
                                             in_flight += 1;
                                         }
@@ -355,7 +400,8 @@ async fn execute(
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
                         let workers = resolve_workers(dep, wf, &rr);
-                        launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone());
+                        let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
                         statuses.insert(dep.clone(), JobStatus::Running);
                         in_flight += 1;
                     }
@@ -391,9 +437,67 @@ async fn execute(
     })
 }
 
+/// Build fan-in input for a job with `input_from`.  Returns `None` if the job
+/// has no `input_from`, or if outputs are not yet available (falls back to the
+/// YAML `input` field).
+fn build_fanin_input(
+    job_id: &str,
+    wf: &Workflow,
+    foreach_map: &HashMap<String, Vec<String>>,
+    job_outputs: &HashMap<String, Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let def = wf.jobs.get(job_id)?;
+    let src = def.input_from.as_deref()?;
+    let children = foreach_map.get(src)?;
+
+    // Collect outputs in order, falling back to null for missing outputs.
+    let values: Vec<serde_json::Value> = children
+        .iter()
+        .map(|child_id| {
+            if let Some(bytes) = job_outputs.get(child_id) {
+                serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        })
+        .collect();
+
+    serde_json::to_vec(&values).ok()
+}
+
+/// Print foreach group progress when a child job finishes.
+fn print_foreach_progress(
+    job_id: &str,
+    foreach_map: &HashMap<String, Vec<String>>,
+    statuses: &HashMap<String, JobStatus>,
+    pad: usize,
+) {
+    // Find which foreach group this job belongs to (if any)
+    for (parent, children) in foreach_map {
+        if children.contains(&job_id.to_string()) {
+            let done = children
+                .iter()
+                .filter(|c| matches!(statuses.get(*c), Some(JobStatus::Succeeded { .. })))
+                .count();
+            let total = children.len();
+            println!(
+                "[{}] {:<pad$}  ({}/{} done)",
+                timestamp(),
+                parent,
+                done,
+                total,
+                pad = pad
+            );
+            return;
+        }
+    }
+}
+
 struct JobEvent {
     job_id: String,
     status: JobStatus,
+    /// Captured wasm output bytes (for fan-in assembly).
+    output: Option<Vec<u8>>,
     /// Phase metrics for succeeded jobs; all zeros for failures/skips.
     compile_us: u64,
     instantiate_us: u64,
@@ -485,15 +589,19 @@ fn launch(
     tx: mpsc::UnboundedSender<JobEvent>,
     workers: Vec<WorkerInfo>,
     sem: Arc<Semaphore>,
+    // Override input bytes (used for fan-in assembly). If None, falls back to wf.jobs[job_id].input.
+    input_override: Option<Vec<u8>>,
 ) {
     crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
     let component = wf.jobs[&job_id].component.clone();
-    let input = wf.jobs[&job_id]
-        .input
-        .clone()
-        .unwrap_or_default()
-        .into_bytes();
+    let input = input_override.unwrap_or_else(|| {
+        wf.jobs[&job_id]
+            .input
+            .clone()
+            .unwrap_or_default()
+            .into_bytes()
+    });
     let perms = wf.jobs[&job_id].permissions.clone();
     let env = wf.jobs[&job_id].env.clone();
     let timeout_secs = perms.limits.timeout_secs;
@@ -509,10 +617,11 @@ fn launch(
                 let c = component.clone();
                 let p = perms.clone();
                 let e = env.clone();
+                let i = input.clone();
                 match tokio::time::timeout(
                     Duration::from_secs(timeout_secs),
                     tokio::task::spawn_blocking(move || {
-                        host.run_component_measured(&c, input, &p, &e)
+                        host.run_component_measured(&c, i, &p, &e)
                     }),
                 )
                 .await
@@ -526,9 +635,10 @@ fn launch(
             };
 
             let elapsed = start.elapsed();
-            let (status, compile_us, instantiate_us, execute_us) = match run_result {
-                Ok((_, m)) => (
+            let (status, output, compile_us, instantiate_us, execute_us) = match run_result {
+                Ok((out, m)) => (
                     JobStatus::Succeeded { elapsed },
+                    Some(out),
                     m.compile.as_micros() as u64,
                     m.instantiate.as_micros() as u64,
                     m.execute.as_micros() as u64,
@@ -538,6 +648,7 @@ fn launch(
                         elapsed,
                         reason: e.to_string(),
                     },
+                    None,
                     0,
                     0,
                     0,
@@ -559,6 +670,7 @@ fn launch(
             let _ = tx.send(JobEvent {
                 job_id,
                 status,
+                output,
                 compile_us,
                 instantiate_us,
                 execute_us,
