@@ -266,18 +266,99 @@ async fn execute(
                 if pre_succeeded.contains_key(dep) {
                     continue;
                 }
+                // All deps must be in a terminal done state (Succeeded OR Skipped).
                 let all_done = dag.deps[dep]
                     .iter()
-                    .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. }));
+                    .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped));
                 if all_done {
-                    if print_progress {
-                        print_running(dep, pad);
+                    // Check if any dep is Skipped and no `when:` guard is present → propagate skip.
+                    let any_dep_skipped = dag.deps[dep]
+                        .iter()
+                        .any(|d| matches!(statuses[d], JobStatus::Skipped));
+                    let job_def = &wf.jobs[dep];
+
+                    let should_skip = if let Some(when_expr) = &job_def.when {
+                        // Explicit `when:` — evaluate it.
+                        !eval_when(when_expr, &statuses)
+                    } else {
+                        // No `when:` — skip if any dependency was skipped.
+                        any_dep_skipped
+                    };
+
+                    if should_skip {
+                        if print_progress {
+                            println!(
+                                "[{}] {:<pad$}  SKIPPED",
+                                timestamp(),
+                                dep,
+                                pad = pad
+                            );
+                        }
+                        store.upsert_job(run_id, dep, &JobStatus::Skipped)?;
+                        statuses.insert(dep.clone(), JobStatus::Skipped);
+                        // A skipped job is not in_flight, but we still need to propagate
+                        // downstream. Re-emit a synthetic event by re-triggering the dependent
+                        // check is complex, so instead we directly cascade here via a BFS.
+                        let mut cascade_queue: std::collections::VecDeque<String> =
+                            std::collections::VecDeque::new();
+                        cascade_queue.push_back(dep.clone());
+                        while let Some(skipped_id) = cascade_queue.pop_front() {
+                            for downstream in dag
+                                .dependents
+                                .get(&skipped_id)
+                                .into_iter()
+                                .flatten()
+                            {
+                                if pre_succeeded.contains_key(downstream) {
+                                    continue;
+                                }
+                                if matches!(statuses[downstream.as_str()], JobStatus::Pending) {
+                                    let all_cascade_done = dag.deps[downstream.as_str()]
+                                        .iter()
+                                        .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped));
+                                    if all_cascade_done {
+                                        let downstream_def = &wf.jobs[downstream.as_str()];
+                                        let cascade_skip = if let Some(when_expr) = &downstream_def.when {
+                                            !eval_when(when_expr, &statuses)
+                                        } else {
+                                            true // any dep skipped and no when: → skip
+                                        };
+                                        if cascade_skip {
+                                            if print_progress {
+                                                println!(
+                                                    "[{}] {:<pad$}  SKIPPED",
+                                                    timestamp(),
+                                                    downstream,
+                                                    pad = pad
+                                                );
+                                            }
+                                            store.upsert_job(run_id, downstream, &JobStatus::Skipped)?;
+                                            statuses.insert(downstream.clone(), JobStatus::Skipped);
+                                            cascade_queue.push_back(downstream.clone());
+                                        } else {
+                                            if print_progress {
+                                                print_running(downstream, pad);
+                                            }
+                                            store.upsert_job(run_id, downstream, &JobStatus::Running)?;
+                                            let workers = resolve_workers(downstream, wf, &rr);
+                                            launch(downstream, wf, host.clone(), tx.clone(), workers, sem.clone());
+                                            statuses.insert(downstream.clone(), JobStatus::Running);
+                                            in_flight += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if print_progress {
+                            print_running(dep, pad);
+                        }
+                        store.upsert_job(run_id, dep, &JobStatus::Running)?;
+                        let workers = resolve_workers(dep, wf, &rr);
+                        launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone());
+                        statuses.insert(dep.clone(), JobStatus::Running);
+                        in_flight += 1;
                     }
-                    store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                    let workers = resolve_workers(dep, wf, &rr);
-                    launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone());
-                    statuses.insert(dep.clone(), JobStatus::Running);
-                    in_flight += 1;
                 }
             }
         }
@@ -501,6 +582,36 @@ fn downstream_inclusive<'a>(dag: &'a Dag, start: &'a str) -> std::collections::H
     visited
 }
 
+/// Evaluate a simple conditional expression like `"validate.status == 'SUCCESS'"`.
+/// Returns `true` if the condition holds (job should run), `false` if the job should be skipped.
+/// Unknown / malformed expressions default to `true` (run the job).
+fn eval_when(expr: &str, statuses: &HashMap<String, JobStatus>) -> bool {
+    let parts: Vec<&str> = expr.splitn(3, ' ').collect();
+    if parts.len() != 3 {
+        return true;
+    }
+    let (lhs, op, rhs) = (parts[0], parts[1], parts[2].trim_matches('\''));
+    if let Some((job_id, attr)) = lhs.rsplit_once('.') {
+        if attr == "status" {
+            let status_str = statuses
+                .get(job_id)
+                .map(|s| match s {
+                    JobStatus::Succeeded { .. } => "SUCCESS",
+                    JobStatus::Failed { .. } => "FAILED",
+                    JobStatus::Skipped => "SKIPPED",
+                    _ => "UNKNOWN",
+                })
+                .unwrap_or("UNKNOWN");
+            return match op {
+                "==" => status_str == rhs,
+                "!=" => status_str != rhs,
+                _ => true,
+            };
+        }
+    }
+    true
+}
+
 fn timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -541,6 +652,12 @@ fn print_result(event: &JobEvent, pad: usize) {
             timestamp(),
             event.job_id,
             elapsed.as_secs_f64(),
+            pad = pad
+        ),
+        JobStatus::Skipped => println!(
+            "[{}] {:<pad$}  SKIPPED",
+            timestamp(),
+            event.job_id,
             pad = pad
         ),
         _ => {}

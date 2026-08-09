@@ -8,13 +8,14 @@ pub enum JobStatus {
     Succeeded { elapsed: Duration },
     Failed { elapsed: Duration, reason: String },
     Cancelled,
+    Skipped,  // when: condition was false, or a dependency was skipped
 }
 
 impl JobStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Succeeded { .. } | Self::Failed { .. } | Self::Cancelled
+            Self::Succeeded { .. } | Self::Failed { .. } | Self::Cancelled | Self::Skipped
         )
     }
 
@@ -26,6 +27,7 @@ impl JobStatus {
             Self::Succeeded { .. } => "SUCCESS",
             Self::Failed { .. } => "FAILED",
             Self::Cancelled => "CANCELLED",
+            Self::Skipped => "SKIPPED",
         }
     }
 }

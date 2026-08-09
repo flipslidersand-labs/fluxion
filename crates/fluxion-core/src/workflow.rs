@@ -80,6 +80,10 @@ pub struct JobDefinition {
     /// Environment variables injected into the Wasm component via WASI.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Optional conditional expression. If present and evaluates to false, the job is SKIPPED.
+    /// Example: `"validate.status == 'SUCCESS'"`
+    #[serde(default)]
+    pub when: Option<String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

@@ -135,6 +135,7 @@ impl RunStore {
                         reason: reason.unwrap_or_default(),
                     },
                     "cancelled" => JobStatus::Cancelled,
+                    "skipped" => JobStatus::Skipped,
                     _ => JobStatus::Pending,
                 };
                 (job_id, js)
@@ -342,6 +343,7 @@ fn serialize_status(s: &JobStatus) -> (&'static str, Option<u64>, Option<String>
         ),
         JobStatus::Cancelled => ("cancelled", None, None),
         JobStatus::Running => ("running", None, None),
+        JobStatus::Skipped => ("skipped", None, None),
         _ => ("pending", None, None),
     }
 }
