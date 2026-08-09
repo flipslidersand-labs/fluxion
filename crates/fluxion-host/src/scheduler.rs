@@ -142,13 +142,15 @@ async fn run_inner(
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name);
     let result = execute(
         wf,
-        host,
-        &store,
-        &run_id,
-        pre_succeeded,
-        print_progress,
-        sem,
-        strategy,
+        ExecOpts {
+            host,
+            store: &store,
+            run_id: &run_id,
+            pre_succeeded,
+            print_progress,
+            sem,
+            strategy,
+        },
     )
     .instrument(span)
     .await?;
@@ -192,13 +194,15 @@ async fn retry_inner(
     let span = info_span!("fluxion.run", run_id = %run_id, workflow = %wf.name, retry = true);
     let result = execute(
         wf,
-        host,
-        &store,
-        &run_id,
-        pre_succeeded,
-        print_progress,
-        sem,
-        strategy,
+        ExecOpts {
+            host,
+            store: &store,
+            run_id: &run_id,
+            pre_succeeded,
+            print_progress,
+            sem,
+            strategy,
+        },
     )
     .instrument(span)
     .await?;
@@ -206,17 +210,27 @@ async fn retry_inner(
     Ok(result)
 }
 
-/// Core execution loop. Returns a structured RunResult.
-async fn execute(
-    wf: &Workflow,
+struct ExecOpts<'a> {
     host: Arc<FluxionHost>,
-    store: &RunStore,
-    run_id: &str,
+    store: &'a RunStore,
+    run_id: &'a str,
     pre_succeeded: HashMap<String, JobStatus>,
     print_progress: bool,
     sem: Arc<Semaphore>,
     strategy: LbStrategy,
-) -> Result<RunResult> {
+}
+
+/// Core execution loop. Returns a structured RunResult.
+async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
+    let ExecOpts {
+        host,
+        store,
+        run_id,
+        pre_succeeded,
+        print_progress,
+        sem,
+        strategy,
+    } = opts;
     // ── Expand foreach jobs ─────────────────────────────────────────────────
     let expanded = expand_foreach(wf, None)?;
     let wf = &expanded.workflow;
@@ -692,16 +706,16 @@ async fn pick_least_conn(workers: &[fluxion_core::workflow::WorkerConfig]) -> us
     let mut best_count = u64::MAX;
     for (i, w) in workers.iter().enumerate() {
         let url = format!("{}/health", w.url().trim_end_matches('/'));
-        if let Ok(resp) = reqwest::get(&url).await {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                let active = json
-                    .get("active_jobs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(u64::MAX);
-                if active < best_count {
-                    best_count = active;
-                    best_idx = i;
-                }
+        if let Ok(resp) = reqwest::get(&url).await
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+        {
+            let active = json
+                .get("active_jobs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX);
+            if active < best_count {
+                best_count = active;
+                best_idx = i;
             }
         }
     }
@@ -875,23 +889,23 @@ fn eval_when(expr: &str, statuses: &HashMap<String, JobStatus>) -> bool {
         return true;
     }
     let (lhs, op, rhs) = (parts[0], parts[1], parts[2].trim_matches('\''));
-    if let Some((job_id, attr)) = lhs.rsplit_once('.') {
-        if attr == "status" {
-            let status_str = statuses
-                .get(job_id)
-                .map(|s| match s {
-                    JobStatus::Succeeded { .. } => "SUCCESS",
-                    JobStatus::Failed { .. } => "FAILED",
-                    JobStatus::Skipped => "SKIPPED",
-                    _ => "UNKNOWN",
-                })
-                .unwrap_or("UNKNOWN");
-            return match op {
-                "==" => status_str == rhs,
-                "!=" => status_str != rhs,
-                _ => true,
-            };
-        }
+    if let Some((job_id, attr)) = lhs.rsplit_once('.')
+        && attr == "status"
+    {
+        let status_str = statuses
+            .get(job_id)
+            .map(|s| match s {
+                JobStatus::Succeeded { .. } => "SUCCESS",
+                JobStatus::Failed { .. } => "FAILED",
+                JobStatus::Skipped => "SKIPPED",
+                _ => "UNKNOWN",
+            })
+            .unwrap_or("UNKNOWN");
+        return match op {
+            "==" => status_str == rhs,
+            "!=" => status_str != rhs,
+            _ => true,
+        };
     }
     true
 }
