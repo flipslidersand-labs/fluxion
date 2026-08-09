@@ -8,7 +8,7 @@ use fluxion_core::{
     store::RunStore,
     workflow::{PermissionSet, Workflow},
 };
-use fluxion_host::{FluxionHost, scheduler};
+use fluxion_host::{FluxionHost, scheduler, scheduler::LbStrategy};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +38,9 @@ enum Commands {
         /// Expose Prometheus /metrics on this port while the workflow runs
         #[arg(long)]
         metrics_port: Option<u16>,
+        /// Load-balancing strategy for distributing jobs across remote workers
+        #[arg(long, value_enum, default_value_t = LbStrategy::RoundRobin)]
+        lb_strategy: LbStrategy,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -175,6 +178,7 @@ async fn run(command: Commands) -> Result<()> {
             metrics,
             dry_run,
             metrics_port,
+            lb_strategy,
         } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
@@ -189,7 +193,7 @@ async fn run(command: Commands) -> Result<()> {
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
             let host = Arc::new(FluxionHost::new()?);
-            let result = scheduler::run(&wf, &workflow_path, host).await?;
+            let result = scheduler::run_with_strategy(&wf, &workflow_path, host, lb_strategy).await?;
             if metrics {
                 print_metrics_table(&result.jobs);
             }

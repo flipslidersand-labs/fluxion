@@ -16,12 +16,13 @@ pub struct Workflow {
 }
 
 /// Per-worker configuration. Supports both a plain URL string and an extended
-/// form with optional mTLS certificate paths.
+/// form with optional mTLS certificate paths and load-balancing weight.
 ///
 /// ```yaml
 /// workers:
-///   - http://worker-a:7777          # plain form (no TLS)
+///   - http://worker-a:7777          # plain form (no TLS, weight=1)
 ///   - url: https://worker-b:7778    # extended form
+///     weight: 3                     # receives 3x the traffic of weight-1 workers
 ///     tls:
 ///       cert: /etc/fluxion/client.crt
 ///       key:  /etc/fluxion/client.key
@@ -35,7 +36,14 @@ pub enum WorkerConfig {
         url: String,
         #[serde(default)]
         tls: Option<TlsConfig>,
+        /// Load-balancing weight for weighted round-robin. Defaults to 1.
+        #[serde(default = "default_weight")]
+        weight: u32,
     },
+}
+
+fn default_weight() -> u32 {
+    1
 }
 
 impl WorkerConfig {
@@ -50,6 +58,14 @@ impl WorkerConfig {
         match self {
             Self::Simple(_) => None,
             Self::Full { tls, .. } => tls.as_ref(),
+        }
+    }
+
+    /// Load-balancing weight. Plain-form workers always have weight 1.
+    pub fn weight(&self) -> u32 {
+        match self {
+            Self::Simple(_) => 1,
+            Self::Full { weight, .. } => *weight,
         }
     }
 }

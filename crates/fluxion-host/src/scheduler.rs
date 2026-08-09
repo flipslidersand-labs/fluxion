@@ -18,9 +18,32 @@ use tracing::{Instrument, info_span};
 
 use crate::{FluxionHost, remote};
 
+/// Load-balancing strategy for distributing jobs across remote workers.
+#[derive(Debug, Clone, Default, clap::ValueEnum)]
+pub enum LbStrategy {
+    /// Plain round-robin: cycle through workers in order (default).
+    #[default]
+    RoundRobin,
+    /// Weighted round-robin: distribute proportionally to each worker's `weight`.
+    Weighted,
+    /// Least-connections: query each worker's `/health` endpoint and send the next
+    /// job to the worker reporting the fewest active jobs.
+    LeastConn,
+}
+
 /// Run a workflow from scratch, printing progress to stdout.
 pub async fn run(wf: &Workflow, workflow_path: &Path, host: Arc<FluxionHost>) -> Result<RunResult> {
-    run_inner(wf, workflow_path, host, HashMap::new(), true).await
+    run_inner(wf, workflow_path, host, HashMap::new(), true, LbStrategy::default()).await
+}
+
+/// Run a workflow from scratch with the specified load-balancing strategy.
+pub async fn run_with_strategy(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    strategy: LbStrategy,
+) -> Result<RunResult> {
+    run_inner(wf, workflow_path, host, HashMap::new(), true, strategy).await
 }
 
 /// Run a workflow silently (no stdout) — for MCP / programmatic use.
@@ -29,7 +52,17 @@ pub async fn run_silent(
     workflow_path: &Path,
     host: Arc<FluxionHost>,
 ) -> Result<RunResult> {
-    run_inner(wf, workflow_path, host, HashMap::new(), false).await
+    run_inner(wf, workflow_path, host, HashMap::new(), false, LbStrategy::default()).await
+}
+
+/// Run a workflow silently with the specified load-balancing strategy.
+pub async fn run_silent_with_strategy(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    strategy: LbStrategy,
+) -> Result<RunResult> {
+    run_inner(wf, workflow_path, host, HashMap::new(), false, strategy).await
 }
 
 /// Retry a previous run, re-executing `from_job` and all downstream dependents.
@@ -40,7 +73,7 @@ pub async fn retry(
     prev_run_id: &str,
     from_job: &str,
 ) -> Result<RunResult> {
-    retry_inner(wf, workflow_path, host, prev_run_id, from_job, true).await
+    retry_inner(wf, workflow_path, host, prev_run_id, from_job, true, LbStrategy::default()).await
 }
 
 /// Retry silently — for MCP / programmatic use.
@@ -51,7 +84,7 @@ pub async fn retry_silent(
     prev_run_id: &str,
     from_job: &str,
 ) -> Result<RunResult> {
-    retry_inner(wf, workflow_path, host, prev_run_id, from_job, false).await
+    retry_inner(wf, workflow_path, host, prev_run_id, from_job, false, LbStrategy::default()).await
 }
 
 async fn run_inner(
@@ -60,6 +93,7 @@ async fn run_inner(
     host: Arc<FluxionHost>,
     pre_succeeded: HashMap<String, JobStatus>,
     print_progress: bool,
+    strategy: LbStrategy,
 ) -> Result<RunResult> {
     let store = RunStore::open()?;
     let run_id = RunStore::new_run_id();
@@ -80,6 +114,7 @@ async fn run_inner(
         pre_succeeded,
         print_progress,
         sem,
+        strategy,
     )
     .instrument(span)
     .await?;
@@ -94,6 +129,7 @@ async fn retry_inner(
     prev_run_id: &str,
     from_job: &str,
     print_progress: bool,
+    strategy: LbStrategy,
 ) -> Result<RunResult> {
     let store = RunStore::open()?;
     let (_, prev_states) = store.load_run(prev_run_id)?;
@@ -128,6 +164,7 @@ async fn retry_inner(
         pre_succeeded,
         print_progress,
         sem,
+        strategy,
     )
     .instrument(span)
     .await?;
@@ -144,6 +181,7 @@ async fn execute(
     pre_succeeded: HashMap<String, JobStatus>,
     print_progress: bool,
     sem: Arc<Semaphore>,
+    strategy: LbStrategy,
 ) -> Result<RunResult> {
     // ── Expand foreach jobs ─────────────────────────────────────────────────
     let expanded = expand_foreach(wf, None)?;
@@ -192,7 +230,7 @@ async fn execute(
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        let workers = resolve_workers(&job_id, wf, &rr);
+        let workers = resolve_workers(&job_id, wf, &rr, &strategy).await;
         launch(&job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), None);
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
@@ -207,8 +245,7 @@ async fn execute(
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            let workers = resolve_workers(job_id, wf, &rr);
-            // Check if this is a fan-in job that needs assembled input
+            let workers = resolve_workers(job_id, wf, &rr, &strategy).await;
             let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
             launch(job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
             statuses.insert(job_id.clone(), JobStatus::Running);
@@ -384,7 +421,7 @@ async fn execute(
                                                 print_running(downstream, pad);
                                             }
                                             store.upsert_job(run_id, downstream, &JobStatus::Running)?;
-                                            let workers = resolve_workers(downstream, wf, &rr);
+                                            let workers = resolve_workers(downstream, wf, &rr, &strategy).await;
                                             let fanin_input = build_fanin_input(downstream, wf, foreach_map, &job_outputs);
                                             launch(downstream, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
                                             statuses.insert(downstream.clone(), JobStatus::Running);
@@ -399,12 +436,13 @@ async fn execute(
                             print_running(dep, pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                        let workers = resolve_workers(dep, wf, &rr);
+                        let workers = resolve_workers(dep, wf, &rr, &strategy).await;
                         let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
                         launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
                         statuses.insert(dep.clone(), JobStatus::Running);
                         in_flight += 1;
                     }
+
                 }
             }
         }
@@ -513,9 +551,14 @@ struct WorkerInfo {
 
 /// Resolve the ordered list of workers to try for a job, including failover targets.
 /// - `job.worker` set → `[that url, no TLS]` (pinned; no failover — respect the explicit choice)
-/// - `wf.workers` non-empty → round-robin start, then the remaining workers as failover targets
+/// - `wf.workers` non-empty → pick primary via strategy, then remaining workers as failover targets
 /// - otherwise → empty (run locally)
-fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<WorkerInfo> {
+async fn resolve_workers(
+    job_id: &str,
+    wf: &Workflow,
+    rr: &AtomicUsize,
+    strategy: &LbStrategy,
+) -> Vec<WorkerInfo> {
     if let Some(url) = &wf.jobs[job_id].worker {
         return vec![WorkerInfo {
             url: url.clone(),
@@ -526,7 +569,11 @@ fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<WorkerI
         return Vec::new();
     }
     let n = wf.workers.len();
-    let start = rr.fetch_add(1, Ordering::Relaxed) % n;
+    let start = match strategy {
+        LbStrategy::RoundRobin => rr.fetch_add(1, Ordering::Relaxed) % n,
+        LbStrategy::Weighted => pick_weighted(&wf.workers, rr),
+        LbStrategy::LeastConn => pick_least_conn(&wf.workers).await,
+    };
     (0..n)
         .map(|i| {
             let cfg = &wf.workers[(start + i) % n];
@@ -536,6 +583,48 @@ fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<WorkerI
             }
         })
         .collect()
+}
+
+/// Weighted round-robin: picks the worker index proportionally to its weight.
+/// Uses a global counter so successive calls cycle through the weight-space evenly.
+fn pick_weighted(workers: &[fluxion_core::workflow::WorkerConfig], rr: &AtomicUsize) -> usize {
+    let total_weight: u32 = workers.iter().map(|w| w.weight()).sum();
+    if total_weight == 0 {
+        return rr.fetch_add(1, Ordering::Relaxed) % workers.len();
+    }
+    let slot = (rr.fetch_add(1, Ordering::Relaxed) as u32) % total_weight;
+    let mut acc = 0u32;
+    for (i, w) in workers.iter().enumerate() {
+        acc += w.weight();
+        if slot < acc {
+            return i;
+        }
+    }
+    0
+}
+
+/// Least-connections: query each worker's `/health` endpoint and return the
+/// index of the worker with the fewest active jobs.
+/// Workers that fail to respond are skipped (treated as having max load).
+async fn pick_least_conn(workers: &[fluxion_core::workflow::WorkerConfig]) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_count = u64::MAX;
+    for (i, w) in workers.iter().enumerate() {
+        let url = format!("{}/health", w.url().trim_end_matches('/'));
+        if let Ok(resp) = reqwest::get(&url).await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                let active = json
+                    .get("active_jobs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX);
+                if active < best_count {
+                    best_count = active;
+                    best_idx = i;
+                }
+            }
+        }
+    }
+    best_idx
 }
 
 /// Try each worker in order. Reachability failures (`RemoteError::Unreachable`)
@@ -800,34 +889,93 @@ mod tests {
         workers.iter().map(|w| w.url.as_str()).collect()
     }
 
-    #[test]
-    fn pinned_worker_has_no_failover_targets() {
+    #[tokio::test]
+    async fn pinned_worker_has_no_failover_targets() {
         // An explicit `worker:` must yield exactly that URL — never fail over.
         let w = wf(&["http://a", "http://b"], Some("http://pinned"));
         let rr = AtomicUsize::new(0);
-        assert_eq!(worker_urls(&resolve_workers("j", &w, &rr)), vec!["http://pinned"]);
+        assert_eq!(
+            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
+            vec!["http://pinned"]
+        );
     }
 
-    #[test]
-    fn no_workers_runs_locally() {
+    #[tokio::test]
+    async fn no_workers_runs_locally() {
         let w = wf(&[], None);
         let rr = AtomicUsize::new(0);
-        assert!(resolve_workers("j", &w, &rr).is_empty());
+        assert!(resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await.is_empty());
     }
 
-    #[test]
-    fn round_robin_lists_all_workers_as_failover_targets() {
+    #[tokio::test]
+    async fn round_robin_lists_all_workers_as_failover_targets() {
         let w = wf(&["http://a", "http://b", "http://c"], None);
         let rr = AtomicUsize::new(0);
         assert_eq!(
-            worker_urls(&resolve_workers("j", &w, &rr)),
+            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://a", "http://b", "http://c"]
         );
         // The next job rotates the start but still lists every worker as a target.
         assert_eq!(
-            worker_urls(&resolve_workers("j", &w, &rr)),
+            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://b", "http://c", "http://a"]
         );
+    }
+
+    // ── weighted round-robin tests ────────────────────────────────────────────
+
+    /// Build a Workflow with full-form workers carrying explicit weights.
+    fn wf_weighted(weights: &[(u32, &str)]) -> Workflow {
+        let workers_json: String = {
+            let entries: Vec<String> = weights
+                .iter()
+                .map(|(w, url)| format!(r#"{{"url":"{url}","weight":{w}}}"#))
+                .collect();
+            format!("[{}]", entries.join(","))
+        };
+        let s = format!(
+            r#"{{"name":"t","jobs":{{"j":{{"component":"x.wasm"}}}},"workers":{workers_json}}}"#
+        );
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn weighted_rr_distributes_proportionally() {
+        // Workers with weights [2, 1]: over 30 slots, A should get ~20, B ~10.
+        let w = wf_weighted(&[(2, "http://a"), (1, "http://b")]);
+        let rr = AtomicUsize::new(0);
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..30 {
+            let idx = pick_weighted(&w.workers, &rr);
+            *counts.entry(idx).or_insert(0usize) += 1;
+        }
+        let a = counts.get(&0).copied().unwrap_or(0);
+        let b = counts.get(&1).copied().unwrap_or(0);
+        // Exact: 2/3 of 30 = 20 for A, 1/3 = 10 for B (deterministic modular arithmetic)
+        assert_eq!(a, 20, "worker A (weight 2) should get 20/30 slots, got {a}");
+        assert_eq!(b, 10, "worker B (weight 1) should get 10/30 slots, got {b}");
+    }
+
+    #[test]
+    fn weighted_rr_equal_weights_acts_like_round_robin() {
+        // Both weight=1: should distribute exactly 50/50 over 10 calls.
+        let w = wf_weighted(&[(1, "http://a"), (1, "http://b")]);
+        let rr = AtomicUsize::new(0);
+        let mut counts = [0usize; 2];
+        for _ in 0..10 {
+            counts[pick_weighted(&w.workers, &rr)] += 1;
+        }
+        assert_eq!(counts[0], 5);
+        assert_eq!(counts[1], 5);
+    }
+
+    #[test]
+    fn weighted_rr_single_worker_always_picked() {
+        let w = wf_weighted(&[(5, "http://only")]);
+        let rr = AtomicUsize::new(0);
+        for _ in 0..10 {
+            assert_eq!(pick_weighted(&w.workers, &rr), 0);
+        }
     }
 
     // Bind then drop so the port is guaranteed to refuse connections.

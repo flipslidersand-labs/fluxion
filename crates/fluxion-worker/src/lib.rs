@@ -8,7 +8,13 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::NamedTempFile;
+
+/// Global counter of jobs currently executing on this worker.
+/// Reported in the `/health` response so the host-side scheduler can
+/// implement least-connections load balancing.
+static ACTIVE_JOBS: AtomicUsize = AtomicUsize::new(0);
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -94,11 +100,13 @@ async fn handle_run(
     let perms = req.permissions;
     let env = req.env;
 
+    ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
     let result = tokio::task::spawn_blocking(move || {
         host.run_component_measured(&tmp_path, input, &perms, &env)
     })
     .await
     .map_err(|e| {
+        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -107,6 +115,7 @@ async fn handle_run(
         )
     })?
     .map_err(|e| {
+        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -114,6 +123,7 @@ async fn handle_run(
             }),
         )
     })?;
+    ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
 
     let (output, metrics) = result;
     Ok(Json(RunResponse {
@@ -125,7 +135,10 @@ async fn handle_run(
 }
 
 async fn handle_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "active_jobs": ACTIVE_JOBS.load(Ordering::Relaxed),
+    }))
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
