@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use fluxion_core::workflow::PermissionSet;
+use fluxion_core::workflow::{PermissionSet, TlsConfig};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
@@ -39,12 +39,16 @@ impl fmt::Display for RemoteError {
 impl std::error::Error for RemoteError {}
 
 /// Dispatch a Wasm job to a remote worker via HTTP POST /run.
+///
+/// When `tls` is `Some`, the client presents a mutual-TLS identity and
+/// verifies the server against the supplied CA.
 pub async fn run_remote(
     worker_url: &str,
     wasm_path: impl AsRef<Path>,
     input: Vec<u8>,
     perms: &PermissionSet,
     env: &HashMap<String, String>,
+    tls: Option<&TlsConfig>,
 ) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
     // Reading the local .wasm file is an orchestrator-side error, not a worker
     // fault — surface it as Execution so we don't pointlessly try every worker.
@@ -58,8 +62,29 @@ pub async fn run_remote(
         "env": env,
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(perms.limits.timeout_secs + 10))
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(perms.limits.timeout_secs + 10));
+
+    if let Some(tls) = tls {
+        let cert_pem =
+            std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
+        let key_pem =
+            std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
+        // reqwest::Identity::from_pem expects the cert followed by the key in one PEM blob.
+        let identity_pem = [cert_pem, key_pem].concat();
+        let identity = reqwest::Identity::from_pem(&identity_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_pem =
+            std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        builder = builder
+            .identity(identity)
+            .add_root_certificate(ca_cert)
+            .use_rustls_tls();
+    }
+
+    let client = builder
         .build()
         .map_err(|e| RemoteError::Execution(e.into()))?;
 

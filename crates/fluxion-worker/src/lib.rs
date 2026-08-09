@@ -6,6 +6,7 @@ use fluxion_host::FluxionHost;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
@@ -35,6 +36,16 @@ pub struct RunResponse {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+/// mTLS configuration for the worker server.
+pub struct WorkerTls {
+    /// Path to the PEM-encoded server certificate.
+    pub cert: PathBuf,
+    /// Path to the PEM-encoded server private key.
+    pub key: PathBuf,
+    /// Path to the PEM-encoded CA certificate used to verify clients.
+    pub ca: PathBuf,
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -119,7 +130,7 @@ async fn handle_health() -> Json<serde_json::Value> {
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
-pub async fn serve(port: u16, metrics_port: Option<u16>) -> Result<()> {
+pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>) -> Result<()> {
     let host = Arc::new(FluxionHost::new()?);
 
     if let Some(mp) = metrics_port {
@@ -132,8 +143,84 @@ pub async fn serve(port: u16, metrics_port: Option<u16>) -> Result<()> {
         .with_state(host);
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("fluxion worker listening on {addr}");
-    axum::serve(listener, app).await?;
-    Ok(())
+
+    if let Some(tls) = tls {
+        serve_tls(app, &addr, tls).await
+    } else {
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        tracing::info!("fluxion worker listening on {addr}");
+        axum::serve(listener, app).await?;
+        Ok(())
+    }
+}
+
+async fn serve_tls(
+    app: Router,
+    addr: &str,
+    tls: WorkerTls,
+) -> Result<()> {
+    use rustls::ServerConfig;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls_pemfile::{certs, private_key};
+    use std::io::BufReader;
+    use std::sync::Arc as StdArc;
+    use tokio_rustls::TlsAcceptor;
+    use tower::Service;
+
+    // Load server certificate chain.
+    let cert_file = std::fs::File::open(&tls.cert)?;
+    let server_certs: Vec<CertificateDer<'static>> =
+        certs(&mut BufReader::new(cert_file))
+            .collect::<std::result::Result<_, _>>()?;
+
+    // Load server private key.
+    let key_file = std::fs::File::open(&tls.key)?;
+    let server_key: PrivateKeyDer<'static> = private_key(&mut BufReader::new(key_file))?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in {:?}", tls.key))?;
+
+    // Build client certificate verifier from CA (mTLS).
+    let ca_file = std::fs::File::open(&tls.ca)?;
+    let ca_certs: Vec<CertificateDer<'static>> =
+        certs(&mut BufReader::new(ca_file))
+            .collect::<std::result::Result<_, _>>()?;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in ca_certs {
+        root_store.add(cert)?;
+    }
+    let client_verifier =
+        rustls::server::WebPkiClientVerifier::builder(StdArc::new(root_store))
+            .build()?;
+
+    let server_config = ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(server_certs, server_key)?;
+
+    let acceptor = TlsAcceptor::from(StdArc::new(server_config));
+    let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("fluxion worker listening (mTLS) on {addr}");
+
+    loop {
+        let (stream, _peer) = tcp_listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let req = req.map(axum::body::Body::new);
+                        let mut app = app.clone();
+                        async move { app.call(req).await }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("TLS handshake failed: {e}");
+                }
+            }
+        });
+    }
 }
