@@ -164,7 +164,7 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
     healthy
 }
 
-/// Resolve the effective worker list for a workflow run:
+/// Resolve the effective worker list for a workflow run.
 ///
 /// 1. If YAML `workers:` is non-empty, health-check those.
 /// 2. Otherwise, load registered workers from DB and health-check them.
