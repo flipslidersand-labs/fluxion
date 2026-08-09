@@ -610,6 +610,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dns_cache_hit_is_faster_than_miss() {
+        let allow = vec!["localhost:9999".to_string()];
+
+        // Warm up cache (first call = DNS lookup).
+        let t0 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let miss_us = t0.elapsed().as_micros();
+
+        // Second call should hit the in-process TTL cache.
+        let t1 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let hit_us = t1.elapsed().as_micros();
+
+        println!("DNS miss: {miss_us}µs  cache hit: {hit_us}µs");
+        assert!(
+            hit_us < miss_us,
+            "cache hit ({hit_us}µs) should be faster than DNS miss ({miss_us}µs)"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_mixed_ip_and_hostname() {
         let allow = vec![
             "192.0.2.1:443".to_string(),
