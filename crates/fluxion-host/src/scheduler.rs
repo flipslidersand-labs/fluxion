@@ -121,6 +121,82 @@ pub async fn retry_silent(
     .await
 }
 
+/// Perform GET /health on each candidate URL concurrently.
+/// Returns the subset that responded successfully, updating the DB health status.
+async fn health_check_workers(candidates: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("reqwest client");
+
+    let store = RunStore::open().ok();
+
+    let checks = candidates.iter().map(|url| {
+        let url = url.clone();
+        let client = client.clone();
+        async move {
+            let health_url = format!("{url}/health");
+            let ok = client
+                .get(&health_url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            (url, ok)
+        }
+    });
+    let results = futures::future::join_all(checks).await;
+
+    let healthy: Vec<String> = results
+        .iter()
+        .filter_map(|(url, ok)| if *ok { Some(url.clone()) } else { None })
+        .collect();
+
+    if let Some(s) = &store {
+        for (url, ok) in &results {
+            let _ = s.update_worker_health(url, *ok);
+        }
+    }
+
+    healthy
+}
+
+/// Resolve the effective worker list for a workflow run.
+///
+/// 1. If YAML `workers:` is non-empty, health-check those.
+/// 2. Otherwise, load registered workers from DB and health-check them.
+///
+/// Returns only healthy workers.
+async fn effective_workers(wf: &Workflow) -> Vec<String> {
+    let candidates = if !wf.workers.is_empty() {
+        wf.workers.iter().map(|w| w.url().to_string()).collect()
+    } else {
+        RunStore::open()
+            .and_then(|s| s.registered_worker_urls())
+            .unwrap_or_default()
+    };
+    health_check_workers(&candidates).await
+}
+
+/// Resolve effective workers and return them as `WorkerInfo`, preserving TLS config.
+async fn effective_workers_info(wf: &Workflow) -> Vec<WorkerInfo> {
+    let healthy_urls = effective_workers(wf).await;
+    healthy_urls
+        .into_iter()
+        .map(|url| {
+            let tls = wf
+                .workers
+                .iter()
+                .find(|w| w.url() == url.as_str())
+                .and_then(|w| w.tls().cloned());
+            WorkerInfo { url, tls }
+        })
+        .collect()
+}
+
 async fn run_inner(
     wf: &Workflow,
     workflow_path: &Path,
@@ -136,6 +212,7 @@ async fn run_inner(
         println!("Run ID: {run_id}");
     }
 
+    let workers = effective_workers_info(wf).await;
     let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
     let sem = Arc::new(Semaphore::new(permits));
 
@@ -150,6 +227,7 @@ async fn run_inner(
             print_progress,
             sem,
             strategy,
+            workers,
         },
     )
     .instrument(span)
@@ -188,6 +266,7 @@ async fn retry_inner(
         );
     }
 
+    let workers = effective_workers_info(wf).await;
     let permits = wf.max_parallel.unwrap_or(Semaphore::MAX_PERMITS);
     let sem = Arc::new(Semaphore::new(permits));
 
@@ -202,6 +281,7 @@ async fn retry_inner(
             print_progress,
             sem,
             strategy,
+            workers,
         },
     )
     .instrument(span)
@@ -218,6 +298,7 @@ struct ExecOpts<'a> {
     print_progress: bool,
     sem: Arc<Semaphore>,
     strategy: LbStrategy,
+    workers: Vec<WorkerInfo>,
 }
 
 /// Core execution loop. Returns a structured RunResult.
@@ -230,6 +311,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         print_progress,
         sem,
         strategy,
+        workers,
     } = opts;
     // ── Expand foreach jobs ─────────────────────────────────────────────────
     let expanded = expand_foreach(wf, None)?;
@@ -278,13 +360,13 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        let workers = resolve_workers(&job_id, wf, &rr, &strategy).await;
+        let job_workers = resolve_workers(&job_id, wf, &workers, &rr, &strategy).await;
         launch(
             &job_id,
             wf,
             host.clone(),
             tx.clone(),
-            workers,
+            job_workers,
             sem.clone(),
             None,
         );
@@ -301,14 +383,14 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            let workers = resolve_workers(job_id, wf, &rr, &strategy).await;
+            let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
             let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
             launch(
                 job_id,
                 wf,
                 host.clone(),
                 tx.clone(),
-                workers,
+                job_workers,
                 sem.clone(),
                 fanin_input,
             );
@@ -494,9 +576,10 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 downstream,
                                                 &JobStatus::Running,
                                             )?;
-                                            let workers =
-                                                resolve_workers(downstream, wf, &rr, &strategy)
-                                                    .await;
+                                            let dw_workers = resolve_workers(
+                                                downstream, wf, &workers, &rr, &strategy,
+                                            )
+                                            .await;
                                             let fanin_input = build_fanin_input(
                                                 downstream,
                                                 wf,
@@ -508,7 +591,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 wf,
                                                 host.clone(),
                                                 tx.clone(),
-                                                workers,
+                                                dw_workers,
                                                 sem.clone(),
                                                 fanin_input,
                                             );
@@ -524,14 +607,14 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                             print_running(dep, pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                        let workers = resolve_workers(dep, wf, &rr, &strategy).await;
+                        let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
                         let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
                         launch(
                             dep,
                             wf,
                             host.clone(),
                             tx.clone(),
-                            workers,
+                            dep_workers,
                             sem.clone(),
                             fanin_input,
                         );
@@ -645,12 +728,13 @@ struct WorkerInfo {
 }
 
 /// Resolve the ordered list of workers to try for a job, including failover targets.
-/// - `job.worker` set → `[that url, no TLS]` (pinned; no failover — respect the explicit choice)
-/// - `wf.workers` non-empty → pick primary via strategy, then remaining workers as failover targets
+/// - `job.worker` set → `[that url, TLS from wf if available]` (pinned; no failover)
+/// - `workers` non-empty → pick primary via strategy, then remaining workers as failover targets
 /// - otherwise → empty (run locally)
 async fn resolve_workers(
     job_id: &str,
     wf: &Workflow,
+    workers: &[WorkerInfo],
     rr: &AtomicUsize,
     strategy: &LbStrategy,
 ) -> Vec<WorkerInfo> {
@@ -660,24 +744,16 @@ async fn resolve_workers(
             tls: None,
         }];
     }
-    if wf.workers.is_empty() {
+    if workers.is_empty() {
         return Vec::new();
     }
-    let n = wf.workers.len();
+    let n = workers.len();
     let start = match strategy {
         LbStrategy::RoundRobin => rr.fetch_add(1, Ordering::Relaxed) % n,
         LbStrategy::Weighted => pick_weighted(&wf.workers, rr),
         LbStrategy::LeastConn => pick_least_conn(&wf.workers).await,
     };
-    (0..n)
-        .map(|i| {
-            let cfg = &wf.workers[(start + i) % n];
-            WorkerInfo {
-                url: cfg.url().to_string(),
-                tls: cfg.tls().cloned(),
-            }
-        })
-        .collect()
+    (0..n).map(|i| workers[(start + i) % n].clone()).collect()
 }
 
 /// Weighted round-robin: picks the worker index proportionally to its weight.
@@ -986,13 +1062,23 @@ mod tests {
         workers.iter().map(|w| w.url.as_str()).collect()
     }
 
+    fn make_worker_infos(urls: &[&str]) -> Vec<WorkerInfo> {
+        urls.iter()
+            .map(|u| WorkerInfo {
+                url: u.to_string(),
+                tls: None,
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn pinned_worker_has_no_failover_targets() {
         // An explicit `worker:` must yield exactly that URL — never fail over.
         let w = wf(&["http://a", "http://b"], Some("http://pinned"));
         let rr = AtomicUsize::new(0);
+        let ew = make_worker_infos(&["http://a", "http://b"]);
         assert_eq!(
-            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
+            worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://pinned"]
         );
     }
@@ -1002,7 +1088,7 @@ mod tests {
         let w = wf(&[], None);
         let rr = AtomicUsize::new(0);
         assert!(
-            resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin)
+            resolve_workers("j", &w, &[], &rr, &LbStrategy::RoundRobin)
                 .await
                 .is_empty()
         );
@@ -1011,14 +1097,15 @@ mod tests {
     #[tokio::test]
     async fn round_robin_lists_all_workers_as_failover_targets() {
         let w = wf(&["http://a", "http://b", "http://c"], None);
+        let ew = make_worker_infos(&["http://a", "http://b", "http://c"]);
         let rr = AtomicUsize::new(0);
         assert_eq!(
-            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
+            worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://a", "http://b", "http://c"]
         );
         // The next job rotates the start but still lists every worker as a target.
         assert_eq!(
-            worker_urls(&resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await),
+            worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://b", "http://c", "http://a"]
         );
     }
