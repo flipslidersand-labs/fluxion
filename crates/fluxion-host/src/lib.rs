@@ -7,11 +7,12 @@ use anyhow::{Context, Result};
 use cache::ComponentCache;
 use fluxion_core::workflow::PermissionSet;
 use lru::LruCache;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
@@ -291,6 +292,91 @@ fn parse_network_entry(s: &str) -> Option<NetworkEntry> {
     None
 }
 
+// DNS resolution cache: maps raw allowlist entry → (resolved IPs, cache timestamp).
+static DNS_CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Resolve one allowlist entry to IP-based strings.
+///
+/// Pure IP entries (e.g. `"192.0.2.1:443"`, `"192.0.2.1"`) pass through unchanged.
+/// Hostname entries (e.g. `"api.example.com:443"`) are resolved via the OS resolver
+/// and the resolved IPs are cached for [`DNS_CACHE_TTL`].
+///
+/// If resolution fails the entry resolves to an empty list (= deny-all for that entry).
+async fn resolve_entry(s: &str) -> Vec<String> {
+    if parse_network_entry(s).is_some() {
+        return vec![s.to_string()];
+    }
+
+    // Split "hostname:port" or plain "hostname".
+    let (host, port): (String, Option<u16>) = if let Some((h, p)) = s.rsplit_once(':') {
+        match p.parse::<u16>() {
+            Ok(n) => (h.to_string(), Some(n)),
+            Err(_) => (s.to_string(), None),
+        }
+    } else {
+        (s.to_string(), None)
+    };
+
+    // Check TTL cache.
+    {
+        let cache = DNS_CACHE.lock().unwrap();
+        if let Some((ips, ts)) = cache.get(s) {
+            if ts.elapsed() < DNS_CACHE_TTL {
+                return ips
+                    .iter()
+                    .map(|ip| match port {
+                        Some(p) => format!("{ip}:{p}"),
+                        None => ip.to_string(),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    let lookup_target = format!("{}:{}", host, port.unwrap_or(0));
+    match tokio::net::lookup_host(&lookup_target).await {
+        Ok(addrs) => {
+            // Deduplicate IPs across multiple A/AAAA records.
+            let mut seen = std::collections::HashSet::new();
+            let ips: Vec<IpAddr> = addrs
+                .map(|a| a.ip())
+                .filter(|ip| seen.insert(*ip))
+                .collect();
+
+            let result: Vec<String> = ips
+                .iter()
+                .map(|ip| match port {
+                    Some(p) => format!("{ip}:{p}"),
+                    None => ip.to_string(),
+                })
+                .collect();
+
+            DNS_CACHE.lock().unwrap().insert(s.to_string(), (ips, Instant::now()));
+            result
+        }
+        Err(e) => {
+            // DNS failure → no IPs → this entry becomes deny-all (safe default).
+            tracing::warn!(entry = %s, error = %e, "network.allow: DNS resolution failed; entry blocked");
+            vec![]
+        }
+    }
+}
+
+/// Expand all network allowlist entries to IP-based strings.
+///
+/// Pure IP entries pass through unchanged. Hostname entries are resolved via DNS
+/// with a 60-second in-process cache. Unresolvable entries are dropped (safe fail).
+pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in allow {
+        out.extend(resolve_entry(entry).await);
+    }
+    out
+}
+
 fn build_wasi_ctx(
     perms: &PermissionSet,
     env: &std::collections::HashMap<String, String>,
@@ -336,11 +422,11 @@ fn build_wasi_ctx(
 
         anyhow::ensure!(
             !entries.is_empty(),
-            "network.allow has entries but none could be parsed as `IP` or `IP:port`"
+            "network.allow has entries but none resolved to a valid IP address. \
+             Pass the allow list through resolve_network_allow() before calling this function."
         );
 
-        // ip_name_lookup is false by default; we keep DNS off since the
-        // allowlist is IP-based. Callers must specify resolved IPs.
+        // All entries at this point are IP-based (resolved by resolve_network_allow).
         builder.socket_addr_check(move |addr, _use| {
             let ok = entries.iter().any(|e| e.matches(addr));
             Box::pin(async move { ok })
@@ -478,5 +564,240 @@ mod tests {
 
         let still_alive = weaks.iter().filter(|w| w.upgrade().is_some()).count();
         panic!("{still_alive}/5 ticker threads still alive 500ms after all hosts dropped");
+    }
+
+    // ── resolve_network_allow tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_ip_entries_pass_through() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "192.0.2.2".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+        assert_eq!(resolved, allow, "pure IP entries must pass through unchanged");
+    }
+
+    #[tokio::test]
+    async fn resolve_localhost_hostname() {
+        // "localhost" is guaranteed to resolve in any normal OS environment.
+        let allow = vec!["localhost:8080".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        // All returned entries must end in ":8080".
+        assert!(
+            resolved.iter().all(|e| e.ends_with(":8080")),
+            "port must be preserved: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP:port.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_unresolvable_hostname_returns_empty() {
+        // This domain is guaranteed to not exist.
+        let allow = vec!["this.hostname.does.not.exist.invalid:443".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(
+            resolved.is_empty(),
+            "unresolvable hostname must yield empty list (safe deny-all)"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_cache_hit_is_faster_than_miss() {
+        let allow = vec!["localhost:9999".to_string()];
+
+        // Warm up cache (first call = DNS lookup).
+        let t0 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let miss_us = t0.elapsed().as_micros();
+
+        // Second call should hit the in-process TTL cache.
+        let t1 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let hit_us = t1.elapsed().as_micros();
+
+        println!("DNS miss: {miss_us}µs  cache hit: {hit_us}µs");
+        assert!(
+            hit_us < miss_us,
+            "cache hit ({hit_us}µs) should be faster than DNS miss ({miss_us}µs)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mixed_ip_and_hostname() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "localhost:8080".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+        // Must contain the original IP entry.
+        assert!(resolved.contains(&"192.0.2.1:443".to_string()));
+        // Must also contain at least one resolved localhost IP.
+        assert!(resolved.len() > 1, "should have IP + resolved localhost: {resolved:?}");
+    }
+
+    // ── Phase 1: アドレス形式の基本解決 (#78) ────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_hostname_without_port() {
+        // "localhost" without a port should resolve to IP-only strings (no ":port" suffix).
+        let allow = vec!["localhost".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        for entry in &resolved {
+            // Must parse as a valid IP (AnyPort variant, no port suffix).
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+            // Must NOT contain a colon that would indicate an IP:port (IPv4 case).
+            // IPv6 addresses may contain colons but parse_network_entry handles them.
+            if let Ok(ip) = entry.parse::<IpAddr>() {
+                // Plain IP — correct.
+                let _ = ip;
+            } else if entry.starts_with('[') {
+                // IPv6 with brackets — also acceptable as AnyPort.
+            } else {
+                panic!("unexpected format for port-less entry: {entry}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv6_entries_pass_through() {
+        let cases = vec![
+            "[::1]:8080".to_string(),
+            "::1".to_string(),
+        ];
+        for input in &cases {
+            let resolved = resolve_network_allow(&[input.clone()]).await;
+            assert_eq!(
+                resolved,
+                vec![input.clone()],
+                "IPv6 entry {input:?} must pass through unchanged"
+            );
+            assert!(
+                parse_network_entry(input).is_some(),
+                "IPv6 entry must be parseable by parse_network_entry: {input}"
+            );
+        }
+    }
+
+    // ── Phase 2: 失敗・混在エントリの安全 fallback (#79) ─────────────────────
+
+    #[tokio::test]
+    async fn resolve_mixed_entries_with_failure() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "localhost:8080".to_string(),
+            "this.invalid.host.example:443".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+
+        // IP entry must be present unchanged.
+        assert!(
+            resolved.contains(&"192.0.2.1:443".to_string()),
+            "IP entry must survive: {resolved:?}"
+        );
+        // At least one localhost IP:8080 must be present.
+        assert!(
+            resolved.iter().any(|e| e.ends_with(":8080")),
+            "resolved localhost entry must be present: {resolved:?}"
+        );
+        // Unresolvable entry must NOT appear in any form.
+        assert!(
+            !resolved.iter().any(|e| e.contains("invalid.host")),
+            "unresolvable hostname must be excluded: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP addresses.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "every entry in result must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    // ── Phase 3: TTL キャッシュ期限切れ後の再解決 (#80) ──────────────────────
+
+    #[tokio::test]
+    async fn dns_cache_expires_after_ttl() {
+        let key = "localhost:19191".to_string();
+        let allow = vec![key.clone()];
+
+        // First call — populates cache.
+        let first = resolve_network_allow(&allow).await;
+        assert!(!first.is_empty(), "first resolution must succeed");
+
+        // Backdate the cache entry to simulate TTL expiry.
+        {
+            let mut cache = DNS_CACHE.lock().unwrap();
+            if let Some(entry) = cache.get_mut(&key) {
+                entry.1 = Instant::now() - DNS_CACHE_TTL - Duration::from_millis(1);
+            }
+        }
+
+        // Second call must re-resolve (not serve stale data).
+        let second = resolve_network_allow(&allow).await;
+        assert!(!second.is_empty(), "re-resolution after TTL expiry must succeed");
+
+        // Verify the cache timestamp was refreshed.
+        {
+            let cache = DNS_CACHE.lock().unwrap();
+            let age = cache.get(&key).map(|(_, ts)| ts.elapsed()).unwrap_or(Duration::MAX);
+            assert!(
+                age < Duration::from_secs(5),
+                "cache timestamp must be refreshed after TTL expiry, age={age:?}"
+            );
+        }
+    }
+
+    // ── Phase 4: 並行解決の Mutex 安全性 (#81) ───────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_concurrent_same_host() {
+        let allow = vec!["localhost:12345".to_string()];
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let a = allow.clone();
+                tokio::spawn(async move { resolve_network_allow(&a).await })
+            })
+            .collect();
+
+        let results = futures::future::join_all(handles).await;
+        for (i, r) in results.iter().enumerate() {
+            let resolved = r.as_ref().expect("task must not panic");
+            assert!(
+                !resolved.is_empty(),
+                "task {i} returned empty result — concurrent resolution failed"
+            );
+            // All entries must be valid IP:port strings.
+            for entry in resolved {
+                assert!(
+                    parse_network_entry(entry).is_some(),
+                    "task {i} returned invalid entry: {entry}"
+                );
+            }
+        }
+
+        // All tasks must agree on the same IP set.
+        let first_set: std::collections::HashSet<_> =
+            results[0].as_ref().unwrap().iter().cloned().collect();
+        for (i, r) in results.iter().enumerate().skip(1) {
+            let set: std::collections::HashSet<_> =
+                r.as_ref().unwrap().iter().cloned().collect();
+            assert_eq!(
+                first_set, set,
+                "task {i} returned different IPs than task 0: {set:?} vs {first_set:?}"
+            );
+        }
     }
 }
