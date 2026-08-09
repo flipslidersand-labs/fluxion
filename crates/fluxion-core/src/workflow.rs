@@ -7,12 +7,62 @@ use std::path::{Path, PathBuf};
 pub struct Workflow {
     pub name: String,
     pub jobs: IndexMap<String, JobDefinition>,
-    /// Remote worker URLs for distributed execution (round-robin if job has no explicit worker).
+    /// Remote worker configs for distributed execution (round-robin if job has no explicit worker).
     #[serde(default)]
-    pub workers: Vec<String>,
+    pub workers: Vec<WorkerConfig>,
     /// Maximum number of jobs that may execute concurrently. None = unbounded.
     #[serde(default)]
     pub max_parallel: Option<usize>,
+}
+
+/// Per-worker configuration. Supports both a plain URL string and an extended
+/// form with optional mTLS certificate paths.
+///
+/// ```yaml
+/// workers:
+///   - http://worker-a:7777          # plain form (no TLS)
+///   - url: https://worker-b:7778    # extended form
+///     tls:
+///       cert: /etc/fluxion/client.crt
+///       key:  /etc/fluxion/client.key
+///       ca:   /etc/fluxion/ca.crt
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkerConfig {
+    Simple(String),
+    Full {
+        url: String,
+        #[serde(default)]
+        tls: Option<TlsConfig>,
+    },
+}
+
+impl WorkerConfig {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Simple(s) => s,
+            Self::Full { url, .. } => url,
+        }
+    }
+
+    pub fn tls(&self) -> Option<&TlsConfig> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Full { tls, .. } => tls.as_ref(),
+        }
+    }
+}
+
+/// mTLS certificate paths used by the scheduler when connecting to a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the PEM-encoded client certificate.
+    pub cert: PathBuf,
+    /// Path to the PEM-encoded client private key.
+    pub key: PathBuf,
+    /// Path to the PEM-encoded CA certificate used to verify the server.
+    pub ca: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

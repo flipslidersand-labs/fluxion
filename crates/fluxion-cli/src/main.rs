@@ -109,6 +109,15 @@ enum WorkerCommands {
         /// Expose Prometheus /metrics on this port
         #[arg(long)]
         metrics_port: Option<u16>,
+        /// Path to the PEM-encoded server TLS certificate (enables TLS/mTLS)
+        #[arg(long, requires = "tls_key", requires = "ca_cert")]
+        tls_cert: Option<PathBuf>,
+        /// Path to the PEM-encoded server TLS private key
+        #[arg(long, requires = "tls_cert", requires = "ca_cert")]
+        tls_key: Option<PathBuf>,
+        /// Path to the PEM-encoded CA certificate used to verify clients (mTLS)
+        #[arg(long, requires = "tls_cert", requires = "tls_key")]
+        ca_cert: Option<PathBuf>,
     },
 }
 
@@ -259,8 +268,20 @@ async fn run(command: Commands) -> Result<()> {
         }
 
         Commands::Worker { action } => match action {
-            WorkerCommands::Serve { port, metrics_port } => {
-                fluxion_worker::serve(port, metrics_port).await?;
+            WorkerCommands::Serve {
+                port,
+                metrics_port,
+                tls_cert,
+                tls_key,
+                ca_cert,
+            } => {
+                let tls = match (tls_cert, tls_key, ca_cert) {
+                    (Some(cert), Some(key), Some(ca)) => {
+                        Some(fluxion_worker::WorkerTls { cert, key, ca })
+                    }
+                    _ => None,
+                };
+                fluxion_worker::serve(port, metrics_port, tls).await?;
             }
         },
 

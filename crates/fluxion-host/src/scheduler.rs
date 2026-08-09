@@ -10,7 +10,7 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, Workflow},
+    workflow::{PermissionSet, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
@@ -319,13 +319,23 @@ struct JobEvent {
     execute_us: u64,
 }
 
-/// Resolve the ordered list of worker URLs to try for a job, including failover targets.
-/// - `job.worker` set → `[that url]` (pinned; no failover — respect the explicit choice)
+/// A resolved worker target: URL plus optional mTLS config.
+#[derive(Clone)]
+struct WorkerInfo {
+    url: String,
+    tls: Option<TlsConfig>,
+}
+
+/// Resolve the ordered list of workers to try for a job, including failover targets.
+/// - `job.worker` set → `[that url, no TLS]` (pinned; no failover — respect the explicit choice)
 /// - `wf.workers` non-empty → round-robin start, then the remaining workers as failover targets
 /// - otherwise → empty (run locally)
-fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<String> {
+fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<WorkerInfo> {
     if let Some(url) = &wf.jobs[job_id].worker {
-        return vec![url.clone()];
+        return vec![WorkerInfo {
+            url: url.clone(),
+            tls: None,
+        }];
     }
     if wf.workers.is_empty() {
         return Vec::new();
@@ -333,7 +343,13 @@ fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<String>
     let n = wf.workers.len();
     let start = rr.fetch_add(1, Ordering::Relaxed) % n;
     (0..n)
-        .map(|i| wf.workers[(start + i) % n].clone())
+        .map(|i| {
+            let cfg = &wf.workers[(start + i) % n];
+            WorkerInfo {
+                url: cfg.url().to_string(),
+                tls: cfg.tls().cloned(),
+            }
+        })
         .collect()
 }
 
@@ -341,25 +357,34 @@ fn resolve_workers(job_id: &str, wf: &Workflow, rr: &AtomicUsize) -> Vec<String>
 /// fail over to the next worker; a worker that answers with an execution error
 /// stops immediately (retrying elsewhere would reproduce the same component bug).
 async fn run_with_failover(
-    workers: &[String],
+    workers: &[WorkerInfo],
     component: &str,
     input: &[u8],
     perms: &PermissionSet,
     env: &HashMap<String, String>,
 ) -> anyhow::Result<(Vec<u8>, crate::JobMetrics)> {
     let mut tried: Vec<String> = Vec::new();
-    for (i, url) in workers.iter().enumerate() {
+    for (i, worker) in workers.iter().enumerate() {
         let last = i + 1 == workers.len();
-        match remote::run_remote(url, component, input.to_vec(), perms, env).await {
+        match remote::run_remote(
+            &worker.url,
+            component,
+            input.to_vec(),
+            perms,
+            env,
+            worker.tls.as_ref(),
+        )
+        .await
+        {
             Ok(r) => {
-                crate::metrics::WORKER_HEALTH.with_label_values(&[url]).set(1.0);
+                crate::metrics::WORKER_HEALTH.with_label_values(&[&worker.url]).set(1.0);
                 return Ok(r);
             }
             Err(e) => {
-                tried.push(format!("{url}: {e}"));
+                tried.push(format!("{}: {e}", worker.url));
                 if e.is_failover() && !last {
-                    crate::metrics::WORKER_HEALTH.with_label_values(&[url]).set(0.0);
-                    tracing::warn!(worker = %url, error = %e, "worker unreachable, failing over");
+                    crate::metrics::WORKER_HEALTH.with_label_values(&[&worker.url]).set(0.0);
+                    tracing::warn!(worker = %worker.url, error = %e, "worker unreachable, failing over");
                     continue;
                 }
                 return Err(anyhow::anyhow!(
@@ -377,7 +402,7 @@ fn launch(
     wf: &Workflow,
     host: Arc<FluxionHost>,
     tx: mpsc::UnboundedSender<JobEvent>,
-    workers: Vec<String>,
+    workers: Vec<WorkerInfo>,
     sem: Arc<Semaphore>,
 ) {
     crate::metrics::ACTIVE_JOBS.inc();
@@ -445,7 +470,7 @@ fn launch(
                 worker = if workers.is_empty() {
                     "local"
                 } else {
-                    workers[0].as_str()
+                    workers[0].url.as_str()
                 },
                 "job finished"
             );
@@ -542,12 +567,16 @@ mod tests {
         serde_json::from_str(&s).unwrap()
     }
 
+    fn worker_urls(workers: &[WorkerInfo]) -> Vec<&str> {
+        workers.iter().map(|w| w.url.as_str()).collect()
+    }
+
     #[test]
     fn pinned_worker_has_no_failover_targets() {
         // An explicit `worker:` must yield exactly that URL — never fail over.
         let w = wf(&["http://a", "http://b"], Some("http://pinned"));
         let rr = AtomicUsize::new(0);
-        assert_eq!(resolve_workers("j", &w, &rr), vec!["http://pinned"]);
+        assert_eq!(worker_urls(&resolve_workers("j", &w, &rr)), vec!["http://pinned"]);
     }
 
     #[test]
@@ -562,12 +591,12 @@ mod tests {
         let w = wf(&["http://a", "http://b", "http://c"], None);
         let rr = AtomicUsize::new(0);
         assert_eq!(
-            resolve_workers("j", &w, &rr),
+            worker_urls(&resolve_workers("j", &w, &rr)),
             vec!["http://a", "http://b", "http://c"]
         );
         // The next job rotates the start but still lists every worker as a target.
         assert_eq!(
-            resolve_workers("j", &w, &rr),
+            worker_urls(&resolve_workers("j", &w, &rr)),
             vec!["http://b", "http://c", "http://a"]
         );
     }
@@ -646,6 +675,12 @@ mod tests {
         f
     }
 
+    fn plain_workers(urls: &[String]) -> Vec<WorkerInfo> {
+        urls.iter()
+            .map(|u| WorkerInfo { url: u.clone(), tls: None })
+            .collect()
+    }
+
     #[tokio::test]
     async fn fails_over_to_healthy_worker() {
         // First worker is unreachable; the job must succeed on the second.
@@ -653,8 +688,9 @@ mod tests {
         let up = spawn_mock_worker(b"ok-output".to_vec()).await;
         let f = tmp_wasm();
         let path = f.path().to_string_lossy().into_owned();
+        let workers = plain_workers(&[down, up]);
         let (out, _) = run_with_failover(
-            &[down, up],
+            &workers,
             &path,
             b"in",
             &PermissionSet::default(),
@@ -671,8 +707,9 @@ mod tests {
         let d2 = closed_port_url().await;
         let f = tmp_wasm();
         let path = f.path().to_string_lossy().into_owned();
+        let workers = plain_workers(&[d1.clone(), d2.clone()]);
         let err = run_with_failover(
-            &[d1.clone(), d2.clone()],
+            &workers,
             &path,
             b"in",
             &PermissionSet::default(),
