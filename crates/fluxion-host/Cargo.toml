@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow        = { workspace = true }
 cap-std       = { workspace = true }
+clap          = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
 wasmtime      = { workspace = true }
