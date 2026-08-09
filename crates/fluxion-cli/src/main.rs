@@ -35,6 +35,9 @@ enum Commands {
         /// Parse the workflow and show execution order without running anything
         #[arg(long)]
         dry_run: bool,
+        /// Expose Prometheus /metrics on this port while the workflow runs
+        #[arg(long)]
+        metrics_port: Option<u16>,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -103,6 +106,9 @@ enum WorkerCommands {
         /// Port to listen on
         #[arg(long, default_value = "7777")]
         port: u16,
+        /// Expose Prometheus /metrics on this port
+        #[arg(long)]
+        metrics_port: Option<u16>,
     },
 }
 
@@ -159,12 +165,16 @@ async fn run(command: Commands) -> Result<()> {
             path,
             metrics,
             dry_run,
+            metrics_port,
         } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
             if dry_run {
                 cmd_dry_run(&wf)?;
                 return Ok(());
+            }
+            if let Some(port) = metrics_port {
+                tokio::spawn(fluxion_host::metrics::serve(port));
             }
             let workflow_path = PathBuf::from(&path)
                 .canonicalize()
@@ -249,8 +259,8 @@ async fn run(command: Commands) -> Result<()> {
         }
 
         Commands::Worker { action } => match action {
-            WorkerCommands::Serve { port } => {
-                fluxion_worker::serve(port).await?;
+            WorkerCommands::Serve { port, metrics_port } => {
+                fluxion_worker::serve(port, metrics_port).await?;
             }
         },
 

@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod metrics;
 pub mod remote;
 pub mod scheduler;
 

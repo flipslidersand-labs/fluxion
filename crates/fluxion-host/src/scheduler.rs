@@ -221,6 +221,13 @@ async fn execute(
 
         match &event.status {
             JobStatus::Succeeded { elapsed } => {
+                crate::metrics::ACTIVE_JOBS.dec();
+                crate::metrics::JOBS_TOTAL
+                    .with_label_values(&["succeeded", &event.job_id])
+                    .inc();
+                crate::metrics::JOB_DURATION
+                    .with_label_values(&[&event.job_id])
+                    .observe(elapsed.as_secs_f64());
                 job_results.push(JobResult::from_succeeded_with_metrics(
                     event.job_id.clone(),
                     *elapsed,
@@ -230,6 +237,13 @@ async fn execute(
                 ));
             }
             JobStatus::Failed { elapsed, reason } => {
+                crate::metrics::ACTIVE_JOBS.dec();
+                crate::metrics::JOBS_TOTAL
+                    .with_label_values(&["failed", &event.job_id])
+                    .inc();
+                crate::metrics::JOB_DURATION
+                    .with_label_values(&[&event.job_id])
+                    .observe(elapsed.as_secs_f64());
                 overall_success = false;
                 job_results.push(JobResult::from_failed(
                     event.job_id.clone(),
@@ -337,10 +351,14 @@ async fn run_with_failover(
     for (i, url) in workers.iter().enumerate() {
         let last = i + 1 == workers.len();
         match remote::run_remote(url, component, input.to_vec(), perms, env).await {
-            Ok(r) => return Ok(r),
+            Ok(r) => {
+                crate::metrics::WORKER_HEALTH.with_label_values(&[url]).set(1.0);
+                return Ok(r);
+            }
             Err(e) => {
                 tried.push(format!("{url}: {e}"));
                 if e.is_failover() && !last {
+                    crate::metrics::WORKER_HEALTH.with_label_values(&[url]).set(0.0);
                     tracing::warn!(worker = %url, error = %e, "worker unreachable, failing over");
                     continue;
                 }
@@ -362,6 +380,7 @@ fn launch(
     workers: Vec<String>,
     sem: Arc<Semaphore>,
 ) {
+    crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
     let component = wf.jobs[&job_id].component.clone();
     let input = wf.jobs[&job_id]
