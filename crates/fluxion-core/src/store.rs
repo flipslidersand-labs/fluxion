@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS job_states (
     reason    TEXT,
     PRIMARY KEY (run_id, job_id)
 );
+CREATE TABLE IF NOT EXISTS workers (
+    url            TEXT PRIMARY KEY,
+    registered_at  INTEGER NOT NULL,
+    last_health    TEXT
+);
 ";
 
 pub struct RunStore {
@@ -221,6 +226,73 @@ impl RunStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+}
+
+// ── Worker registry ───────────────────────────────────────────────────────────
+
+pub struct WorkerEntry {
+    pub url: String,
+    pub registered_at: u64,
+    pub last_health: Option<String>,
+}
+
+impl RunStore {
+    pub fn register_worker(&self, url: &str) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO workers (url, registered_at, last_health)
+             VALUES (?1, ?2, NULL)
+             ON CONFLICT(url) DO NOTHING",
+            params![url, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_worker(&self, url: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM workers WHERE url = ?1", params![url])?;
+        Ok(n)
+    }
+
+    pub fn list_workers(&self) -> Result<Vec<WorkerEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, registered_at, last_health FROM workers ORDER BY registered_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(WorkerEntry {
+                    url: row.get(0)?,
+                    registered_at: row.get(1)?,
+                    last_health: row.get(2)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn update_worker_health(&self, url: &str, healthy: bool) -> Result<()> {
+        let status = if healthy { "healthy" } else { "unreachable" };
+        self.conn.execute(
+            "UPDATE workers SET last_health = ?1 WHERE url = ?2",
+            params![status, url],
+        )?;
+        Ok(())
+    }
+
+    /// Return URLs of all registered workers that are not marked unreachable.
+    pub fn registered_worker_urls(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url FROM workers WHERE last_health IS NULL OR last_health = 'healthy'
+             ORDER BY registered_at",
+        )?;
+        let urls = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(urls)
     }
 }
 

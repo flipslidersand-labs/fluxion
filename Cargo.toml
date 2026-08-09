@@ -34,6 +34,7 @@ rustls-pemfile = "2"
 rustls        = "0.23"
 hyper         = { version = "1", features = ["http1", "server"] }
 hyper-util    = { version = "0.1", features = ["tokio"] }
+futures       = "0.3"
 base64        = "0.22"
 assert_cmd    = "2"
 predicates    = "3"

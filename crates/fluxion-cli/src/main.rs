@@ -122,6 +122,18 @@ enum WorkerCommands {
         #[arg(long, requires = "tls_cert", requires = "tls_key")]
         ca_cert: Option<PathBuf>,
     },
+    /// Register a worker URL in the local registry
+    Register {
+        /// Worker URL (e.g. http://host:7777)
+        url: String,
+    },
+    /// Remove a worker URL from the local registry
+    Remove {
+        /// Worker URL to deregister
+        url: String,
+    },
+    /// List registered workers and their health status
+    List,
 }
 
 #[derive(Subcommand)]
@@ -287,6 +299,34 @@ async fn run(command: Commands) -> Result<()> {
                     _ => None,
                 };
                 fluxion_worker::serve(port, metrics_port, tls).await?;
+            }
+            WorkerCommands::Register { url } => {
+                let store = RunStore::open()?;
+                store.register_worker(&url)?;
+                println!("Registered: {url}");
+            }
+            WorkerCommands::Remove { url } => {
+                let store = RunStore::open()?;
+                let n = store.remove_worker(&url)?;
+                if n == 0 {
+                    println!("Not found: {url}");
+                } else {
+                    println!("Removed: {url}");
+                }
+            }
+            WorkerCommands::List => {
+                let store = RunStore::open()?;
+                let workers = store.list_workers()?;
+                if workers.is_empty() {
+                    println!("No workers registered.");
+                } else {
+                    println!("{:<40}  STATUS", "URL");
+                    println!("{}", "-".repeat(52));
+                    for w in workers {
+                        let status = w.last_health.as_deref().unwrap_or("unknown");
+                        println!("{:<40}  {}", w.url, status.to_uppercase());
+                    }
+                }
             }
         },
 
