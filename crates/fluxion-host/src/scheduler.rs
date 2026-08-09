@@ -877,6 +877,19 @@ fn launch(
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let start = Instant::now();
 
+            // Resolve hostnames in the network allowlist before entering spawn_blocking.
+            // Pure IP entries pass through unchanged; hostname entries are expanded to IPs
+            // (TTL-cached 60 s). Failed lookups are dropped → deny-all for those entries.
+            let perms = if !perms.network.allow.is_empty() {
+                let resolved = crate::resolve_network_allow(&perms.network.allow).await;
+                fluxion_core::workflow::PermissionSet {
+                    network: fluxion_core::workflow::NetworkPermission { allow: resolved },
+                    ..perms
+                }
+            } else {
+                perms
+            };
+
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
                 let c = component.clone();
                 let p = perms.clone();
