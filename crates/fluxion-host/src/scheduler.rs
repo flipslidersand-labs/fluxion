@@ -868,6 +868,9 @@ fn launch(
     });
     let perms = wf.jobs[&job_id].permissions.clone();
     let env = wf.jobs[&job_id].env.clone();
+    let output_size_limit = wf.jobs[&job_id]
+        .output_size_limit_mb
+        .unwrap_or(64) * 1024 * 1024;
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -911,13 +914,32 @@ fn launch(
 
             let elapsed = start.elapsed();
             let (status, output, compile_us, instantiate_us, execute_us) = match run_result {
-                Ok((out, m)) => (
-                    JobStatus::Succeeded { elapsed },
-                    Some(out),
-                    m.compile.as_micros() as u64,
-                    m.instantiate.as_micros() as u64,
-                    m.execute.as_micros() as u64,
-                ),
+                Ok((out, m)) => {
+                    if out.len() as u64 > output_size_limit {
+                        (
+                            JobStatus::Failed {
+                                elapsed,
+                                reason: format!(
+                                    "output size {} bytes exceeds limit of {} MB",
+                                    out.len(),
+                                    output_size_limit / (1024 * 1024)
+                                ),
+                            },
+                            None,
+                            m.compile.as_micros() as u64,
+                            m.instantiate.as_micros() as u64,
+                            m.execute.as_micros() as u64,
+                        )
+                    } else {
+                        (
+                            JobStatus::Succeeded { elapsed },
+                            Some(out),
+                            m.compile.as_micros() as u64,
+                            m.instantiate.as_micros() as u64,
+                            m.execute.as_micros() as u64,
+                        )
+                    }
+                }
                 Err(e) => (
                     JobStatus::Failed {
                         elapsed,

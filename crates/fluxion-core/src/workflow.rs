@@ -111,6 +111,10 @@ pub struct JobDefinition {
     /// Per-job parallelism cap (overrides workflow-level max_parallel).
     #[serde(default)]
     pub max_parallel: Option<usize>,
+    /// Maximum allowed output size in megabytes. Defaults to 64 MB.
+    /// Outputs exceeding this limit cause the job to fail with a clear error.
+    #[serde(default)]
+    pub output_size_limit_mb: Option<u64>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

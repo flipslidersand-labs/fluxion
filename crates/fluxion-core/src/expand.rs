@@ -57,6 +57,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     foreach: None,
                     input_from: None,
                     max_parallel: def.max_parallel,
+                    output_size_limit_mb: def.output_size_limit_mb,
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -226,6 +227,7 @@ mod tests {
                 foreach: Some("$.items".to_string()),
                 input_from: None,
                 max_parallel: None,
+                output_size_limit_mb: None,
             },
         );
         jobs.insert(
@@ -241,6 +243,7 @@ mod tests {
                 foreach: None,
                 input_from: Some("process".to_string()),
                 max_parallel: None,
+                output_size_limit_mb: None,
             },
         );
 
