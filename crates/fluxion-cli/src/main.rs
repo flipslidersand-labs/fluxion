@@ -193,7 +193,8 @@ async fn run(command: Commands) -> Result<()> {
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
             let host = Arc::new(FluxionHost::new()?);
-            let result = scheduler::run_with_strategy(&wf, &workflow_path, host, lb_strategy).await?;
+            let result =
+                scheduler::run_with_strategy(&wf, &workflow_path, host, lb_strategy).await?;
             if metrics {
                 print_metrics_table(&result.jobs);
             }

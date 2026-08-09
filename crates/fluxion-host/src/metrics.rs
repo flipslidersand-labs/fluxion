@@ -15,7 +15,9 @@ pub static JOB_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
         prometheus::histogram_opts!(
             "fluxion_job_duration_seconds",
             "Job execution duration in seconds",
-            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0]
+            vec![
+                0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0
+            ]
         ),
         &["job_name"]
     )
@@ -52,7 +54,7 @@ pub fn gather() -> String {
 
 /// Serve `/metrics` on the given port (blocking; run in a spawned task).
 pub async fn serve(port: u16) -> anyhow::Result<()> {
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     let app = Router::new().route("/metrics", get(|| async { gather() }));
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Prometheus metrics on :{port}/metrics");

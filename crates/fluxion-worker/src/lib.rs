@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 
 /// Global counter of jobs currently executing on this worker.
@@ -167,13 +167,9 @@ pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>)
     }
 }
 
-async fn serve_tls(
-    app: Router,
-    addr: &str,
-    tls: WorkerTls,
-) -> Result<()> {
-    use rustls::ServerConfig;
+async fn serve_tls(app: Router, addr: &str, tls: WorkerTls) -> Result<()> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::ServerConfig;
     use rustls_pemfile::{certs, private_key};
     use std::io::BufReader;
     use std::sync::Arc as StdArc;
@@ -183,8 +179,7 @@ async fn serve_tls(
     // Load server certificate chain.
     let cert_file = std::fs::File::open(&tls.cert)?;
     let server_certs: Vec<CertificateDer<'static>> =
-        certs(&mut BufReader::new(cert_file))
-            .collect::<std::result::Result<_, _>>()?;
+        certs(&mut BufReader::new(cert_file)).collect::<std::result::Result<_, _>>()?;
 
     // Load server private key.
     let key_file = std::fs::File::open(&tls.key)?;
@@ -194,16 +189,14 @@ async fn serve_tls(
     // Build client certificate verifier from CA (mTLS).
     let ca_file = std::fs::File::open(&tls.ca)?;
     let ca_certs: Vec<CertificateDer<'static>> =
-        certs(&mut BufReader::new(ca_file))
-            .collect::<std::result::Result<_, _>>()?;
+        certs(&mut BufReader::new(ca_file)).collect::<std::result::Result<_, _>>()?;
 
     let mut root_store = rustls::RootCertStore::empty();
     for cert in ca_certs {
         root_store.add(cert)?;
     }
     let client_verifier =
-        rustls::server::WebPkiClientVerifier::builder(StdArc::new(root_store))
-            .build()?;
+        rustls::server::WebPkiClientVerifier::builder(StdArc::new(root_store)).build()?;
 
     let server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
@@ -221,11 +214,13 @@ async fn serve_tls(
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => {
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                        let req = req.map(axum::body::Body::new);
-                        let mut app = app.clone();
-                        async move { app.call(req).await }
-                    });
+                    let service = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            let req = req.map(axum::body::Body::new);
+                            let mut app = app.clone();
+                            async move { app.call(req).await }
+                        },
+                    );
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, service)
                         .await;

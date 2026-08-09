@@ -33,7 +33,15 @@ pub enum LbStrategy {
 
 /// Run a workflow from scratch, printing progress to stdout.
 pub async fn run(wf: &Workflow, workflow_path: &Path, host: Arc<FluxionHost>) -> Result<RunResult> {
-    run_inner(wf, workflow_path, host, HashMap::new(), true, LbStrategy::default()).await
+    run_inner(
+        wf,
+        workflow_path,
+        host,
+        HashMap::new(),
+        true,
+        LbStrategy::default(),
+    )
+    .await
 }
 
 /// Run a workflow from scratch with the specified load-balancing strategy.
@@ -52,7 +60,15 @@ pub async fn run_silent(
     workflow_path: &Path,
     host: Arc<FluxionHost>,
 ) -> Result<RunResult> {
-    run_inner(wf, workflow_path, host, HashMap::new(), false, LbStrategy::default()).await
+    run_inner(
+        wf,
+        workflow_path,
+        host,
+        HashMap::new(),
+        false,
+        LbStrategy::default(),
+    )
+    .await
 }
 
 /// Run a workflow silently with the specified load-balancing strategy.
@@ -73,7 +89,16 @@ pub async fn retry(
     prev_run_id: &str,
     from_job: &str,
 ) -> Result<RunResult> {
-    retry_inner(wf, workflow_path, host, prev_run_id, from_job, true, LbStrategy::default()).await
+    retry_inner(
+        wf,
+        workflow_path,
+        host,
+        prev_run_id,
+        from_job,
+        true,
+        LbStrategy::default(),
+    )
+    .await
 }
 
 /// Retry silently — for MCP / programmatic use.
@@ -84,7 +109,16 @@ pub async fn retry_silent(
     prev_run_id: &str,
     from_job: &str,
 ) -> Result<RunResult> {
-    retry_inner(wf, workflow_path, host, prev_run_id, from_job, false, LbStrategy::default()).await
+    retry_inner(
+        wf,
+        workflow_path,
+        host,
+        prev_run_id,
+        from_job,
+        false,
+        LbStrategy::default(),
+    )
+    .await
 }
 
 async fn run_inner(
@@ -231,7 +265,15 @@ async fn execute(
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
         let workers = resolve_workers(&job_id, wf, &rr, &strategy).await;
-        launch(&job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), None);
+        launch(
+            &job_id,
+            wf,
+            host.clone(),
+            tx.clone(),
+            workers,
+            sem.clone(),
+            None,
+        );
         statuses.insert(job_id, JobStatus::Running);
         in_flight += 1;
     }
@@ -247,7 +289,15 @@ async fn execute(
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
             let workers = resolve_workers(job_id, wf, &rr, &strategy).await;
             let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
-            launch(job_id, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
+            launch(
+                job_id,
+                wf,
+                host.clone(),
+                tx.clone(),
+                workers,
+                sem.clone(),
+                fanin_input,
+            );
             statuses.insert(job_id.clone(), JobStatus::Running);
             in_flight += 1;
         }
@@ -323,18 +373,21 @@ async fn execute(
                     continue;
                 }
                 // All deps must be in a terminal done state (Succeeded OR Skipped).
-                let all_done = dag.deps[dep]
-                    .iter()
-                    .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled));
+                let all_done = dag.deps[dep].iter().all(|d| {
+                    matches!(
+                        statuses[d],
+                        JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled
+                    )
+                });
                 if all_done {
                     let job_def = &wf.jobs[dep];
 
                     // Cancel fan-in if any foreach child failed.
                     let foreach_child_failed = if let Some(src) = &job_def.input_from {
                         if let Some(children) = foreach_map.get(src) {
-                            children.iter().any(|c| {
-                                matches!(statuses.get(c), Some(JobStatus::Failed { .. }))
-                            })
+                            children
+                                .iter()
+                                .any(|c| matches!(statuses.get(c), Some(JobStatus::Failed { .. })))
                         } else {
                             false
                         }
@@ -370,12 +423,7 @@ async fn execute(
 
                     if should_skip {
                         if print_progress {
-                            println!(
-                                "[{}] {:<pad$}  SKIPPED",
-                                timestamp(),
-                                dep,
-                                pad = pad
-                            );
+                            println!("[{}] {:<pad$}  SKIPPED", timestamp(), dep, pad = pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Skipped)?;
                         statuses.insert(dep.clone(), JobStatus::Skipped);
@@ -384,26 +432,29 @@ async fn execute(
                             std::collections::VecDeque::new();
                         cascade_queue.push_back(dep.clone());
                         while let Some(skipped_id) = cascade_queue.pop_front() {
-                            for downstream in dag
-                                .dependents
-                                .get(&skipped_id)
-                                .into_iter()
-                                .flatten()
+                            for downstream in dag.dependents.get(&skipped_id).into_iter().flatten()
                             {
                                 if pre_succeeded.contains_key(downstream) {
                                     continue;
                                 }
                                 if matches!(statuses[downstream.as_str()], JobStatus::Pending) {
-                                    let all_cascade_done = dag.deps[downstream.as_str()]
-                                        .iter()
-                                        .all(|d| matches!(statuses[d], JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled));
+                                    let all_cascade_done =
+                                        dag.deps[downstream.as_str()].iter().all(|d| {
+                                            matches!(
+                                                statuses[d],
+                                                JobStatus::Succeeded { .. }
+                                                    | JobStatus::Skipped
+                                                    | JobStatus::Cancelled
+                                            )
+                                        });
                                     if all_cascade_done {
                                         let downstream_def = &wf.jobs[downstream.as_str()];
-                                        let cascade_skip = if let Some(when_expr) = &downstream_def.when {
-                                            !eval_when(when_expr, &statuses)
-                                        } else {
-                                            true
-                                        };
+                                        let cascade_skip =
+                                            if let Some(when_expr) = &downstream_def.when {
+                                                !eval_when(when_expr, &statuses)
+                                            } else {
+                                                true
+                                            };
                                         if cascade_skip {
                                             if print_progress {
                                                 println!(
@@ -413,17 +464,40 @@ async fn execute(
                                                     pad = pad
                                                 );
                                             }
-                                            store.upsert_job(run_id, downstream, &JobStatus::Skipped)?;
+                                            store.upsert_job(
+                                                run_id,
+                                                downstream,
+                                                &JobStatus::Skipped,
+                                            )?;
                                             statuses.insert(downstream.clone(), JobStatus::Skipped);
                                             cascade_queue.push_back(downstream.clone());
                                         } else {
                                             if print_progress {
                                                 print_running(downstream, pad);
                                             }
-                                            store.upsert_job(run_id, downstream, &JobStatus::Running)?;
-                                            let workers = resolve_workers(downstream, wf, &rr, &strategy).await;
-                                            let fanin_input = build_fanin_input(downstream, wf, foreach_map, &job_outputs);
-                                            launch(downstream, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
+                                            store.upsert_job(
+                                                run_id,
+                                                downstream,
+                                                &JobStatus::Running,
+                                            )?;
+                                            let workers =
+                                                resolve_workers(downstream, wf, &rr, &strategy)
+                                                    .await;
+                                            let fanin_input = build_fanin_input(
+                                                downstream,
+                                                wf,
+                                                foreach_map,
+                                                &job_outputs,
+                                            );
+                                            launch(
+                                                downstream,
+                                                wf,
+                                                host.clone(),
+                                                tx.clone(),
+                                                workers,
+                                                sem.clone(),
+                                                fanin_input,
+                                            );
                                             statuses.insert(downstream.clone(), JobStatus::Running);
                                             in_flight += 1;
                                         }
@@ -438,11 +512,18 @@ async fn execute(
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
                         let workers = resolve_workers(dep, wf, &rr, &strategy).await;
                         let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
-                        launch(dep, wf, host.clone(), tx.clone(), workers, sem.clone(), fanin_input);
+                        launch(
+                            dep,
+                            wf,
+                            host.clone(),
+                            tx.clone(),
+                            workers,
+                            sem.clone(),
+                            fanin_input,
+                        );
                         statuses.insert(dep.clone(), JobStatus::Running);
                         in_flight += 1;
                     }
-
                 }
             }
         }
@@ -651,13 +732,17 @@ async fn run_with_failover(
         .await
         {
             Ok(r) => {
-                crate::metrics::WORKER_HEALTH.with_label_values(&[&worker.url]).set(1.0);
+                crate::metrics::WORKER_HEALTH
+                    .with_label_values(&[&worker.url])
+                    .set(1.0);
                 return Ok(r);
             }
             Err(e) => {
                 tried.push(format!("{}: {e}", worker.url));
                 if e.is_failover() && !last {
-                    crate::metrics::WORKER_HEALTH.with_label_values(&[&worker.url]).set(0.0);
+                    crate::metrics::WORKER_HEALTH
+                        .with_label_values(&[&worker.url])
+                        .set(0.0);
                     tracing::warn!(worker = %worker.url, error = %e, "worker unreachable, failing over");
                     continue;
                 }
@@ -709,9 +794,7 @@ fn launch(
                 let i = input.clone();
                 match tokio::time::timeout(
                     Duration::from_secs(timeout_secs),
-                    tokio::task::spawn_blocking(move || {
-                        host.run_component_measured(&c, i, &p, &e)
-                    }),
+                    tokio::task::spawn_blocking(move || host.run_component_measured(&c, i, &p, &e)),
                 )
                 .await
                 {
@@ -904,7 +987,11 @@ mod tests {
     async fn no_workers_runs_locally() {
         let w = wf(&[], None);
         let rr = AtomicUsize::new(0);
-        assert!(resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin).await.is_empty());
+        assert!(
+            resolve_workers("j", &w, &rr, &LbStrategy::RoundRobin)
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1054,7 +1141,10 @@ mod tests {
 
     fn plain_workers(urls: &[String]) -> Vec<WorkerInfo> {
         urls.iter()
-            .map(|u| WorkerInfo { url: u.clone(), tls: None })
+            .map(|u| WorkerInfo {
+                url: u.clone(),
+                tls: None,
+            })
             .collect()
     }
 

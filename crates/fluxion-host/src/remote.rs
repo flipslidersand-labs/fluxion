@@ -62,20 +62,17 @@ pub async fn run_remote(
         "env": env,
     });
 
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(perms.limits.timeout_secs + 10));
+    let mut builder =
+        reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 10));
 
     if let Some(tls) = tls {
-        let cert_pem =
-            std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
-        let key_pem =
-            std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
+        let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
+        let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
         // reqwest::Identity::from_pem expects the cert followed by the key in one PEM blob.
         let identity_pem = [cert_pem, key_pem].concat();
         let identity = reqwest::Identity::from_pem(&identity_pem)
             .map_err(|e| RemoteError::Execution(e.into()))?;
-        let ca_pem =
-            std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_pem = std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
         let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
             .map_err(|e| RemoteError::Execution(e.into()))?;
         builder = builder

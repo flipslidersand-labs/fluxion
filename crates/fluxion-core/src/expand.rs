@@ -134,11 +134,17 @@ pub fn extract_jsonpath_array(path: &str, input: &str) -> Result<Vec<Value>> {
     let val = if path == "$" || path == "$[*]" {
         root
     } else if let Some(field) = path.strip_prefix("$.") {
-        root.get(field)
-            .cloned()
-            .with_context(|| format!("foreach path '{}': field '{}' not found in JSON", path, field))?
+        root.get(field).cloned().with_context(|| {
+            format!(
+                "foreach path '{}': field '{}' not found in JSON",
+                path, field
+            )
+        })?
     } else {
-        bail!("Unsupported foreach JSONPath '{}'. Supported: '$', '$[*]', '$.field'", path);
+        bail!(
+            "Unsupported foreach JSONPath '{}'. Supported: '$', '$[*]', '$.field'",
+            path
+        );
     };
 
     match val {

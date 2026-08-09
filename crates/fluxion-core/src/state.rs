@@ -8,7 +8,7 @@ pub enum JobStatus {
     Succeeded { elapsed: Duration },
     Failed { elapsed: Duration, reason: String },
     Cancelled,
-    Skipped,  // when: condition was false, or a dependency was skipped
+    Skipped, // when: condition was false, or a dependency was skipped
 }
 
 impl JobStatus {
