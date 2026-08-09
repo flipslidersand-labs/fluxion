@@ -2,6 +2,7 @@ pub mod cache;
 pub mod metrics;
 pub mod remote;
 pub mod scheduler;
+pub mod worker_registry;
 
 use anyhow::{Context, Result};
 use cache::ComponentCache;
@@ -144,6 +145,17 @@ impl FluxionHost {
         perms: &PermissionSet,
         env: &std::collections::HashMap<String, String>,
     ) -> Result<(Vec<u8>, JobMetrics)> {
+        // Emit OTel audit event for the permission set being applied.
+        tracing::info!(
+            target: "fluxion.audit",
+            fs_read  = ?perms.filesystem.read,
+            fs_write = ?perms.filesystem.write,
+            net_allow = ?perms.network.allow,
+            memory_mb = perms.limits.memory_mb,
+            timeout_secs = perms.limits.timeout_secs,
+            "permission_grant"
+        );
+
         let ctx = build_wasi_ctx(perms, env)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
@@ -293,6 +305,7 @@ fn parse_network_entry(s: &str) -> Option<NetworkEntry> {
 }
 
 // DNS resolution cache: maps raw allowlist entry → (resolved IPs, cache timestamp).
+#[allow(clippy::type_complexity)]
 static DNS_CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -323,16 +336,17 @@ async fn resolve_entry(s: &str) -> Vec<String> {
     // Check TTL cache.
     {
         let cache = DNS_CACHE.lock().unwrap();
-        if let Some((ips, ts)) = cache.get(s) {
-            if ts.elapsed() < DNS_CACHE_TTL {
-                return ips
-                    .iter()
-                    .map(|ip| match port {
-                        Some(p) => format!("{ip}:{p}"),
-                        None => ip.to_string(),
-                    })
-                    .collect();
-            }
+        #[allow(clippy::collapsible_if)]
+        if let Some((ips, ts)) = cache.get(s)
+            && ts.elapsed() < DNS_CACHE_TTL
+        {
+            return ips
+                .iter()
+                .map(|ip| match port {
+                    Some(p) => format!("{ip}:{p}"),
+                    None => ip.to_string(),
+                })
+                .collect();
         }
     }
 
@@ -354,7 +368,10 @@ async fn resolve_entry(s: &str) -> Vec<String> {
                 })
                 .collect();
 
-            DNS_CACHE.lock().unwrap().insert(s.to_string(), (ips, Instant::now()));
+            DNS_CACHE
+                .lock()
+                .unwrap()
+                .insert(s.to_string(), (ips, Instant::now()));
             result
         }
         Err(e) => {
@@ -375,6 +392,68 @@ pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
         out.extend(resolve_entry(entry).await);
     }
     out
+}
+
+/// Resolve a DNS SRV record to a list of `http://host:port` worker URLs.
+///
+/// Returns an empty `Vec` (not an error) when the SRV query fails, so the
+/// caller can fall back to the static worker list without interruption.
+pub async fn resolve_srv_workers(srv_name: &str) -> Vec<String> {
+    let srv = srv_name.to_string();
+    tokio::task::spawn_blocking(move || resolve_srv_workers_sync(&srv))
+        .await
+        .unwrap_or_default()
+}
+
+fn resolve_srv_workers_sync(srv_name: &str) -> Vec<String> {
+    use hickory_resolver::Resolver;
+    let resolver = match Resolver::from_system_conf() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: resolver creation failed, using static workers");
+            return vec![];
+        }
+    };
+    match resolver.srv_lookup(srv_name) {
+        Ok(lookup) => {
+            let mut urls = Vec::new();
+            for record in lookup.iter() {
+                let target = record.target().to_utf8();
+                let target = target.trim_end_matches('.');
+                let port = record.port();
+                urls.push(format!("http://{}:{}", target, port));
+            }
+            tracing::info!(%srv_name, count = urls.len(), "DNS SRV: resolved workers");
+            urls
+        }
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: query failed, using static workers");
+            vec![]
+        }
+    }
+}
+
+/// Verify that `wasm_path` matches the expected SHA-256 hex digest.
+///
+/// Returns `Ok(())` when digest matches or `expected` is `None`.
+/// Returns `Err` when the file cannot be read or the digest does not match.
+pub fn verify_component_digest(wasm_path: impl AsRef<Path>, expected: Option<&str>) -> Result<()> {
+    let Some(expected_hex) = expected else {
+        return Ok(());
+    };
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(wasm_path.as_ref())
+        .with_context(|| format!("failed to read {:?} for digest check", wasm_path.as_ref()))?;
+    let hash = Sha256::digest(&bytes);
+    let actual: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    anyhow::ensure!(
+        actual.eq_ignore_ascii_case(expected_hex),
+        "SHA-256 mismatch for {:?}: expected {}, got {}",
+        wasm_path.as_ref(),
+        expected_hex,
+        actual
+    );
+    Ok(())
 }
 
 fn build_wasi_ctx(
@@ -429,6 +508,11 @@ fn build_wasi_ctx(
         // All entries at this point are IP-based (resolved by resolve_network_allow).
         builder.socket_addr_check(move |addr, _use| {
             let ok = entries.iter().any(|e| e.matches(addr));
+            if ok {
+                tracing::info!(target: "fluxion.audit", %addr, "network_allow");
+            } else {
+                tracing::warn!(target: "fluxion.audit", %addr, "network_deny");
+            }
             Box::pin(async move { ok })
         });
     }
@@ -439,6 +523,67 @@ fn build_wasi_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #67 SHA-256 component digest verification ─────────────────────────────
+
+    #[test]
+    fn verify_digest_passes_when_none() {
+        // No expected hash → verification always passes.
+        assert!(verify_component_digest("/nonexistent/path.wasm", None).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_missing_file() {
+        let result = verify_component_digest("/nonexistent/missing.wasm", Some("deadbeef"));
+        assert!(result.is_err(), "missing file must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("failed to read"),
+            "error should mention read failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_digest_passes_on_correct_hash() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let hash = Sha256::digest(b"hello wasm");
+        let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+        assert!(verify_component_digest(f.path(), Some(&hex)).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_wrong_hash() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let result = verify_component_digest(
+            f.path(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        assert!(result.is_err(), "wrong hash must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("mismatch"),
+            "error must mention mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_digest_is_case_insensitive() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"case test").unwrap();
+        let hash = Sha256::digest(b"case test");
+        let upper_hex: String = hash.iter().map(|b| format!("{:02X}", b)).collect();
+        assert!(
+            verify_component_digest(f.path(), Some(&upper_hex)).is_ok(),
+            "uppercase hex must match"
+        );
+    }
 
     #[test]
     fn parse_exact_addr() {
@@ -570,12 +715,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ip_entries_pass_through() {
-        let allow = vec![
-            "192.0.2.1:443".to_string(),
-            "192.0.2.2".to_string(),
-        ];
+        let allow = vec!["192.0.2.1:443".to_string(), "192.0.2.2".to_string()];
         let resolved = resolve_network_allow(&allow).await;
-        assert_eq!(resolved, allow, "pure IP entries must pass through unchanged");
+        assert_eq!(
+            resolved, allow,
+            "pure IP entries must pass through unchanged"
+        );
     }
 
     #[tokio::test]
@@ -583,7 +728,10 @@ mod tests {
         // "localhost" is guaranteed to resolve in any normal OS environment.
         let allow = vec!["localhost:8080".to_string()];
         let resolved = resolve_network_allow(&allow).await;
-        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
         // All returned entries must end in ":8080".
         assert!(
             resolved.iter().all(|e| e.ends_with(":8080")),
@@ -632,14 +780,177 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mixed_ip_and_hostname() {
-        let allow = vec![
-            "192.0.2.1:443".to_string(),
-            "localhost:8080".to_string(),
-        ];
+        let allow = vec!["192.0.2.1:443".to_string(), "localhost:8080".to_string()];
         let resolved = resolve_network_allow(&allow).await;
         // Must contain the original IP entry.
         assert!(resolved.contains(&"192.0.2.1:443".to_string()));
         // Must also contain at least one resolved localhost IP.
-        assert!(resolved.len() > 1, "should have IP + resolved localhost: {resolved:?}");
+        assert!(
+            resolved.len() > 1,
+            "should have IP + resolved localhost: {resolved:?}"
+        );
+    }
+
+    // ── Phase 1: アドレス形式の基本解決 (#78) ────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_hostname_without_port() {
+        // "localhost" without a port should resolve to IP-only strings (no ":port" suffix).
+        let allow = vec!["localhost".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
+        for entry in &resolved {
+            // Must parse as a valid IP (AnyPort variant, no port suffix).
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+            // Must NOT contain a colon that would indicate an IP:port (IPv4 case).
+            // IPv6 addresses may contain colons but parse_network_entry handles them.
+            if let Ok(ip) = entry.parse::<IpAddr>() {
+                // Plain IP — correct.
+                let _ = ip;
+            } else if entry.starts_with('[') {
+                // IPv6 with brackets — also acceptable as AnyPort.
+            } else {
+                panic!("unexpected format for port-less entry: {entry}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv6_entries_pass_through() {
+        let cases = vec!["[::1]:8080".to_string(), "::1".to_string()];
+        for input in &cases {
+            let resolved = resolve_network_allow(&[input.clone()]).await;
+            assert_eq!(
+                resolved,
+                vec![input.clone()],
+                "IPv6 entry {input:?} must pass through unchanged"
+            );
+            assert!(
+                parse_network_entry(input).is_some(),
+                "IPv6 entry must be parseable by parse_network_entry: {input}"
+            );
+        }
+    }
+
+    // ── Phase 2: 失敗・混在エントリの安全 fallback (#79) ─────────────────────
+
+    #[tokio::test]
+    async fn resolve_mixed_entries_with_failure() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "localhost:8080".to_string(),
+            "this.invalid.host.example:443".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+
+        // IP entry must be present unchanged.
+        assert!(
+            resolved.contains(&"192.0.2.1:443".to_string()),
+            "IP entry must survive: {resolved:?}"
+        );
+        // At least one localhost IP:8080 must be present.
+        assert!(
+            resolved.iter().any(|e| e.ends_with(":8080")),
+            "resolved localhost entry must be present: {resolved:?}"
+        );
+        // Unresolvable entry must NOT appear in any form.
+        assert!(
+            !resolved.iter().any(|e| e.contains("invalid.host")),
+            "unresolvable hostname must be excluded: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP addresses.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "every entry in result must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    // ── Phase 3: TTL キャッシュ期限切れ後の再解決 (#80) ──────────────────────
+
+    #[tokio::test]
+    async fn dns_cache_expires_after_ttl() {
+        let key = "localhost:19191".to_string();
+        let allow = vec![key.clone()];
+
+        // First call — populates cache.
+        let first = resolve_network_allow(&allow).await;
+        assert!(!first.is_empty(), "first resolution must succeed");
+
+        // Backdate the cache entry to simulate TTL expiry.
+        {
+            let mut cache = DNS_CACHE.lock().unwrap();
+            if let Some(entry) = cache.get_mut(&key) {
+                entry.1 = Instant::now() - DNS_CACHE_TTL - Duration::from_millis(1);
+            }
+        }
+
+        // Second call must re-resolve (not serve stale data).
+        let second = resolve_network_allow(&allow).await;
+        assert!(
+            !second.is_empty(),
+            "re-resolution after TTL expiry must succeed"
+        );
+
+        // Verify the cache timestamp was refreshed.
+        {
+            let cache = DNS_CACHE.lock().unwrap();
+            let age = cache
+                .get(&key)
+                .map(|(_, ts)| ts.elapsed())
+                .unwrap_or(Duration::MAX);
+            assert!(
+                age < Duration::from_secs(5),
+                "cache timestamp must be refreshed after TTL expiry, age={age:?}"
+            );
+        }
+    }
+
+    // ── Phase 4: 並行解決の Mutex 安全性 (#81) ───────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_concurrent_same_host() {
+        let allow = vec!["localhost:12345".to_string()];
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let a = allow.clone();
+                tokio::spawn(async move { resolve_network_allow(&a).await })
+            })
+            .collect();
+
+        let results = futures::future::join_all(handles).await;
+        for (i, r) in results.iter().enumerate() {
+            let resolved = r.as_ref().expect("task must not panic");
+            assert!(
+                !resolved.is_empty(),
+                "task {i} returned empty result — concurrent resolution failed"
+            );
+            // All entries must be valid IP:port strings.
+            for entry in resolved {
+                assert!(
+                    parse_network_entry(entry).is_some(),
+                    "task {i} returned invalid entry: {entry}"
+                );
+            }
+        }
+
+        // All tasks must agree on the same IP set.
+        let first_set: std::collections::HashSet<_> =
+            results[0].as_ref().unwrap().iter().cloned().collect();
+        for (i, r) in results.iter().enumerate().skip(1) {
+            let set: std::collections::HashSet<_> = r.as_ref().unwrap().iter().cloned().collect();
+            assert_eq!(
+                first_set, set,
+                "task {i} returned different IPs than task 0: {set:?} vs {first_set:?}"
+            );
+        }
     }
 }
