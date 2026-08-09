@@ -119,8 +119,12 @@ async fn handle_health() -> Json<serde_json::Value> {
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
-pub async fn serve(port: u16) -> Result<()> {
+pub async fn serve(port: u16, metrics_port: Option<u16>) -> Result<()> {
     let host = Arc::new(FluxionHost::new()?);
+
+    if let Some(mp) = metrics_port {
+        tokio::spawn(fluxion_host::metrics::serve(mp));
+    }
 
     let app = Router::new()
         .route("/run", post(handle_run))
