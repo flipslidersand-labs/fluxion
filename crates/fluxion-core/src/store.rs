@@ -354,7 +354,6 @@ mod tests {
     // Enable (remove todo!/panic) once the method is implemented.
 
     #[test]
-    #[ignore = "feature not yet implemented (#30)"]
     fn prune_deletes_old_runs_and_keeps_recent() {
         let store = open_tmp();
         let old_id = "run-old";
@@ -373,12 +372,15 @@ mod tests {
             .create_run(new_id, "wf", std::path::Path::new("wf.yaml"))
             .unwrap();
 
-        // -- replace todo! with the real call once #30 is implemented --
-        todo!("store.prune(30) → assert deleted==1, list_runs returns only new_id");
+        let deleted = store.prune(30).unwrap();
+        assert_eq!(deleted, 1, "exactly one old run should be pruned");
+
+        let runs = store.list_runs(10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, new_id);
     }
 
     #[test]
-    #[ignore = "feature not yet implemented (#30)"]
     fn prune_also_deletes_orphaned_job_states() {
         let store = open_tmp();
         let old_id = "run-orphan";
@@ -400,8 +402,17 @@ mod tests {
             )
             .unwrap();
 
-        // -- replace todo! with the real call once #30 is implemented --
-        todo!("store.prune(30) → assert job_states count for old_id == 0");
+        store.prune(30).unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_states WHERE run_id = ?1",
+                params![old_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "orphaned job_states must be deleted with their run");
     }
 }
 
