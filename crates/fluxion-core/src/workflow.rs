@@ -84,6 +84,17 @@ pub struct JobDefinition {
     /// Example: `"validate.status == 'SUCCESS'"`
     #[serde(default)]
     pub when: Option<String>,
+    /// JSONPath expression. Expands input JSON array to fan-out child jobs
+    /// named `<job_id>.0`, `<job_id>.1`, …
+    #[serde(default)]
+    pub foreach: Option<String>,
+    /// Fan-in: collect all outputs from the named foreach job as a JSON array
+    /// and pass it as this job's input.
+    #[serde(default)]
+    pub input_from: Option<String>,
+    /// Per-job parallelism cap (overrides workflow-level max_parallel).
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────
@@ -170,6 +181,23 @@ impl Workflow {
                     dep
                 );
             }
+            // Validate input_from references a foreach job
+            if let Some(src) = &def.input_from {
+                let src_def = self.jobs.get(src.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Job '{}' has input_from '{}' which does not exist",
+                        job_id,
+                        src
+                    )
+                })?;
+                anyhow::ensure!(
+                    src_def.foreach.is_some(),
+                    "Job '{}' has input_from '{}' but '{}' does not have foreach",
+                    job_id,
+                    src,
+                    src
+                );
+            }
         }
         Ok(())
     }
@@ -199,5 +227,25 @@ jobs:
         let result: Result<Workflow, _> = serde_yaml::from_str(src);
         println!("result: {result:?}");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_foreach_yaml() {
+        let src = r#"
+name: fanout-test
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+    max_parallel: 4
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+"#;
+        // validate() checks input_from → foreach, which passes here
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert!(wf.jobs["process"].foreach.is_some());
+        assert_eq!(wf.jobs["aggregate"].input_from.as_deref(), Some("process"));
     }
 }
