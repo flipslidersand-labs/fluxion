@@ -835,13 +835,16 @@ async fn cmd_schedule_daemon() -> Result<()> {
 }
 
 async fn fire_due_schedules(host: Arc<FluxionHost>) {
-    let store = match RunStore::open() {
-        Ok(s) => s,
-        Err(e) => { tracing::error!("store open failed: {e}"); return; }
-    };
-    let due = match store.due_schedules() {
-        Ok(d) => d,
-        Err(e) => { tracing::error!("due_schedules failed: {e}"); return; }
+    // Collect due schedules then drop the store (rusqlite::Connection is !Send).
+    let due = {
+        let store = match RunStore::open() {
+            Ok(s) => s,
+            Err(e) => { tracing::error!("store open failed: {e}"); return; }
+        };
+        match store.due_schedules() {
+            Ok(d) => d,
+            Err(e) => { tracing::error!("due_schedules failed: {e}"); return; }
+        }
     };
     for sched in due {
         let wf = match Workflow::from_file(&sched.workflow_path) {
@@ -852,27 +855,19 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
             }
         };
         let wf_path = PathBuf::from(&sched.workflow_path);
-        let h = Arc::clone(&host);
         let sched_id = sched.id.clone();
         let cron_expr = sched.cron_expr.clone();
-        tokio::spawn(async move {
-            tracing::info!(schedule = %sched_id, "firing scheduled workflow");
-            let _ = scheduler::run_with_strategy(
-                &wf,
-                &wf_path,
-                h,
-                LbStrategy::RoundRobin,
-            ).await;
-            // Advance next_run_at.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if let Ok(next) = next_run_secs(&cron_expr) {
-                if let Ok(s) = RunStore::open() {
-                    let _ = s.update_schedule_next(&sched_id, now, next);
-                }
+        tracing::info!(schedule = %sched_id, "firing scheduled workflow");
+        let _ = scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), LbStrategy::RoundRobin).await;
+        // Advance next_run_at.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(next) = next_run_secs(&cron_expr) {
+            if let Ok(s) = RunStore::open() {
+                let _ = s.update_schedule_next(&sched_id, now, next);
             }
-        });
+        }
     }
 }
