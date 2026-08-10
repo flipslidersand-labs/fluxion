@@ -140,9 +140,10 @@ pub async fn run_remote(
     }
 
     // A send() error is a transport failure (refused/timeout/DNS) → failover.
-    let resp = req.send().await.map_err(|e| {
-        RemoteError::Unreachable(anyhow::anyhow!("worker {}: {}", worker_url, e))
-    })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| RemoteError::Unreachable(anyhow::anyhow!("worker {}: {}", worker_url, e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status();

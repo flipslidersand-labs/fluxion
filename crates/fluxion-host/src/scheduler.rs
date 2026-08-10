@@ -474,7 +474,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
                 match foreach_parent {
                     Some((parent_id, siblings)) => {
-                        let fail_fast = wf.jobs.get(&parent_id).map_or(false, |j| j.fail_fast);
+                        let fail_fast = wf.jobs.get(&parent_id).is_some_and(|j| j.fail_fast);
                         if fail_fast {
                             // Cancel all pending siblings immediately.
                             for sibling in &siblings {
@@ -914,9 +914,7 @@ fn launch(
     });
     let perms = wf.jobs[&job_id].permissions.clone();
     let env = wf.jobs[&job_id].env.clone();
-    let output_size_limit = wf.jobs[&job_id]
-        .output_size_limit_mb
-        .unwrap_or(64) * 1024 * 1024;
+    let output_size_limit = wf.jobs[&job_id].output_size_limit_mb.unwrap_or(64) * 1024 * 1024;
     let component_sha256 = wf.jobs[&job_id].component_sha256.clone();
     let timeout_secs = perms.limits.timeout_secs;
 
@@ -941,7 +939,8 @@ fn launch(
             };
 
             // Verify SHA-256 digest before loading the component (supply-chain protection).
-            if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref()) {
+            if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref())
+            {
                 let elapsed = start.elapsed();
                 let _ = tx.send(JobEvent {
                     job_id: job_id.clone(),
