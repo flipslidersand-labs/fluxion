@@ -200,6 +200,7 @@ pub enum ValidationError {
     UnknownInputFrom { job: String, src: String },
     InputFromNotForeach { job: String, src: String },
     CyclicDependency,
+    ComponentNotFound { job: String, path: String },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -215,6 +216,9 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "Job '{job}' has input_from '{src}' but '{src}' does not have foreach")
             }
             Self::CyclicDependency => write!(f, "Workflow contains a circular dependency"),
+            Self::ComponentNotFound { job, path } => {
+                write!(f, "Job '{job}': component not found at '{path}'")
+            }
         }
     }
 }
@@ -296,6 +300,21 @@ impl Workflow {
             serde_yaml::from_str(&src).with_context(|| "Failed to parse workflow YAML")?;
         wf.validate().into_result()?;
         Ok(wf)
+    }
+
+    /// Check that every `component:` path exists on disk.
+    /// Not called by `from_file` — only used by the `validate` CLI subcommand.
+    pub fn check_component_paths(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        for (job_id, def) in &self.jobs {
+            if std::fs::metadata(&def.component).is_err() {
+                report.errors.push(ValidationError::ComponentNotFound {
+                    job: job_id.clone(),
+                    path: def.component.clone(),
+                });
+            }
+        }
+        report
     }
 
     pub fn validate(&self) -> ValidationReport {

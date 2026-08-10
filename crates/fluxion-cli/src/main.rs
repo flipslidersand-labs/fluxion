@@ -106,6 +106,9 @@ enum Commands {
         /// Output structured JSON instead of human-readable text
         #[arg(long)]
         json: bool,
+        /// Skip checking whether component .wasm files exist on disk
+        #[arg(long)]
+        skip_wasm_check: bool,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -365,8 +368,12 @@ async fn run(command: Commands) -> Result<()> {
             }
         },
 
-        Commands::Validate { path, json } => {
-            cmd_validate(&path, json);
+        Commands::Validate {
+            path,
+            json,
+            skip_wasm_check,
+        } => {
+            cmd_validate(&path, json, skip_wasm_check);
         }
 
         Commands::McpServe => {
@@ -451,17 +458,14 @@ fn cmd_dot(path: &str) -> Result<()> {
 
 // ── fluxion validate ──────────────────────────────────────────────────────────
 
-fn cmd_validate(path: &str, json: bool) {
+fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool) {
     // Step 1: read file
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Cannot read '{path}': {e}");
             if json {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"ok": false, "errors": [msg]})
-                );
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
             } else {
                 eprintln!("ERROR: {msg}");
             }
@@ -475,10 +479,7 @@ fn cmd_validate(path: &str, json: bool) {
         Err(e) => {
             let msg = format!("YAML parse error: {e}");
             if json {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"ok": false, "errors": [msg]})
-                );
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
             } else {
                 eprintln!("ERROR: {msg}");
             }
@@ -487,14 +488,19 @@ fn cmd_validate(path: &str, json: bool) {
     };
 
     // Step 3: structural validation (deps, cycles, input_from)
-    let report = wf.validate();
+    let mut report = wf.validate();
+
+    // Step 4: component path existence check (opt-out with --skip-wasm-check)
+    if !skip_wasm_check {
+        let path_report = wf.check_component_paths();
+        report.errors.extend(path_report.errors);
+    }
 
     if json {
         let out = serde_json::json!({
             "ok": report.is_ok(),
             "errors": report.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         });
-        // errors go to stdout so callers can pipe/parse; exit code signals failure
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else if report.is_ok() {
         println!("✓ {path}: Validation passed");

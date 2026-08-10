@@ -298,8 +298,9 @@ fn validate_help_exits_ok() {
 #[test]
 fn validate_valid_workflow_exits_zero() {
     let f = write_yaml(SIMPLE_YAML);
+    // SIMPLE_YAML uses /nonexistent/*.wasm — skip the fs check to isolate structural validation
     fluxion()
-        .args(["validate", f.path().to_str().unwrap()])
+        .args(["validate", "--skip-wasm-check", f.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(contains("Validation passed"));
@@ -317,7 +318,7 @@ jobs:
 "#,
     );
     fluxion()
-        .args(["validate", f.path().to_str().unwrap()])
+        .args(["validate", "--skip-wasm-check", f.path().to_str().unwrap()])
         .assert()
         .failure()
         .stderr(contains("nonexistent"));
@@ -338,7 +339,7 @@ jobs:
 "#,
     );
     fluxion()
-        .args(["validate", f.path().to_str().unwrap()])
+        .args(["validate", "--skip-wasm-check", f.path().to_str().unwrap()])
         .assert()
         .failure()
         .stderr(contains("circular"));
@@ -367,7 +368,12 @@ fn validate_nonexistent_file_exits_one() {
 fn validate_json_output_ok() {
     let f = write_yaml(SIMPLE_YAML);
     let out = fluxion()
-        .args(["validate", "--json", f.path().to_str().unwrap()])
+        .args([
+            "validate",
+            "--json",
+            "--skip-wasm-check",
+            f.path().to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -388,11 +394,64 @@ jobs:
 "#,
     );
     let out = fluxion()
-        .args(["validate", "--json", f.path().to_str().unwrap()])
+        .args([
+            "validate",
+            "--json",
+            "--skip-wasm-check",
+            f.path().to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     assert_eq!(v["ok"], false);
     assert!(!v["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn validate_missing_component_detected() {
+    let f = write_yaml(
+        r#"
+name: missing-wasm
+jobs:
+  step:
+    component: /absolutely/nonexistent/step.wasm
+"#,
+    );
+    // Without --skip-wasm-check the missing .wasm triggers ComponentNotFound
+    fluxion()
+        .args(["validate", f.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("component not found"));
+}
+
+#[test]
+fn validate_skip_wasm_check_suppresses_missing_component() {
+    let f = write_yaml(
+        r#"
+name: missing-wasm
+jobs:
+  step:
+    component: /absolutely/nonexistent/step.wasm
+"#,
+    );
+    fluxion()
+        .args(["validate", "--skip-wasm-check", f.path().to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn validate_existing_component_passes() {
+    // Use a real file (the fluxion binary itself) as a stand-in .wasm path
+    let bin = assert_cmd::cargo::cargo_bin("fluxion");
+    let f = write_yaml(&format!(
+        "name: real\njobs:\n  step:\n    component: {}\n",
+        bin.display()
+    ));
+    fluxion()
+        .args(["validate", f.path().to_str().unwrap()])
+        .assert()
+        .success();
 }
