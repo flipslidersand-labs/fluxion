@@ -393,15 +393,22 @@ pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
 /// Returns an empty `Vec` (not an error) when the SRV query fails, so the
 /// caller can fall back to the static worker list without interruption.
 pub async fn resolve_srv_workers(srv_name: &str) -> Vec<String> {
-    use hickory_resolver::TokioAsyncResolver;
-    let resolver = match TokioAsyncResolver::tokio_from_system_conf() {
+    let srv = srv_name.to_string();
+    tokio::task::spawn_blocking(move || resolve_srv_workers_sync(&srv))
+        .await
+        .unwrap_or_default()
+}
+
+fn resolve_srv_workers_sync(srv_name: &str) -> Vec<String> {
+    use hickory_resolver::Resolver;
+    let resolver = match Resolver::from_system_conf() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(%srv_name, error = %e, "DNS SRV: resolver creation failed, using static workers");
             return vec![];
         }
     };
-    match resolver.srv_lookup(srv_name).await {
+    match resolver.srv_lookup(srv_name) {
         Ok(lookup) => {
             let mut urls = Vec::new();
             for record in lookup.iter() {
