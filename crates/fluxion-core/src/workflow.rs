@@ -13,6 +13,11 @@ pub struct Workflow {
     /// Maximum number of jobs that may execute concurrently. None = unbounded.
     #[serde(default)]
     pub max_parallel: Option<usize>,
+    /// DNS SRV record name for automatic worker discovery (e.g. "_fluxion._tcp.internal").
+    /// Resolved at startup and merged with the static `workers:` list.
+    /// On SRV query failure, the static list is used as-is.
+    #[serde(default)]
+    pub workers_srv: Option<String>,
 }
 
 /// Per-worker configuration. Supports both a plain URL string and an extended

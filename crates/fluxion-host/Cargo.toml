@@ -21,6 +21,7 @@ prometheus    = { workspace = true }
 futures              = { workspace = true }
 opentelemetry        = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+hickory-resolver     = { workspace = true }
 fluxion-core  = { path = "../fluxion-core" }
 
 [dev-dependencies]

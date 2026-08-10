@@ -112,6 +112,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
         jobs: new_jobs,
         workers: wf.workers.clone(),
         max_parallel: wf.max_parallel,
+        workers_srv: wf.workers_srv.clone(),
     };
 
     Ok(ExpandedWorkflow {
@@ -258,6 +259,7 @@ mod tests {
             jobs,
             workers: vec![],
             max_parallel: None,
+            workers_srv: None,
         };
 
         let expanded = expand_foreach(&wf, None).unwrap();

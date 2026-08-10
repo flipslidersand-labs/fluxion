@@ -388,6 +388,38 @@ pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
     out
 }
 
+/// Resolve a DNS SRV record to a list of `http://host:port` worker URLs.
+///
+/// Returns an empty `Vec` (not an error) when the SRV query fails, so the
+/// caller can fall back to the static worker list without interruption.
+pub async fn resolve_srv_workers(srv_name: &str) -> Vec<String> {
+    use hickory_resolver::TokioAsyncResolver;
+    let resolver = match TokioAsyncResolver::tokio_from_system_conf() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: resolver creation failed, using static workers");
+            return vec![];
+        }
+    };
+    match resolver.srv_lookup(srv_name).await {
+        Ok(lookup) => {
+            let mut urls = Vec::new();
+            for record in lookup.iter() {
+                let target = record.target().to_utf8();
+                let target = target.trim_end_matches('.');
+                let port = record.port();
+                urls.push(format!("http://{}:{}", target, port));
+            }
+            tracing::info!(%srv_name, count = urls.len(), "DNS SRV: resolved workers");
+            urls
+        }
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: query failed, using static workers");
+            vec![]
+        }
+    }
+}
+
 /// Verify that `wasm_path` matches the expected SHA-256 hex digest.
 ///
 /// Returns `Ok(())` when digest matches or `expected` is `None`.

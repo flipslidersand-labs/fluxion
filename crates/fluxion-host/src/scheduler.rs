@@ -166,18 +166,25 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
 
 /// Resolve the effective worker list for a workflow run.
 ///
-/// 1. If YAML `workers:` is non-empty, health-check those.
-/// 2. Otherwise, load registered workers from DB and health-check them.
+/// 1. Start with static `workers:` from YAML.
+/// 2. If `workers_srv:` is set, resolve SRV and merge results.
+/// 3. If both are empty, fall back to DB-registered workers.
 ///
-/// Returns only healthy workers.
+/// Returns only health-checked workers.
 async fn effective_workers(wf: &Workflow) -> Vec<String> {
-    let candidates = if !wf.workers.is_empty() {
-        wf.workers.iter().map(|w| w.url().to_string()).collect()
-    } else {
-        RunStore::open()
+    let mut candidates: Vec<String> = wf.workers.iter().map(|w| w.url().to_string()).collect();
+
+    // Merge SRV-discovered workers (failures are silently ignored).
+    if let Some(srv) = &wf.workers_srv {
+        let mut srv_urls = crate::resolve_srv_workers(srv).await;
+        candidates.append(&mut srv_urls);
+    }
+
+    if candidates.is_empty() {
+        candidates = RunStore::open()
             .and_then(|s| s.registered_worker_urls())
-            .unwrap_or_default()
-    };
+            .unwrap_or_default();
+    }
     health_check_workers(&candidates).await
 }
 
