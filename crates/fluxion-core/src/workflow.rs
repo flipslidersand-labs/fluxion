@@ -192,6 +192,100 @@ impl Default for ResourceLimits {
     }
 }
 
+// ── Validation types ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    UnknownDependency { job: String, dep: String },
+    UnknownInputFrom { job: String, src: String },
+    InputFromNotForeach { job: String, src: String },
+    CyclicDependency,
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownDependency { job, dep } => {
+                write!(f, "Job '{job}' depends on unknown job '{dep}'")
+            }
+            Self::UnknownInputFrom { job, src } => {
+                write!(f, "Job '{job}' has input_from '{src}' which does not exist")
+            }
+            Self::InputFromNotForeach { job, src } => {
+                write!(f, "Job '{job}' has input_from '{src}' but '{src}' does not have foreach")
+            }
+            Self::CyclicDependency => write!(f, "Workflow contains a circular dependency"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ValidationReport {
+    pub errors: Vec<ValidationError>,
+}
+
+impl ValidationReport {
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    pub fn into_result(self) -> Result<()> {
+        if self.errors.is_empty() {
+            return Ok(());
+        }
+        let msgs: Vec<String> = self.errors.iter().map(|e| e.to_string()).collect();
+        Err(anyhow::anyhow!("{}", msgs.join("\n")))
+    }
+}
+
+impl std::fmt::Display for ValidationReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.errors.is_empty() {
+            return write!(f, "Validation passed");
+        }
+        writeln!(f, "Validation failed ({} error(s)):", self.errors.len())?;
+        for err in &self.errors {
+            writeln!(f, "  - {err}")?;
+        }
+        Ok(())
+    }
+}
+
+// DFS cycle detection — kept in workflow.rs to avoid a circular import with dag.rs.
+fn has_cycle(jobs: &IndexMap<String, JobDefinition>) -> bool {
+    use std::collections::HashSet;
+
+    fn dfs<'a>(
+        node: &'a str,
+        jobs: &'a IndexMap<String, JobDefinition>,
+        visited: &mut HashSet<&'a str>,
+        stack: &mut HashSet<&'a str>,
+    ) -> bool {
+        if stack.contains(node) {
+            return true;
+        }
+        if visited.contains(node) {
+            return false;
+        }
+        visited.insert(node);
+        stack.insert(node);
+        if let Some(def) = jobs.get(node) {
+            for dep in &def.depends_on {
+                if dfs(dep.as_str(), jobs, visited, stack) {
+                    return true;
+                }
+            }
+        }
+        stack.remove(node);
+        false
+    }
+
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = std::collections::HashSet::new();
+    jobs.keys()
+        .any(|id| dfs(id.as_str(), jobs, &mut visited, &mut stack))
+}
+
 // ── Workflow impl ─────────────────────────────────────────────────────────────
 
 impl Workflow {
@@ -200,45 +294,51 @@ impl Workflow {
             .with_context(|| format!("Failed to read {:?}", path.as_ref()))?;
         let wf: Self =
             serde_yaml::from_str(&src).with_context(|| "Failed to parse workflow YAML")?;
-        wf.validate()?;
+        wf.validate().into_result()?;
         Ok(wf)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+
         for (job_id, def) in &self.jobs {
             for dep in &def.depends_on {
-                anyhow::ensure!(
-                    self.jobs.contains_key(dep),
-                    "Job '{}' depends on unknown job '{}'",
-                    job_id,
-                    dep
-                );
+                if !self.jobs.contains_key(dep) {
+                    report.errors.push(ValidationError::UnknownDependency {
+                        job: job_id.clone(),
+                        dep: dep.clone(),
+                    });
+                }
             }
-            // Validate input_from references a foreach job
             if let Some(src) = &def.input_from {
-                let src_def = self.jobs.get(src.as_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Job '{}' has input_from '{}' which does not exist",
-                        job_id,
-                        src
-                    )
-                })?;
-                anyhow::ensure!(
-                    src_def.foreach.is_some(),
-                    "Job '{}' has input_from '{}' but '{}' does not have foreach",
-                    job_id,
-                    src,
-                    src
-                );
+                match self.jobs.get(src.as_str()) {
+                    None => report.errors.push(ValidationError::UnknownInputFrom {
+                        job: job_id.clone(),
+                        src: src.clone(),
+                    }),
+                    Some(src_def) if src_def.foreach.is_none() => {
+                        report.errors.push(ValidationError::InputFromNotForeach {
+                            job: job_id.clone(),
+                            src: src.clone(),
+                        })
+                    }
+                    _ => {}
+                }
             }
         }
-        Ok(())
+
+        if has_cycle(&self.jobs) {
+            report.errors.push(ValidationError::CyclicDependency);
+        }
+
+        report
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn parse_network_sandbox_yaml() {
         let src = r#"
@@ -258,7 +358,6 @@ jobs:
     depends_on: [connect-allowed]
 "#;
         let result: Result<Workflow, _> = serde_yaml::from_str(src);
-        println!("result: {result:?}");
         assert!(result.is_ok());
     }
 
@@ -276,9 +375,133 @@ jobs:
     depends_on: [process]
     input_from: process
 "#;
-        // validate() checks input_from → foreach, which passes here
         let wf: Workflow = serde_yaml::from_str(src).unwrap();
         assert!(wf.jobs["process"].foreach.is_some());
         assert_eq!(wf.jobs["aggregate"].input_from.as_deref(), Some("process"));
+    }
+
+    fn make_wf(yaml: &str) -> Workflow {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn validate_ok_simple() {
+        let wf = make_wf(r#"
+name: ok
+jobs:
+  a:
+    component: a.wasm
+  b:
+    component: b.wasm
+    depends_on: [a]
+"#);
+        let report = wf.validate();
+        assert!(report.is_ok(), "{report}");
+    }
+
+    #[test]
+    fn validate_unknown_dep() {
+        let wf = make_wf(r#"
+name: bad
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [nonexistent]
+"#);
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(report.errors[0], ValidationError::UnknownDependency { .. }));
+    }
+
+    #[test]
+    fn validate_unknown_input_from() {
+        let wf = make_wf(r#"
+name: bad
+jobs:
+  a:
+    component: a.wasm
+    input_from: ghost
+"#);
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(report.errors[0], ValidationError::UnknownInputFrom { .. }));
+    }
+
+    #[test]
+    fn validate_input_from_not_foreach() {
+        let wf = make_wf(r#"
+name: bad
+jobs:
+  producer:
+    component: p.wasm
+  consumer:
+    component: c.wasm
+    input_from: producer
+"#);
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::InputFromNotForeach { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_cycle_detected() {
+        let wf = make_wf(r#"
+name: cycle
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [b]
+  b:
+    component: b.wasm
+    depends_on: [a]
+"#);
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(report.errors.last(), Some(ValidationError::CyclicDependency)));
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let wf = make_wf(r#"
+name: multi-error
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [missing1]
+  b:
+    component: b.wasm
+    depends_on: [missing2]
+"#);
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert_eq!(report.errors.len(), 2);
+    }
+
+    #[test]
+    fn validation_report_display_ok() {
+        let report = ValidationReport::default();
+        assert_eq!(report.to_string(), "Validation passed");
+    }
+
+    #[test]
+    fn validation_report_display_errors() {
+        let mut report = ValidationReport::default();
+        report.errors.push(ValidationError::CyclicDependency);
+        assert!(report.to_string().contains("1 error(s)"));
+    }
+
+    #[test]
+    fn into_result_ok() {
+        assert!(ValidationReport::default().into_result().is_ok());
+    }
+
+    #[test]
+    fn into_result_err() {
+        let mut report = ValidationReport::default();
+        report.errors.push(ValidationError::CyclicDependency);
+        assert!(report.into_result().is_err());
     }
 }
