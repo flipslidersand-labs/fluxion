@@ -305,6 +305,7 @@ fn parse_network_entry(s: &str) -> Option<NetworkEntry> {
 }
 
 // DNS resolution cache: maps raw allowlist entry → (resolved IPs, cache timestamp).
+#[allow(clippy::type_complexity)]
 static DNS_CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -335,16 +336,17 @@ async fn resolve_entry(s: &str) -> Vec<String> {
     // Check TTL cache.
     {
         let cache = DNS_CACHE.lock().unwrap();
-        if let Some((ips, ts)) = cache.get(s) {
-            if ts.elapsed() < DNS_CACHE_TTL {
-                return ips
-                    .iter()
-                    .map(|ip| match port {
-                        Some(p) => format!("{ip}:{p}"),
-                        None => ip.to_string(),
-                    })
-                    .collect();
-            }
+        #[allow(clippy::collapsible_if)]
+        if let Some((ips, ts)) = cache.get(s)
+            && ts.elapsed() < DNS_CACHE_TTL
+        {
+            return ips
+                .iter()
+                .map(|ip| match port {
+                    Some(p) => format!("{ip}:{p}"),
+                    None => ip.to_string(),
+                })
+                .collect();
         }
     }
 
@@ -366,7 +368,10 @@ async fn resolve_entry(s: &str) -> Vec<String> {
                 })
                 .collect();
 
-            DNS_CACHE.lock().unwrap().insert(s.to_string(), (ips, Instant::now()));
+            DNS_CACHE
+                .lock()
+                .unwrap()
+                .insert(s.to_string(), (ips, Instant::now()));
             result
         }
         Err(e) => {
@@ -532,7 +537,10 @@ mod tests {
         let result = verify_component_digest("/nonexistent/missing.wasm", Some("deadbeef"));
         assert!(result.is_err(), "missing file must fail");
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("failed to read"), "error should mention read failure: {msg}");
+        assert!(
+            msg.contains("failed to read"),
+            "error should mention read failure: {msg}"
+        );
     }
 
     #[test]
@@ -551,10 +559,16 @@ mod tests {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(b"hello wasm").unwrap();
-        let result = verify_component_digest(f.path(), Some("0000000000000000000000000000000000000000000000000000000000000000"));
+        let result = verify_component_digest(
+            f.path(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
         assert!(result.is_err(), "wrong hash must fail");
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("mismatch"), "error must mention mismatch: {msg}");
+        assert!(
+            msg.contains("mismatch"),
+            "error must mention mismatch: {msg}"
+        );
     }
 
     #[test]
@@ -565,8 +579,10 @@ mod tests {
         f.write_all(b"case test").unwrap();
         let hash = Sha256::digest(b"case test");
         let upper_hex: String = hash.iter().map(|b| format!("{:02X}", b)).collect();
-        assert!(verify_component_digest(f.path(), Some(&upper_hex)).is_ok(),
-            "uppercase hex must match");
+        assert!(
+            verify_component_digest(f.path(), Some(&upper_hex)).is_ok(),
+            "uppercase hex must match"
+        );
     }
 
     #[test]
@@ -699,12 +715,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ip_entries_pass_through() {
-        let allow = vec![
-            "192.0.2.1:443".to_string(),
-            "192.0.2.2".to_string(),
-        ];
+        let allow = vec!["192.0.2.1:443".to_string(), "192.0.2.2".to_string()];
         let resolved = resolve_network_allow(&allow).await;
-        assert_eq!(resolved, allow, "pure IP entries must pass through unchanged");
+        assert_eq!(
+            resolved, allow,
+            "pure IP entries must pass through unchanged"
+        );
     }
 
     #[tokio::test]
@@ -712,7 +728,10 @@ mod tests {
         // "localhost" is guaranteed to resolve in any normal OS environment.
         let allow = vec!["localhost:8080".to_string()];
         let resolved = resolve_network_allow(&allow).await;
-        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
         // All returned entries must end in ":8080".
         assert!(
             resolved.iter().all(|e| e.ends_with(":8080")),
@@ -761,15 +780,15 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mixed_ip_and_hostname() {
-        let allow = vec![
-            "192.0.2.1:443".to_string(),
-            "localhost:8080".to_string(),
-        ];
+        let allow = vec!["192.0.2.1:443".to_string(), "localhost:8080".to_string()];
         let resolved = resolve_network_allow(&allow).await;
         // Must contain the original IP entry.
         assert!(resolved.contains(&"192.0.2.1:443".to_string()));
         // Must also contain at least one resolved localhost IP.
-        assert!(resolved.len() > 1, "should have IP + resolved localhost: {resolved:?}");
+        assert!(
+            resolved.len() > 1,
+            "should have IP + resolved localhost: {resolved:?}"
+        );
     }
 
     // ── Phase 1: アドレス形式の基本解決 (#78) ────────────────────────────────
@@ -779,7 +798,10 @@ mod tests {
         // "localhost" without a port should resolve to IP-only strings (no ":port" suffix).
         let allow = vec!["localhost".to_string()];
         let resolved = resolve_network_allow(&allow).await;
-        assert!(!resolved.is_empty(), "localhost must resolve to at least one IP");
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
         for entry in &resolved {
             // Must parse as a valid IP (AnyPort variant, no port suffix).
             assert!(
@@ -801,10 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ipv6_entries_pass_through() {
-        let cases = vec![
-            "[::1]:8080".to_string(),
-            "::1".to_string(),
-        ];
+        let cases = vec!["[::1]:8080".to_string(), "::1".to_string()];
         for input in &cases {
             let resolved = resolve_network_allow(&[input.clone()]).await;
             assert_eq!(
@@ -875,12 +894,18 @@ mod tests {
 
         // Second call must re-resolve (not serve stale data).
         let second = resolve_network_allow(&allow).await;
-        assert!(!second.is_empty(), "re-resolution after TTL expiry must succeed");
+        assert!(
+            !second.is_empty(),
+            "re-resolution after TTL expiry must succeed"
+        );
 
         // Verify the cache timestamp was refreshed.
         {
             let cache = DNS_CACHE.lock().unwrap();
-            let age = cache.get(&key).map(|(_, ts)| ts.elapsed()).unwrap_or(Duration::MAX);
+            let age = cache
+                .get(&key)
+                .map(|(_, ts)| ts.elapsed())
+                .unwrap_or(Duration::MAX);
             assert!(
                 age < Duration::from_secs(5),
                 "cache timestamp must be refreshed after TTL expiry, age={age:?}"
@@ -921,8 +946,7 @@ mod tests {
         let first_set: std::collections::HashSet<_> =
             results[0].as_ref().unwrap().iter().cloned().collect();
         for (i, r) in results.iter().enumerate().skip(1) {
-            let set: std::collections::HashSet<_> =
-                r.as_ref().unwrap().iter().cloned().collect();
+            let set: std::collections::HashSet<_> = r.as_ref().unwrap().iter().cloned().collect();
             assert_eq!(
                 first_set, set,
                 "task {i} returned different IPs than task 0: {set:?} vs {first_set:?}"

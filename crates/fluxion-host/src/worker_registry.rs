@@ -17,8 +17,7 @@ pub async fn health_check_all(store: &RunStore) -> Result<Vec<String>> {
     for w in workers {
         let url = format!("{}/health", w.url.trim_end_matches('/'));
         let reachable = client.get(&url).send().await.is_ok();
-        let status = if reachable { "HEALTHY" } else { "UNREACHABLE" };
-        store.update_worker_status(&w.url, status)?;
+        store.update_worker_health(&w.url, reachable)?;
         if reachable {
             healthy.push(w.url);
         }

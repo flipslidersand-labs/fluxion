@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
@@ -93,7 +93,9 @@ async fn handle_run(
             std::fs::read(&p).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse { error: e.to_string() }),
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
                 )
             })?
         } else {
@@ -108,12 +110,16 @@ async fn handle_run(
                         }),
                     )
                 })?,
-                None => return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("component {sha256} not in CAS — upload via PUT /components/{sha256}"),
-                    }),
-                )),
+                None => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: format!(
+                            "component {sha256} not in CAS — upload via PUT /components/{sha256}"
+                        ),
+                        }),
+                    ))
+                }
             }
         }
     } else {
@@ -220,7 +226,10 @@ async fn handle_cas_put(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Verify digest matches the uploaded bytes.
     use sha2::{Digest, Sha256};
-    let actual: String = Sha256::digest(&body).iter().map(|b| format!("{:02x}", b)).collect();
+    let actual: String = Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     if !actual.eq_ignore_ascii_case(&sha256) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -230,15 +239,23 @@ async fn handle_cas_put(
         ));
     }
     let dir = cas_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: e.to_string() }),
-    ))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     let path = cas_path(&sha256);
-    std::fs::write(&path, &body).map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: e.to_string() }),
-    ))?;
+    std::fs::write(&path, &body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
     Ok(StatusCode::CREATED)
 }
 

@@ -2,6 +2,7 @@ mod mcp;
 mod telemetry;
 
 use anyhow::Result;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use fluxion_core::{
     dag::Dag,
@@ -11,7 +12,6 @@ use fluxion_core::{
 use fluxion_host::{FluxionHost, scheduler, scheduler::LbStrategy};
 use std::path::PathBuf;
 use std::sync::Arc;
-use chrono::Utc;
 
 #[derive(Parser)]
 #[command(name = "fluxion", about = "Safe Wasm-based job execution engine")]
@@ -747,10 +747,9 @@ fn next_run_secs(cron_expr: &str) -> Result<u64> {
     use std::str::FromStr;
     let schedule = cron::Schedule::from_str(cron_expr)
         .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expr, e))?;
-    let next = schedule
-        .upcoming(Utc)
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Cron expression '{}' has no future occurrences", cron_expr))?;
+    let next = schedule.upcoming(Utc).next().ok_or_else(|| {
+        anyhow::anyhow!("Cron expression '{}' has no future occurrences", cron_expr)
+    })?;
     Ok(next.timestamp() as u64)
 }
 
@@ -839,11 +838,17 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
     let due = {
         let store = match RunStore::open() {
             Ok(s) => s,
-            Err(e) => { tracing::error!("store open failed: {e}"); return; }
+            Err(e) => {
+                tracing::error!("store open failed: {e}");
+                return;
+            }
         };
         match store.due_schedules() {
             Ok(d) => d,
-            Err(e) => { tracing::error!("due_schedules failed: {e}"); return; }
+            Err(e) => {
+                tracing::error!("due_schedules failed: {e}");
+                return;
+            }
         }
     };
     for sched in due {
@@ -854,14 +859,22 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         // If another process already updated next_run_at, skip this schedule.
         let next = match next_run_secs(&cron_expr) {
             Ok(n) => n,
-            Err(e) => { tracing::error!(id = %sched_id, "invalid cron: {e}"); continue; }
+            Err(e) => {
+                tracing::error!(id = %sched_id, "invalid cron: {e}");
+                continue;
+            }
         };
         let claimed = {
             let store = match RunStore::open() {
                 Ok(s) => s,
-                Err(e) => { tracing::error!("store open failed: {e}"); continue; }
+                Err(e) => {
+                    tracing::error!("store open failed: {e}");
+                    continue;
+                }
             };
-            store.claim_schedule(&sched_id, sched.next_run_at, next).unwrap_or(false)
+            store
+                .claim_schedule(&sched_id, sched.next_run_at, next)
+                .unwrap_or(false)
         };
         if !claimed {
             tracing::debug!(id = %sched_id, "schedule already claimed by another process, skipping");
@@ -877,7 +890,9 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         };
         let wf_path = PathBuf::from(&sched.workflow_path);
         tracing::info!(schedule = %sched_id, "firing scheduled workflow");
-        let _ = scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), LbStrategy::RoundRobin).await;
+        let _ =
+            scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), LbStrategy::RoundRobin)
+                .await;
 
         // Record last_run_at (next_run_at is already updated by claim_schedule).
         let now = std::time::SystemTime::now()

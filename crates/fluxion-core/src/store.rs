@@ -384,12 +384,7 @@ impl RunStore {
     }
 
     /// Update `last_run_at` and `next_run_at` after a schedule fires.
-    pub fn update_schedule_next(
-        &self,
-        id: &str,
-        last_run_at: u64,
-        next_run_at: u64,
-    ) -> Result<()> {
+    pub fn update_schedule_next(&self, id: &str, last_run_at: u64, next_run_at: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE schedules SET last_run_at = ?1, next_run_at = ?2 WHERE id = ?3",
             params![last_run_at, next_run_at, id],
@@ -527,7 +522,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "orphaned job_states must be deleted with their run");
+        assert_eq!(
+            count, 0,
+            "orphaned job_states must be deleted with their run"
+        );
     }
 
     // ── claim_schedule — optimistic locking ──────────────────────────────────
