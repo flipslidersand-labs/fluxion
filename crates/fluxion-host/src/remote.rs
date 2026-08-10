@@ -55,8 +55,35 @@ pub async fn run_remote(
     let wasm_bytes =
         std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
 
+    // Compute SHA-256 and check whether the worker already has this component in its CAS.
+    let sha256 = {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(&wasm_bytes);
+        h.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    };
+    let base_url = worker_url.trim_end_matches('/');
+    let cas_check_url = format!("{}/components/{}", base_url, sha256);
+
+    let worker_has_component = reqwest::Client::new()
+        .head(&cas_check_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if !worker_has_component {
+        // Upload the component to the worker's CAS.
+        let upload_url = format!("{}/components/{}", base_url, sha256);
+        let _ = reqwest::Client::new()
+            .put(&upload_url)
+            .body(wasm_bytes.clone())
+            .send()
+            .await;
+    }
+
+    // Send /run with component_sha256 only (no inline bytes if CAS upload succeeded).
     let body = serde_json::json!({
-        "component": B64.encode(&wasm_bytes),
+        "component_sha256": sha256,
         "input": B64.encode(&input),
         "permissions": perms,
         "env": env,

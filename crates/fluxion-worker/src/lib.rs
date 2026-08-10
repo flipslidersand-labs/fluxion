@@ -1,5 +1,11 @@
 use anyhow::Result;
-use axum::{extract::State, http::StatusCode, routing::get, routing::post, Json, Router};
+use axum::{
+    body::Bytes,
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+    routing::{get, head, post, put},
+    Json, Router,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxion_core::workflow::PermissionSet;
 use fluxion_host::FluxionHost;
@@ -7,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
@@ -16,12 +22,31 @@ use tempfile::NamedTempFile;
 /// implement least-connections load balancing.
 static ACTIVE_JOBS: AtomicUsize = AtomicUsize::new(0);
 
+/// CAS metrics.
+static CAS_HITS: AtomicU64 = AtomicU64::new(0);
+static CAS_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Return the CAS directory for storing cached .wasm components.
+fn cas_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".fluxion").join("cas")
+}
+
+fn cas_path(sha256: &str) -> PathBuf {
+    cas_dir().join(sha256).with_extension("wasm")
+}
+
 // ── Request / Response types ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct RunRequest {
-    /// Base64-encoded .wasm component bytes.
-    pub component: String,
+    /// Base64-encoded .wasm component bytes (mutually exclusive with `component_sha256`).
+    #[serde(default)]
+    pub component: Option<String>,
+    /// SHA-256 hex digest of a component already uploaded via PUT /components/{sha256}.
+    /// When present and cached, `component` bytes are not required.
+    #[serde(default)]
+    pub component_sha256: Option<String>,
     /// Base64-encoded input bytes.
     pub input: String,
     #[serde(default)]
@@ -60,14 +85,50 @@ async fn handle_run(
     State(host): State<Arc<FluxionHost>>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let component_bytes = B64.decode(&req.component).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("invalid component base64: {e}"),
-            }),
-        )
-    })?;
+    // Resolve component bytes: try CAS first, fall back to inline bytes.
+    let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
+        let p = cas_path(sha256);
+        if p.exists() {
+            CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            std::fs::read(&p).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: e.to_string() }),
+                )
+            })?
+        } else {
+            CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            // Component not in CAS — require inline bytes from the caller.
+            match &req.component {
+                Some(b64) => B64.decode(b64).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("invalid component base64: {e}"),
+                        }),
+                    )
+                })?,
+                None => return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("component {sha256} not in CAS — upload via PUT /components/{sha256}"),
+                    }),
+                )),
+            }
+        }
+    } else {
+        // Classic inline mode.
+        CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+        let b64 = req.component.as_deref().unwrap_or("");
+        B64.decode(b64).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("invalid component base64: {e}"),
+                }),
+            )
+        })?
+    };
 
     let input = B64.decode(&req.input).map_err(|e| {
         (
@@ -138,7 +199,47 @@ async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "active_jobs": ACTIVE_JOBS.load(Ordering::Relaxed),
+        "cas_hits":  CAS_HITS.load(Ordering::Relaxed),
+        "cas_misses": CAS_MISSES.load(Ordering::Relaxed),
     }))
+}
+
+// ── CAS endpoints ─────────────────────────────────────────────────────────────
+
+async fn handle_cas_head(AxumPath(sha256): AxumPath<String>) -> StatusCode {
+    if cas_path(&sha256).exists() {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn handle_cas_put(
+    AxumPath(sha256): AxumPath<String>,
+    body: Bytes,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    // Verify digest matches the uploaded bytes.
+    use sha2::{Digest, Sha256};
+    let actual: String = Sha256::digest(&body).iter().map(|b| format!("{:02x}", b)).collect();
+    if !actual.eq_ignore_ascii_case(&sha256) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("SHA-256 mismatch: expected {sha256}, got {actual}"),
+            }),
+        ));
+    }
+    let dir = cas_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: e.to_string() }),
+    ))?;
+    let path = cas_path(&sha256);
+    std::fs::write(&path, &body).map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: e.to_string() }),
+    ))?;
+    Ok(StatusCode::CREATED)
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -153,6 +254,8 @@ pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>)
     let app = Router::new()
         .route("/run", post(handle_run))
         .route("/health", get(handle_health))
+        .route("/components/{sha256}", head(handle_cas_head))
+        .route("/components/{sha256}", put(handle_cas_put))
         .with_state(host);
 
     let addr = format!("0.0.0.0:{port}");
