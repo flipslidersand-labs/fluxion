@@ -847,27 +847,45 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         }
     };
     for sched in due {
+        let cron_expr = sched.cron_expr.clone();
+        let sched_id = sched.id.clone();
+
+        // Optimistic lock: advance next_run_at before execution.
+        // If another process already updated next_run_at, skip this schedule.
+        let next = match next_run_secs(&cron_expr) {
+            Ok(n) => n,
+            Err(e) => { tracing::error!(id = %sched_id, "invalid cron: {e}"); continue; }
+        };
+        let claimed = {
+            let store = match RunStore::open() {
+                Ok(s) => s,
+                Err(e) => { tracing::error!("store open failed: {e}"); continue; }
+            };
+            store.claim_schedule(&sched_id, sched.next_run_at, next).unwrap_or(false)
+        };
+        if !claimed {
+            tracing::debug!(id = %sched_id, "schedule already claimed by another process, skipping");
+            continue;
+        }
+
         let wf = match Workflow::from_file(&sched.workflow_path) {
             Ok(w) => w,
             Err(e) => {
-                tracing::error!(id = %sched.id, "failed to load workflow: {e}");
+                tracing::error!(id = %sched_id, "failed to load workflow: {e}");
                 continue;
             }
         };
         let wf_path = PathBuf::from(&sched.workflow_path);
-        let sched_id = sched.id.clone();
-        let cron_expr = sched.cron_expr.clone();
         tracing::info!(schedule = %sched_id, "firing scheduled workflow");
         let _ = scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), LbStrategy::RoundRobin).await;
-        // Advance next_run_at.
+
+        // Record last_run_at (next_run_at is already updated by claim_schedule).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if let Ok(next) = next_run_secs(&cron_expr) {
-            if let Ok(s) = RunStore::open() {
-                let _ = s.update_schedule_next(&sched_id, now, next);
-            }
+        if let Ok(s) = RunStore::open() {
+            let _ = s.update_schedule_next(&sched_id, now, next);
         }
     }
 }

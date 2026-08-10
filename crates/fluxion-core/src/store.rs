@@ -396,6 +396,19 @@ impl RunStore {
         )?;
         Ok(())
     }
+
+    /// Atomically claim a schedule for execution using optimistic locking.
+    ///
+    /// Updates `next_run_at` to `new_next` only if it still equals `old_next`.
+    /// Returns `true` when this process won the claim, `false` when another
+    /// process already advanced `next_run_at` (i.e. duplicate execution avoided).
+    pub fn claim_schedule(&self, id: &str, old_next: u64, new_next: u64) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE schedules SET next_run_at = ?1 WHERE id = ?2 AND next_run_at = ?3",
+            params![new_next, id, old_next],
+        )?;
+        Ok(affected > 0)
+    }
 }
 
 pub struct RunSummary {
@@ -515,6 +528,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0, "orphaned job_states must be deleted with their run");
+    }
+
+    // ── claim_schedule — optimistic locking ──────────────────────────────────
+
+    fn insert_schedule(store: &RunStore, id: &str, next_run_at: u64) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at) \
+                 VALUES (?1, 'wf.yaml', '0 * * * * *', 0, ?2)",
+                params![id, next_run_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn claim_schedule_succeeds_when_next_matches() {
+        let store = open_tmp();
+        insert_schedule(&store, "s1", 100);
+        let won = store.claim_schedule("s1", 100, 200).unwrap();
+        assert!(won, "claim should succeed when old_next matches");
+        let row: u64 = store
+            .conn
+            .query_row(
+                "SELECT next_run_at FROM schedules WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, 200, "next_run_at must be advanced to new_next");
+    }
+
+    #[test]
+    fn claim_schedule_fails_when_already_claimed() {
+        let store = open_tmp();
+        insert_schedule(&store, "s2", 100);
+        // First claim advances next_run_at to 200.
+        store.claim_schedule("s2", 100, 200).unwrap();
+        // Second claim with the original old_next should lose.
+        let won = store.claim_schedule("s2", 100, 300).unwrap();
+        assert!(!won, "second claim with stale old_next must return false");
+    }
+
+    #[test]
+    fn claim_schedule_fails_for_missing_id() {
+        let store = open_tmp();
+        let won = store.claim_schedule("nonexistent", 0, 100).unwrap();
+        assert!(!won, "claim on unknown id must return false");
     }
 }
 
