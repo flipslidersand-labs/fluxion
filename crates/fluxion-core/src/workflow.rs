@@ -115,6 +115,10 @@ pub struct JobDefinition {
     /// Outputs exceeding this limit cause the job to fail with a clear error.
     #[serde(default)]
     pub output_size_limit_mb: Option<u64>,
+    /// When `true`, any foreach child failure immediately cancels remaining siblings.
+    /// When `false` (default), siblings run to completion before the fan-in is cancelled.
+    #[serde(default)]
+    pub fail_fast: bool,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

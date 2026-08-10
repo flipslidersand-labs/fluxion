@@ -458,7 +458,46 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         reason, run_id, event.job_id
                     );
                 }
-                break;
+
+                // Check if the failed job is a foreach child.
+                let foreach_parent = foreach_map
+                    .iter()
+                    .find(|(_, children)| children.contains(&event.job_id))
+                    .map(|(parent, children)| (parent.clone(), children.clone()));
+
+                match foreach_parent {
+                    Some((parent_id, siblings)) => {
+                        let fail_fast = wf.jobs.get(&parent_id).map_or(false, |j| j.fail_fast);
+                        if fail_fast {
+                            // Cancel all pending siblings immediately.
+                            for sibling in &siblings {
+                                if sibling == &event.job_id {
+                                    continue;
+                                }
+                                if matches!(
+                                    statuses.get(sibling.as_str()),
+                                    Some(JobStatus::Pending) | Some(JobStatus::Ready)
+                                ) {
+                                    let cancel = JobStatus::Cancelled;
+                                    store.upsert_job(run_id, sibling, &cancel)?;
+                                    statuses.insert(sibling.clone(), cancel);
+                                    if print_progress {
+                                        println!(
+                                            "[{}] {:<pad$}  CANCELLED (fail_fast)",
+                                            timestamp(),
+                                            sibling,
+                                            pad = pad
+                                        );
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        // fail_fast=false: let remaining siblings run to completion;
+                        // the fan-in cancellation happens in the dep-ready check above.
+                    }
+                    None => break, // non-foreach job failure → stop immediately
+                }
             }
             _ => {}
         }
