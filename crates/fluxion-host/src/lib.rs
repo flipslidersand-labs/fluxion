@@ -144,6 +144,17 @@ impl FluxionHost {
         perms: &PermissionSet,
         env: &std::collections::HashMap<String, String>,
     ) -> Result<(Vec<u8>, JobMetrics)> {
+        // Emit OTel audit event for the permission set being applied.
+        tracing::info!(
+            target: "fluxion.audit",
+            fs_read  = ?perms.filesystem.read,
+            fs_write = ?perms.filesystem.write,
+            net_allow = ?perms.network.allow,
+            memory_mb = perms.limits.memory_mb,
+            timeout_secs = perms.limits.timeout_secs,
+            "permission_grant"
+        );
+
         let ctx = build_wasi_ctx(perms, env)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
@@ -452,6 +463,11 @@ fn build_wasi_ctx(
         // All entries at this point are IP-based (resolved by resolve_network_allow).
         builder.socket_addr_check(move |addr, _use| {
             let ok = entries.iter().any(|e| e.matches(addr));
+            if ok {
+                tracing::info!(target: "fluxion.audit", %addr, "network_allow");
+            } else {
+                tracing::warn!(target: "fluxion.audit", %addr, "network_deny");
+            }
             Box::pin(async move { ok })
         });
     }
