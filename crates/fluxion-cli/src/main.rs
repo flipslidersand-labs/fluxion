@@ -114,7 +114,7 @@ enum ScheduleCommands {
     Add {
         /// Path to the workflow YAML file
         path: String,
-        /// Cron expression, e.g. "0 * * * *" (every hour)
+        /// Cron expression (6 fields: sec min hour day month weekday), e.g. "0 0 * * * *" (every hour)
         #[arg(long)]
         cron: String,
     },

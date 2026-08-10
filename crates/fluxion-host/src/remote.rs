@@ -71,23 +71,39 @@ pub async fn run_remote(
         .map(|r| r.status().is_success())
         .unwrap_or(false);
 
-    if !worker_has_component {
+    let cas_upload_ok = if !worker_has_component {
         // Upload the component to the worker's CAS.
         let upload_url = format!("{}/components/{}", base_url, sha256);
-        let _ = reqwest::Client::new()
+        reqwest::Client::new()
             .put(&upload_url)
             .body(wasm_bytes.clone())
             .send()
-            .await;
-    }
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or_else(|e| {
+                tracing::warn!(%sha256, error = %e, "CAS upload failed, will send inline bytes");
+                false
+            })
+    } else {
+        true
+    };
 
-    // Send /run with component_sha256 only (no inline bytes if CAS upload succeeded).
-    let body = serde_json::json!({
-        "component_sha256": sha256,
-        "input": B64.encode(&input),
-        "permissions": perms,
-        "env": env,
-    });
+    // If CAS upload succeeded → send sha256 only; otherwise fall back to inline bytes.
+    let body = if cas_upload_ok {
+        serde_json::json!({
+            "component_sha256": sha256,
+            "input": B64.encode(&input),
+            "permissions": perms,
+            "env": env,
+        })
+    } else {
+        serde_json::json!({
+            "component": B64.encode(&wasm_bytes),
+            "input": B64.encode(&input),
+            "permissions": perms,
+            "env": env,
+        })
+    };
 
     let mut builder =
         reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 10));
