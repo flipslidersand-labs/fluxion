@@ -377,6 +377,29 @@ pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
     out
 }
 
+/// Verify that `wasm_path` matches the expected SHA-256 hex digest.
+///
+/// Returns `Ok(())` when digest matches or `expected` is `None`.
+/// Returns `Err` when the file cannot be read or the digest does not match.
+pub fn verify_component_digest(wasm_path: impl AsRef<Path>, expected: Option<&str>) -> Result<()> {
+    let Some(expected_hex) = expected else {
+        return Ok(());
+    };
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(wasm_path.as_ref())
+        .with_context(|| format!("failed to read {:?} for digest check", wasm_path.as_ref()))?;
+    let hash = Sha256::digest(&bytes);
+    let actual: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    anyhow::ensure!(
+        actual.eq_ignore_ascii_case(expected_hex),
+        "SHA-256 mismatch for {:?}: expected {}, got {}",
+        wasm_path.as_ref(),
+        expected_hex,
+        actual
+    );
+    Ok(())
+}
+
 fn build_wasi_ctx(
     perms: &PermissionSet,
     env: &std::collections::HashMap<String, String>,
@@ -439,6 +462,56 @@ fn build_wasi_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #67 SHA-256 component digest verification ─────────────────────────────
+
+    #[test]
+    fn verify_digest_passes_when_none() {
+        // No expected hash → verification always passes.
+        assert!(verify_component_digest("/nonexistent/path.wasm", None).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_missing_file() {
+        let result = verify_component_digest("/nonexistent/missing.wasm", Some("deadbeef"));
+        assert!(result.is_err(), "missing file must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("failed to read"), "error should mention read failure: {msg}");
+    }
+
+    #[test]
+    fn verify_digest_passes_on_correct_hash() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let hash = Sha256::digest(b"hello wasm");
+        let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+        assert!(verify_component_digest(f.path(), Some(&hex)).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_wrong_hash() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let result = verify_component_digest(f.path(), Some("0000000000000000000000000000000000000000000000000000000000000000"));
+        assert!(result.is_err(), "wrong hash must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("mismatch"), "error must mention mismatch: {msg}");
+    }
+
+    #[test]
+    fn verify_digest_is_case_insensitive() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"case test").unwrap();
+        let hash = Sha256::digest(b"case test");
+        let upper_hex: String = hash.iter().map(|b| format!("{:02X}", b)).collect();
+        assert!(verify_component_digest(f.path(), Some(&upper_hex)).is_ok(),
+            "uppercase hex must match");
+    }
 
     #[test]
     fn parse_exact_addr() {

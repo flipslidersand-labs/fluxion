@@ -119,6 +119,10 @@ pub struct JobDefinition {
     /// When `false` (default), siblings run to completion before the fan-in is cancelled.
     #[serde(default)]
     pub fail_fast: bool,
+    /// Optional SHA-256 hex digest of the component `.wasm` file.
+    /// When present, the file is verified before execution; mismatch causes the job to fail.
+    #[serde(default)]
+    pub component_sha256: Option<String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────

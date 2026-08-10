@@ -59,6 +59,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     max_parallel: def.max_parallel,
                     output_size_limit_mb: def.output_size_limit_mb,
                     fail_fast: false,
+                    component_sha256: def.component_sha256.clone(),
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -230,6 +231,7 @@ mod tests {
                 max_parallel: None,
                 output_size_limit_mb: None,
                 fail_fast: false,
+                component_sha256: None,
             },
         );
         jobs.insert(
@@ -247,6 +249,7 @@ mod tests {
                 max_parallel: None,
                 output_size_limit_mb: None,
                 fail_fast: false,
+                component_sha256: None,
             },
         );
 

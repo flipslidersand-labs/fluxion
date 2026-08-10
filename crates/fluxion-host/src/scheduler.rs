@@ -910,6 +910,7 @@ fn launch(
     let output_size_limit = wf.jobs[&job_id]
         .output_size_limit_mb
         .unwrap_or(64) * 1024 * 1024;
+    let component_sha256 = wf.jobs[&job_id].component_sha256.clone();
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -931,6 +932,24 @@ fn launch(
             } else {
                 perms
             };
+
+            // Verify SHA-256 digest before loading the component (supply-chain protection).
+            if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref()) {
+                let elapsed = start.elapsed();
+                let _ = tx.send(JobEvent {
+                    job_id: job_id.clone(),
+                    status: JobStatus::Failed {
+                        elapsed,
+                        reason: format!("digest verification failed: {e}"),
+                    },
+                    output: None,
+                    compile_us: 0,
+                    instantiate_us: 0,
+                    execute_us: 0,
+                });
+                crate::metrics::ACTIVE_JOBS.dec();
+                return;
+            }
 
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
                 let c = component.clone();
