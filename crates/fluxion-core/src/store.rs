@@ -8,6 +8,14 @@ use rusqlite::{Connection, params};
 use crate::state::JobStatus;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS schedules (
+    id            TEXT PRIMARY KEY,
+    workflow_path TEXT NOT NULL,
+    cron_expr     TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    last_run_at   INTEGER,
+    next_run_at   INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id            TEXT PRIMARY KEY,
     workflow_name TEXT NOT NULL,
@@ -296,6 +304,113 @@ impl RunStore {
     }
 }
 
+// ── Schedule registry ─────────────────────────────────────────────────────────
+
+pub struct ScheduleEntry {
+    pub id: String,
+    pub workflow_path: String,
+    pub cron_expr: String,
+    pub created_at: u64,
+    pub last_run_at: Option<u64>,
+    pub next_run_at: u64,
+}
+
+impl RunStore {
+    pub fn add_schedule(
+        &self,
+        id: &str,
+        workflow_path: &str,
+        cron_expr: &str,
+        next_run_at: u64,
+    ) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, workflow_path, cron_expr, now, next_run_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_schedule(&self, id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+        Ok(n)
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Return schedules whose `next_run_at` ≤ `now_secs`.
+    pub fn due_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let now = now_secs();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules WHERE next_run_at <= ?1 ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map(params![now], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Update `last_run_at` and `next_run_at` after a schedule fires.
+    pub fn update_schedule_next(
+        &self,
+        id: &str,
+        last_run_at: u64,
+        next_run_at: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE schedules SET last_run_at = ?1, next_run_at = ?2 WHERE id = ?3",
+            params![last_run_at, next_run_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim a schedule for execution using optimistic locking.
+    ///
+    /// Updates `next_run_at` to `new_next` only if it still equals `old_next`.
+    /// Returns `true` when this process won the claim, `false` when another
+    /// process already advanced `next_run_at` (i.e. duplicate execution avoided).
+    pub fn claim_schedule(&self, id: &str, old_next: u64, new_next: u64) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE schedules SET next_run_at = ?1 WHERE id = ?2 AND next_run_at = ?3",
+            params![new_next, id, old_next],
+        )?;
+        Ok(affected > 0)
+    }
+}
+
 pub struct RunSummary {
     pub id: String,
     pub workflow_name: String,
@@ -354,7 +469,6 @@ mod tests {
     // Enable (remove todo!/panic) once the method is implemented.
 
     #[test]
-    #[ignore = "feature not yet implemented (#30)"]
     fn prune_deletes_old_runs_and_keeps_recent() {
         let store = open_tmp();
         let old_id = "run-old";
@@ -373,12 +487,15 @@ mod tests {
             .create_run(new_id, "wf", std::path::Path::new("wf.yaml"))
             .unwrap();
 
-        // -- replace todo! with the real call once #30 is implemented --
-        todo!("store.prune(30) → assert deleted==1, list_runs returns only new_id");
+        let deleted = store.prune(30).unwrap();
+        assert_eq!(deleted, 1, "exactly one old run should be pruned");
+
+        let runs = store.list_runs(10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, new_id);
     }
 
     #[test]
-    #[ignore = "feature not yet implemented (#30)"]
     fn prune_also_deletes_orphaned_job_states() {
         let store = open_tmp();
         let old_id = "run-orphan";
@@ -400,8 +517,65 @@ mod tests {
             )
             .unwrap();
 
-        // -- replace todo! with the real call once #30 is implemented --
-        todo!("store.prune(30) → assert job_states count for old_id == 0");
+        store.prune(30).unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_states WHERE run_id = ?1",
+                params![old_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "orphaned job_states must be deleted with their run");
+    }
+
+    // ── claim_schedule — optimistic locking ──────────────────────────────────
+
+    fn insert_schedule(store: &RunStore, id: &str, next_run_at: u64) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at) \
+                 VALUES (?1, 'wf.yaml', '0 * * * * *', 0, ?2)",
+                params![id, next_run_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn claim_schedule_succeeds_when_next_matches() {
+        let store = open_tmp();
+        insert_schedule(&store, "s1", 100);
+        let won = store.claim_schedule("s1", 100, 200).unwrap();
+        assert!(won, "claim should succeed when old_next matches");
+        let row: u64 = store
+            .conn
+            .query_row(
+                "SELECT next_run_at FROM schedules WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, 200, "next_run_at must be advanced to new_next");
+    }
+
+    #[test]
+    fn claim_schedule_fails_when_already_claimed() {
+        let store = open_tmp();
+        insert_schedule(&store, "s2", 100);
+        // First claim advances next_run_at to 200.
+        store.claim_schedule("s2", 100, 200).unwrap();
+        // Second claim with the original old_next should lose.
+        let won = store.claim_schedule("s2", 100, 300).unwrap();
+        assert!(!won, "second claim with stale old_next must return false");
+    }
+
+    #[test]
+    fn claim_schedule_fails_for_missing_id() {
+        let store = open_tmp();
+        let won = store.claim_schedule("nonexistent", 0, 100).unwrap();
+        assert!(!won, "claim on unknown id must return false");
     }
 }
 

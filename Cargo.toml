@@ -40,3 +40,6 @@ assert_cmd    = "2"
 predicates    = "3"
 tempfile      = "3"
 prometheus    = { version = "0.13", features = ["process"] }
+cron              = "0.12"
+chrono            = "0.4"
+hickory-resolver  = "0.24"

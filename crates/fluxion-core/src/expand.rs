@@ -57,6 +57,9 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     foreach: None,
                     input_from: None,
                     max_parallel: def.max_parallel,
+                    output_size_limit_mb: def.output_size_limit_mb,
+                    fail_fast: false,
+                    component_sha256: def.component_sha256.clone(),
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -109,6 +112,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
         jobs: new_jobs,
         workers: wf.workers.clone(),
         max_parallel: wf.max_parallel,
+        workers_srv: wf.workers_srv.clone(),
     };
 
     Ok(ExpandedWorkflow {
@@ -226,6 +230,9 @@ mod tests {
                 foreach: Some("$.items".to_string()),
                 input_from: None,
                 max_parallel: None,
+                output_size_limit_mb: None,
+                fail_fast: false,
+                component_sha256: None,
             },
         );
         jobs.insert(
@@ -241,6 +248,9 @@ mod tests {
                 foreach: None,
                 input_from: Some("process".to_string()),
                 max_parallel: None,
+                output_size_limit_mb: None,
+                fail_fast: false,
+                component_sha256: None,
             },
         );
 
@@ -249,6 +259,7 @@ mod tests {
             jobs,
             workers: vec![],
             max_parallel: None,
+            workers_srv: None,
         };
 
         let expanded = expand_foreach(&wf, None).unwrap();

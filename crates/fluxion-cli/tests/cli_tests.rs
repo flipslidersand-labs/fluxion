@@ -52,7 +52,6 @@ jobs:
 /// Before: `--dry-run` flag does not exist → clap errors with "unexpected argument".
 /// After:  flag is recognized, jobs listed in topo order, process exits 0.
 #[test]
-#[ignore = "feature not yet implemented (#29)"]
 fn dry_run_lists_jobs_in_topo_order() {
     let f = write_yaml(SIMPLE_YAML);
     fluxion()
@@ -65,7 +64,6 @@ fn dry_run_lists_jobs_in_topo_order() {
 }
 
 #[test]
-#[ignore = "feature not yet implemented (#29)"]
 fn dry_run_succeeds_even_if_wasm_missing() {
     let f = write_yaml(SIMPLE_YAML);
     // Wasm files do not exist — dry-run must not touch them.
@@ -76,7 +74,6 @@ fn dry_run_succeeds_even_if_wasm_missing() {
 }
 
 #[test]
-#[ignore = "feature not yet implemented (#29)"]
 fn dry_run_reports_cycle_as_error() {
     let cyclic = r#"
 name: cycle
@@ -101,7 +98,6 @@ jobs:
 /// Before: `fluxion runs prune` is an unknown subcommand → clap error.
 /// After:  subcommand is recognized and reports deleted count.
 #[test]
-#[ignore = "feature not yet implemented (#30)"]
 fn runs_prune_reports_deleted_count() {
     // No runs in fresh DB → prune deletes 0 and exits 0.
     fluxion()
@@ -116,7 +112,6 @@ fn runs_prune_reports_deleted_count() {
 // CLI-level smoke test: YAML with max_parallel parses without error.
 
 #[test]
-#[ignore = "feature not yet implemented (#31)"]
 fn max_parallel_yaml_parses_and_dry_runs() {
     let yaml = r#"
 name: limited
@@ -140,7 +135,6 @@ jobs:
 /// Before: `fluxion dot` is an unknown subcommand → clap error.
 /// After:  outputs valid DOT containing edges between jobs.
 #[test]
-#[ignore = "feature not yet implemented (#32)"]
 fn dot_outputs_digraph() {
     let f = write_yaml(SIMPLE_YAML);
     fluxion()
@@ -154,7 +148,6 @@ fn dot_outputs_digraph() {
 }
 
 #[test]
-#[ignore = "feature not yet implemented (#32)"]
 fn dot_outputs_edges() {
     let f = write_yaml(SIMPLE_YAML);
     let out = fluxion()
@@ -173,7 +166,6 @@ fn dot_outputs_edges() {
 }
 
 #[test]
-#[ignore = "feature not yet implemented (#32)"]
 fn dot_two_root_jobs_no_edge_between_them() {
     let f = write_yaml(TWO_ROOTS_YAML);
     let out = fluxion()
@@ -213,7 +205,6 @@ fn input_file_flag_passes_file_content_to_component() {
 }
 
 #[test]
-#[ignore = "feature not yet implemented (#33)"]
 fn input_file_and_input_flags_are_mutually_exclusive() {
     let mut input = NamedTempFile::new().expect("tempfile");
     input.write_all(b"data").expect("write");
@@ -237,7 +228,6 @@ fn input_file_and_input_flags_are_mutually_exclusive() {
 // CLI smoke test: YAML with env: parses without error.
 
 #[test]
-#[ignore = "feature not yet implemented (#35)"]
 fn env_section_in_yaml_parses_without_error() {
     let yaml = r#"
 name: env-test
@@ -261,7 +251,6 @@ jobs:
 /// Before: `fluxion logs --json` — unknown flag → clap error.
 /// After:  outputs valid JSON object.
 #[test]
-#[ignore = "feature not yet implemented (#36)"]
 fn logs_json_flag_outputs_valid_json() {
     // We can't easily seed a run here without running a real workflow.
     // This test verifies that --json is recognized and produces parseable JSON

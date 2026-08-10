@@ -166,18 +166,25 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
 
 /// Resolve the effective worker list for a workflow run.
 ///
-/// 1. If YAML `workers:` is non-empty, health-check those.
-/// 2. Otherwise, load registered workers from DB and health-check them.
+/// 1. Start with static `workers:` from YAML.
+/// 2. If `workers_srv:` is set, resolve SRV and merge results.
+/// 3. If both are empty, fall back to DB-registered workers.
 ///
-/// Returns only healthy workers.
+/// Returns only health-checked workers.
 async fn effective_workers(wf: &Workflow) -> Vec<String> {
-    let candidates = if !wf.workers.is_empty() {
-        wf.workers.iter().map(|w| w.url().to_string()).collect()
-    } else {
-        RunStore::open()
+    let mut candidates: Vec<String> = wf.workers.iter().map(|w| w.url().to_string()).collect();
+
+    // Merge SRV-discovered workers (failures are silently ignored).
+    if let Some(srv) = &wf.workers_srv {
+        let mut srv_urls = crate::resolve_srv_workers(srv).await;
+        candidates.append(&mut srv_urls);
+    }
+
+    if candidates.is_empty() {
+        candidates = RunStore::open()
             .and_then(|s| s.registered_worker_urls())
-            .unwrap_or_default()
-    };
+            .unwrap_or_default();
+    }
     health_check_workers(&candidates).await
 }
 
@@ -458,7 +465,46 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         reason, run_id, event.job_id
                     );
                 }
-                break;
+
+                // Check if the failed job is a foreach child.
+                let foreach_parent = foreach_map
+                    .iter()
+                    .find(|(_, children)| children.contains(&event.job_id))
+                    .map(|(parent, children)| (parent.clone(), children.clone()));
+
+                match foreach_parent {
+                    Some((parent_id, siblings)) => {
+                        let fail_fast = wf.jobs.get(&parent_id).map_or(false, |j| j.fail_fast);
+                        if fail_fast {
+                            // Cancel all pending siblings immediately.
+                            for sibling in &siblings {
+                                if sibling == &event.job_id {
+                                    continue;
+                                }
+                                if matches!(
+                                    statuses.get(sibling.as_str()),
+                                    Some(JobStatus::Pending) | Some(JobStatus::Ready)
+                                ) {
+                                    let cancel = JobStatus::Cancelled;
+                                    store.upsert_job(run_id, sibling, &cancel)?;
+                                    statuses.insert(sibling.clone(), cancel);
+                                    if print_progress {
+                                        println!(
+                                            "[{}] {:<pad$}  CANCELLED (fail_fast)",
+                                            timestamp(),
+                                            sibling,
+                                            pad = pad
+                                        );
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        // fail_fast=false: let remaining siblings run to completion;
+                        // the fan-in cancellation happens in the dep-ready check above.
+                    }
+                    None => break, // non-foreach job failure → stop immediately
+                }
             }
             _ => {}
         }
@@ -868,6 +914,10 @@ fn launch(
     });
     let perms = wf.jobs[&job_id].permissions.clone();
     let env = wf.jobs[&job_id].env.clone();
+    let output_size_limit = wf.jobs[&job_id]
+        .output_size_limit_mb
+        .unwrap_or(64) * 1024 * 1024;
+    let component_sha256 = wf.jobs[&job_id].component_sha256.clone();
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -890,6 +940,24 @@ fn launch(
                 perms
             };
 
+            // Verify SHA-256 digest before loading the component (supply-chain protection).
+            if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref()) {
+                let elapsed = start.elapsed();
+                let _ = tx.send(JobEvent {
+                    job_id: job_id.clone(),
+                    status: JobStatus::Failed {
+                        elapsed,
+                        reason: format!("digest verification failed: {e}"),
+                    },
+                    output: None,
+                    compile_us: 0,
+                    instantiate_us: 0,
+                    execute_us: 0,
+                });
+                crate::metrics::ACTIVE_JOBS.dec();
+                return;
+            }
+
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
                 let c = component.clone();
                 let p = perms.clone();
@@ -911,13 +979,32 @@ fn launch(
 
             let elapsed = start.elapsed();
             let (status, output, compile_us, instantiate_us, execute_us) = match run_result {
-                Ok((out, m)) => (
-                    JobStatus::Succeeded { elapsed },
-                    Some(out),
-                    m.compile.as_micros() as u64,
-                    m.instantiate.as_micros() as u64,
-                    m.execute.as_micros() as u64,
-                ),
+                Ok((out, m)) => {
+                    if out.len() as u64 > output_size_limit {
+                        (
+                            JobStatus::Failed {
+                                elapsed,
+                                reason: format!(
+                                    "output size {} bytes exceeds limit of {} MB",
+                                    out.len(),
+                                    output_size_limit / (1024 * 1024)
+                                ),
+                            },
+                            None,
+                            m.compile.as_micros() as u64,
+                            m.instantiate.as_micros() as u64,
+                            m.execute.as_micros() as u64,
+                        )
+                    } else {
+                        (
+                            JobStatus::Succeeded { elapsed },
+                            Some(out),
+                            m.compile.as_micros() as u64,
+                            m.instantiate.as_micros() as u64,
+                            m.execute.as_micros() as u64,
+                        )
+                    }
+                }
                 Err(e) => (
                     JobStatus::Failed {
                         elapsed,

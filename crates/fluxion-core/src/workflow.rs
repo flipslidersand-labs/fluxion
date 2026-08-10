@@ -13,6 +13,11 @@ pub struct Workflow {
     /// Maximum number of jobs that may execute concurrently. None = unbounded.
     #[serde(default)]
     pub max_parallel: Option<usize>,
+    /// DNS SRV record name for automatic worker discovery (e.g. "_fluxion._tcp.internal").
+    /// Resolved at startup and merged with the static `workers:` list.
+    /// On SRV query failure, the static list is used as-is.
+    #[serde(default)]
+    pub workers_srv: Option<String>,
 }
 
 /// Per-worker configuration. Supports both a plain URL string and an extended
@@ -111,6 +116,18 @@ pub struct JobDefinition {
     /// Per-job parallelism cap (overrides workflow-level max_parallel).
     #[serde(default)]
     pub max_parallel: Option<usize>,
+    /// Maximum allowed output size in megabytes. Defaults to 64 MB.
+    /// Outputs exceeding this limit cause the job to fail with a clear error.
+    #[serde(default)]
+    pub output_size_limit_mb: Option<u64>,
+    /// When `true`, any foreach child failure immediately cancels remaining siblings.
+    /// When `false` (default), siblings run to completion before the fan-in is cancelled.
+    #[serde(default)]
+    pub fail_fast: bool,
+    /// Optional SHA-256 hex digest of the component `.wasm` file.
+    /// When present, the file is verified before execution; mismatch causes the job to fail.
+    #[serde(default)]
+    pub component_sha256: Option<String>,
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────
