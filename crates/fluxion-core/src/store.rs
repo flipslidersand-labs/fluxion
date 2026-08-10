@@ -8,6 +8,14 @@ use rusqlite::{Connection, params};
 use crate::state::JobStatus;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS schedules (
+    id            TEXT PRIMARY KEY,
+    workflow_path TEXT NOT NULL,
+    cron_expr     TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    last_run_at   INTEGER,
+    next_run_at   INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id            TEXT PRIMARY KEY,
     workflow_name TEXT NOT NULL,
@@ -293,6 +301,100 @@ impl RunStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(urls)
+    }
+}
+
+// ── Schedule registry ─────────────────────────────────────────────────────────
+
+pub struct ScheduleEntry {
+    pub id: String,
+    pub workflow_path: String,
+    pub cron_expr: String,
+    pub created_at: u64,
+    pub last_run_at: Option<u64>,
+    pub next_run_at: u64,
+}
+
+impl RunStore {
+    pub fn add_schedule(
+        &self,
+        id: &str,
+        workflow_path: &str,
+        cron_expr: &str,
+        next_run_at: u64,
+    ) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, workflow_path, cron_expr, now, next_run_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_schedule(&self, id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+        Ok(n)
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Return schedules whose `next_run_at` ≤ `now_secs`.
+    pub fn due_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let now = now_secs();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules WHERE next_run_at <= ?1 ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map(params![now], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Update `last_run_at` and `next_run_at` after a schedule fires.
+    pub fn update_schedule_next(
+        &self,
+        id: &str,
+        last_run_at: u64,
+        next_run_at: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE schedules SET last_run_at = ?1, next_run_at = ?2 WHERE id = ?3",
+            params![last_run_at, next_run_at, id],
+        )?;
+        Ok(())
     }
 }
 

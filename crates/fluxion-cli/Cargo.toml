@@ -22,6 +22,8 @@ fluxion-core          = { path = "../fluxion-core" }
 fluxion-host          = { path = "../fluxion-host" }
 fluxion-worker        = { path = "../fluxion-worker" }
 wasmtime              = { workspace = true }
+cron                  = { workspace = true }
+chrono                = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

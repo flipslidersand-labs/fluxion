@@ -11,6 +11,7 @@ use fluxion_core::{
 use fluxion_host::{FluxionHost, scheduler, scheduler::LbStrategy};
 use std::path::PathBuf;
 use std::sync::Arc;
+use chrono::Utc;
 
 #[derive(Parser)]
 #[command(name = "fluxion", about = "Safe Wasm-based job execution engine")]
@@ -100,6 +101,32 @@ enum Commands {
     },
     /// Start the MCP server (stdio transport)
     McpServe,
+    /// Manage workflow schedules (cron-based recurring execution)
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    /// Register a workflow to run on a cron schedule
+    Add {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Cron expression, e.g. "0 * * * *" (every hour)
+        #[arg(long)]
+        cron: String,
+    },
+    /// List all registered schedules with their next run time
+    List,
+    /// Remove a schedule by its ID
+    Remove {
+        /// Schedule ID (from `fluxion schedule list`)
+        id: String,
+    },
+    /// Run the schedule daemon — fires due workflows in a loop
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -333,6 +360,21 @@ async fn run(command: Commands) -> Result<()> {
         Commands::McpServe => {
             mcp::serve().await?;
         }
+
+        Commands::Schedule { action } => match action {
+            ScheduleCommands::Add { path, cron } => {
+                cmd_schedule_add(&path, &cron)?;
+            }
+            ScheduleCommands::List => {
+                cmd_schedule_list()?;
+            }
+            ScheduleCommands::Remove { id } => {
+                cmd_schedule_remove(&id)?;
+            }
+            ScheduleCommands::Daemon => {
+                cmd_schedule_daemon().await?;
+            }
+        },
     }
 
     Ok(())
@@ -697,4 +739,140 @@ fn fmt_unix(secs: u64) -> String {
     let m = (secs / 60) % 60;
     let s = secs % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+// ── fluxion schedule ──────────────────────────────────────────────────────────
+
+fn next_run_secs(cron_expr: &str) -> Result<u64> {
+    use std::str::FromStr;
+    let schedule = cron::Schedule::from_str(cron_expr)
+        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expr, e))?;
+    let next = schedule
+        .upcoming(Utc)
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Cron expression '{}' has no future occurrences", cron_expr))?;
+    Ok(next.timestamp() as u64)
+}
+
+fn cmd_schedule_add(path: &str, cron_expr: &str) -> Result<()> {
+    // Validate the workflow can be parsed.
+    let _wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Cannot load workflow '{}': {}", path, e))?;
+    let abs_path = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Cannot resolve '{}': {}", path, e))?;
+    let next = next_run_secs(cron_expr)?;
+    let id = format!(
+        "sched-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let store = RunStore::open()?;
+    store.add_schedule(&id, abs_path.to_string_lossy().as_ref(), cron_expr, next)?;
+    let next_dt = chrono::DateTime::<Utc>::from_timestamp(next as i64, 0)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_else(|| next.to_string());
+    println!("Schedule added: {id}");
+    println!("  workflow : {}", abs_path.display());
+    println!("  cron     : {cron_expr}");
+    println!("  next run : {next_dt}");
+    Ok(())
+}
+
+fn cmd_schedule_list() -> Result<()> {
+    let store = RunStore::open()?;
+    let schedules = store.list_schedules()?;
+    if schedules.is_empty() {
+        println!("No schedules registered.");
+        return Ok(());
+    }
+    println!("{:<28}  {:<20}  NEXT RUN", "ID", "CRON");
+    println!("{}", "-".repeat(72));
+    for s in schedules {
+        let next_dt = chrono::DateTime::<Utc>::from_timestamp(s.next_run_at as i64, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| s.next_run_at.to_string());
+        println!("{:<28}  {:<20}  {}", s.id, s.cron_expr, next_dt);
+        println!("    {}", s.workflow_path);
+    }
+    Ok(())
+}
+
+fn cmd_schedule_remove(id: &str) -> Result<()> {
+    let store = RunStore::open()?;
+    let n = store.remove_schedule(id)?;
+    if n == 0 {
+        println!("Not found: {id}");
+    } else {
+        println!("Removed: {id}");
+    }
+    Ok(())
+}
+
+async fn cmd_schedule_daemon() -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    println!("fluxion schedule daemon starting (press Ctrl-C or send SIGTERM to stop)");
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let host = Arc::new(FluxionHost::new()?);
+
+    loop {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                println!("Received SIGTERM — shutting down daemon");
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received SIGINT — shutting down daemon");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                fire_due_schedules(Arc::clone(&host)).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn fire_due_schedules(host: Arc<FluxionHost>) {
+    let store = match RunStore::open() {
+        Ok(s) => s,
+        Err(e) => { tracing::error!("store open failed: {e}"); return; }
+    };
+    let due = match store.due_schedules() {
+        Ok(d) => d,
+        Err(e) => { tracing::error!("due_schedules failed: {e}"); return; }
+    };
+    for sched in due {
+        let wf = match Workflow::from_file(&sched.workflow_path) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!(id = %sched.id, "failed to load workflow: {e}");
+                continue;
+            }
+        };
+        let wf_path = PathBuf::from(&sched.workflow_path);
+        let h = Arc::clone(&host);
+        let sched_id = sched.id.clone();
+        let cron_expr = sched.cron_expr.clone();
+        tokio::spawn(async move {
+            tracing::info!(schedule = %sched_id, "firing scheduled workflow");
+            let _ = scheduler::run_with_strategy(
+                &wf,
+                &wf_path,
+                h,
+                LbStrategy::RoundRobin,
+            ).await;
+            // Advance next_run_at.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Ok(next) = next_run_secs(&cron_expr) {
+                if let Ok(s) = RunStore::open() {
+                    let _ = s.update_schedule_next(&sched_id, now, next);
+                }
+            }
+        });
+    }
 }
