@@ -99,6 +99,17 @@ enum Commands {
         #[command(subcommand)]
         action: WorkerCommands,
     },
+    /// Validate a YAML workflow without executing it
+    Validate {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Output structured JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+        /// Skip checking whether component .wasm files exist on disk
+        #[arg(long)]
+        skip_wasm_check: bool,
+    },
     /// Start the MCP server (stdio transport)
     McpServe,
     /// Manage workflow schedules (cron-based recurring execution)
@@ -357,6 +368,14 @@ async fn run(command: Commands) -> Result<()> {
             }
         },
 
+        Commands::Validate {
+            path,
+            json,
+            skip_wasm_check,
+        } => {
+            cmd_validate(&path, json, skip_wasm_check);
+        }
+
         Commands::McpServe => {
             mcp::serve().await?;
         }
@@ -435,6 +454,65 @@ fn cmd_dot(path: &str) -> Result<()> {
     }
     println!("}}");
     Ok(())
+}
+
+// ── fluxion validate ──────────────────────────────────────────────────────────
+
+fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool) {
+    // Step 1: read file
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("Cannot read '{path}': {e}");
+            if json {
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
+            } else {
+                eprintln!("ERROR: {msg}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Step 2: parse YAML (separate from validation so we get a clear parse error)
+    let wf: Workflow = match serde_yaml::from_str(&src) {
+        Ok(w) => w,
+        Err(e) => {
+            let msg = format!("YAML parse error: {e}");
+            if json {
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
+            } else {
+                eprintln!("ERROR: {msg}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Step 3: structural validation (deps, cycles, input_from)
+    let mut report = wf.validate();
+
+    // Step 4: component path existence check (opt-out with --skip-wasm-check)
+    if !skip_wasm_check {
+        let path_report = wf.check_component_paths();
+        report.errors.extend(path_report.errors);
+    }
+
+    if json {
+        let out = serde_json::json!({
+            "ok": report.is_ok(),
+            "errors": report.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else if report.is_ok() {
+        println!("✓ {path}: Validation passed");
+    } else {
+        for err in &report.errors {
+            eprintln!("ERROR: {err}");
+        }
+    }
+
+    if !report.is_ok() {
+        std::process::exit(1);
+    }
 }
 
 fn dot_id(s: &str) -> String {
