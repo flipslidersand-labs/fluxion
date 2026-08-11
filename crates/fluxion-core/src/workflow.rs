@@ -213,7 +213,10 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "Job '{job}' has input_from '{src}' which does not exist")
             }
             Self::InputFromNotForeach { job, src } => {
-                write!(f, "Job '{job}' has input_from '{src}' but '{src}' does not have foreach")
+                write!(
+                    f,
+                    "Job '{job}' has input_from '{src}' but '{src}' does not have foreach"
+                )
             }
             Self::CyclicDependency => write!(f, "Workflow contains a circular dependency"),
             Self::ComponentNotFound { job, path } => {
@@ -405,7 +408,8 @@ jobs:
 
     #[test]
     fn validate_ok_simple() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: ok
 jobs:
   a:
@@ -413,42 +417,54 @@ jobs:
   b:
     component: b.wasm
     depends_on: [a]
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(report.is_ok(), "{report}");
     }
 
     #[test]
     fn validate_unknown_dep() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: bad
 jobs:
   a:
     component: a.wasm
     depends_on: [nonexistent]
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(!report.is_ok());
-        assert!(matches!(report.errors[0], ValidationError::UnknownDependency { .. }));
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::UnknownDependency { .. }
+        ));
     }
 
     #[test]
     fn validate_unknown_input_from() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: bad
 jobs:
   a:
     component: a.wasm
     input_from: ghost
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(!report.is_ok());
-        assert!(matches!(report.errors[0], ValidationError::UnknownInputFrom { .. }));
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::UnknownInputFrom { .. }
+        ));
     }
 
     #[test]
     fn validate_input_from_not_foreach() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: bad
 jobs:
   producer:
@@ -456,7 +472,8 @@ jobs:
   consumer:
     component: c.wasm
     input_from: producer
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(!report.is_ok());
         assert!(matches!(
@@ -467,7 +484,8 @@ jobs:
 
     #[test]
     fn validate_cycle_detected() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: cycle
 jobs:
   a:
@@ -476,15 +494,20 @@ jobs:
   b:
     component: b.wasm
     depends_on: [a]
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(!report.is_ok());
-        assert!(matches!(report.errors.last(), Some(ValidationError::CyclicDependency)));
+        assert!(matches!(
+            report.errors.last(),
+            Some(ValidationError::CyclicDependency)
+        ));
     }
 
     #[test]
     fn validate_collects_multiple_errors() {
-        let wf = make_wf(r#"
+        let wf = make_wf(
+            r#"
 name: multi-error
 jobs:
   a:
@@ -493,7 +516,8 @@ jobs:
   b:
     component: b.wasm
     depends_on: [missing2]
-"#);
+"#,
+        );
         let report = wf.validate();
         assert!(!report.is_ok());
         assert_eq!(report.errors.len(), 2);
