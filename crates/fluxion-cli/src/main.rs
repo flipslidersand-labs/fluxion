@@ -377,7 +377,11 @@ async fn run(command: Commands) -> Result<()> {
         },
 
         Commands::Watch { path, debounce } => {
-            todo!("watch: {} (debounce {}ms) — implement in #100", path, debounce);
+            todo!(
+                "watch: {} (debounce {}ms) — implement in #100",
+                path,
+                debounce
+            );
         }
 
         Commands::Validate {
