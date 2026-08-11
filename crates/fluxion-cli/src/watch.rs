@@ -111,10 +111,10 @@ fn run_watcher(
                 // Forward to async channel (best-effort; ignore send errors)
                 let _ = tx.blocking_send(());
             }
-            std::sync::mpsc::RecvTimeoutError::Timeout => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 // Continue checking shutdown flag
             }
-            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 break;
             }
         }
