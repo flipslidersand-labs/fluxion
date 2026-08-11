@@ -1,5 +1,6 @@
 mod mcp;
 mod telemetry;
+mod watch;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -377,11 +378,7 @@ async fn run(command: Commands) -> Result<()> {
         },
 
         Commands::Watch { path, debounce } => {
-            todo!(
-                "watch: {} (debounce {}ms) — implement in #100",
-                path,
-                debounce
-            );
+            watch::watch_and_run(PathBuf::from(&path), debounce).await?;
         }
 
         Commands::Validate {
