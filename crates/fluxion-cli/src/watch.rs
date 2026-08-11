@@ -1,4 +1,7 @@
 use anyhow::Result;
+use fluxion_core::runner::JobResult;
+use fluxion_core::workflow::Workflow;
+use fluxion_host::scheduler;
 use notify::Watcher;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -13,6 +16,9 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
         path_display, debounce_ms
     );
     println!("[watch] Press Ctrl+C to stop");
+
+    // Create host once for the loop
+    let host = Arc::new(fluxion_host::FluxionHost::new()?);
 
     // Flag to signal shutdown
     let shutdown = Arc::new(Mutex::new(false));
@@ -31,6 +37,7 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
 
     // Main loop: wait for debounced file changes, then re-run
     let mut last_change: Option<Instant> = None;
+    let mut prev_result: Option<Vec<JobResult>> = None;
 
     loop {
         tokio::select! {
@@ -42,8 +49,34 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
             _ = tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)), if last_change.is_some() => {
                 if let Some(last) = last_change {
                     if last.elapsed() >= std::time::Duration::from_millis(debounce_ms) {
-                        println!("[watch] File changed, re-running...");
-                        // TODO: call scheduler::run_with_strategy here (phase 3 — #99)
+                        println!("[{}] File changed, running workflow...", fmt_time());
+
+                        // Parse workflow
+                        match Workflow::from_file(&path) {
+                            Ok(wf) => {
+                                // Run workflow
+                                match tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(async {
+                                        let wf_path = PathBuf::from(&path)
+                                            .canonicalize()
+                                            .unwrap_or(PathBuf::from(&path));
+                                        scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), scheduler::LbStrategy::RoundRobin).await
+                                    })
+                                }) {
+                                    Ok(result) => {
+                                        print_result(&result.jobs, &prev_result);
+                                        prev_result = Some(result.jobs);
+                                        println!("[{}] Run complete", fmt_time());
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[{}] Run failed: {}", fmt_time(), e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[{}] Failed to parse workflow: {}", fmt_time(), e);
+                            }
+                        }
                         last_change = None;
                     }
                 }
@@ -98,9 +131,7 @@ fn run_watcher(
     })?;
 
     // Watch the directory containing the file (notify doesn't watch files directly)
-    let watch_dir = path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let watch_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
 
     // Wait for watcher events or shutdown signal
@@ -125,4 +156,63 @@ fn run_watcher(
     }
 
     Ok(())
+}
+
+/// Format current time as HH:MM:SS
+fn fmt_time() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let h = (now / 3600) % 24;
+    let m = (now / 60) % 60;
+    let s = now % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+/// Print job results with color highlighting.
+/// Compare against previous results: success→failure is red, failure→success is green.
+fn print_result(current: &[JobResult], prev: &Option<Vec<JobResult>>) {
+    const GREEN: &str = "\x1b[32m";
+    const RED: &str = "\x1b[31m";
+    const RESET: &str = "\x1b[0m";
+
+    let prev_map = prev
+        .as_ref()
+        .map(|jobs| {
+            jobs.iter()
+                .map(|j| (j.job_id.as_str(), j.status.as_str()))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let pad = current.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+    println!();
+    println!("  {:<pad$}  STATUS", "JOB", pad = pad);
+    println!("  {}", "-".repeat(pad + 20));
+
+    for job in current {
+        let status = job.status.as_str();
+        let prev_status = prev_map.get(job.job_id.as_str()).copied();
+
+        // Color if status changed
+        let colored = if let Some(prev_s) = prev_status {
+            if prev_s != status {
+                if status == "SUCCESS" {
+                    format!("{}{}{}", GREEN, status.to_uppercase(), RESET)
+                } else if status == "FAILED" {
+                    format!("{}{}{}", RED, status.to_uppercase(), RESET)
+                } else {
+                    status.to_uppercase()
+                }
+            } else {
+                status.to_uppercase()
+            }
+        } else {
+            status.to_uppercase()
+        };
+
+        println!("  {:<pad$}  {}", job.job_id, colored, pad = pad);
+    }
+    println!();
 }
