@@ -24,7 +24,7 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
     // Spawn blocking task to run the file watcher (notify is !Send)
     let watch_path = path.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = run_watcher(&watch_path, tx, shutdown_clone) {
+        if let Err(e) = run_watcher(watch_path, tx, shutdown_clone) {
             eprintln!("[watch] Watcher error: {}", e);
         }
     });
@@ -66,13 +66,15 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
 /// Runs the file watcher in a blocking context.
 /// Watches the target YAML file and all files it depends on (future enhancement).
 fn run_watcher(
-    path: &std::path::Path,
+    path: std::path::PathBuf,
     tx: tokio::sync::mpsc::Sender<()>,
     shutdown: Arc<Mutex<bool>>,
 ) -> Result<()> {
     use notify::RecursiveMode;
 
+    let path = Arc::new(path);
     let (watcher_tx, watcher_rx) = std::sync::mpsc::channel();
+    let path_clone = Arc::clone(&path);
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         match res {
             Ok(event) => {
@@ -84,7 +86,7 @@ fn run_watcher(
                         | notify::EventKind::Access(_)
                 ) {
                     for path_buf in &event.paths {
-                        if path_buf.ends_with(path.file_name().unwrap_or_default()) {
+                        if path_buf.ends_with(path_clone.file_name().unwrap_or_default()) {
                             let _ = watcher_tx.send(());
                             break;
                         }
@@ -96,7 +98,9 @@ fn run_watcher(
     })?;
 
     // Watch the directory containing the file (notify doesn't watch files directly)
-    let watch_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let watch_dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
 
     // Wait for watcher events or shutdown signal
