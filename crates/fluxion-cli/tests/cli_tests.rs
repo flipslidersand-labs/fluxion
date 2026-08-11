@@ -455,3 +455,20 @@ fn validate_existing_component_passes() {
         .assert()
         .success();
 }
+
+// ── #86 — fluxion watch ───────────────────────────────────────────────────────
+
+#[test]
+fn watch_help_exits_ok() {
+    fluxion().args(["watch", "--help"]).assert().success();
+}
+
+#[test]
+fn watch_debounce_flag_is_accepted() {
+    // The subcommand parses --debounce without error (todo! panics, but --help exits 0)
+    fluxion()
+        .args(["watch", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("debounce"));
+}

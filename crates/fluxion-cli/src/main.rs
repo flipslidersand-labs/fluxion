@@ -99,6 +99,14 @@ enum Commands {
         #[command(subcommand)]
         action: WorkerCommands,
     },
+    /// Watch a YAML workflow file and re-run on every save
+    Watch {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Debounce delay in milliseconds before re-running after a change
+        #[arg(long, default_value = "500")]
+        debounce: u64,
+    },
     /// Validate a YAML workflow without executing it
     Validate {
         /// Path to the workflow YAML file
@@ -367,6 +375,10 @@ async fn run(command: Commands) -> Result<()> {
                 }
             }
         },
+
+        Commands::Watch { path, debounce } => {
+            todo!("watch: {} (debounce {}ms) — implement in #100", path, debounce);
+        }
 
         Commands::Validate {
             path,
