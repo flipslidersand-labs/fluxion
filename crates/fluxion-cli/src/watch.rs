@@ -8,7 +8,10 @@ use std::time::Instant;
 /// Debounces re-execution to avoid multiple triggers from rapid file changes.
 pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
     let path_display = path.display().to_string();
-    println!("[watch] Monitoring {} (debounce {}ms)", path_display, debounce_ms);
+    println!(
+        "[watch] Monitoring {} (debounce {}ms)",
+        path_display, debounce_ms
+    );
     println!("[watch] Press Ctrl+C to stop");
 
     // Flag to signal shutdown
@@ -93,9 +96,7 @@ fn run_watcher(
     })?;
 
     // Watch the directory containing the file (notify doesn't watch files directly)
-    let watch_dir = path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let watch_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
 
     // Wait for watcher events or shutdown signal
