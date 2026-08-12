@@ -3,6 +3,31 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use wasmtime::{Engine, component::Component};
 
+/// Cache-key type for the L1 / L2 component caches.
+///
+/// - `Path` — traditional mode: key derived by SHA-256 hashing the local wasm bytes.
+/// - `Digest` — OCI mode: key is the registry layer digest (`sha256:<hex>`),
+///   so `FluxionHost` can skip re-hashing bytes fetched over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CacheKey {
+    /// Key derived by hashing wasm bytes at a local path.
+    Path(PathBuf),
+    /// Explicit digest string, e.g. `"sha256:abc123…"` from an OCI registry.
+    Digest(String),
+}
+
+impl CacheKey {
+    /// Produce the canonical 64-hex-char string used as LRU / disk-cache identifier.
+    pub fn as_str_key(&self, wasm_bytes: &[u8]) -> String {
+        match self {
+            CacheKey::Digest(d) => {
+                d.strip_prefix("sha256:").unwrap_or(d).to_string()
+            }
+            CacheKey::Path(_) => wasm_key(wasm_bytes),
+        }
+    }
+}
+
 /// Disk-backed cache for precompiled Wasm components (.cwasm).
 ///
 /// Cache key = SHA-256(wasm bytes) + wasmtime version, so:
@@ -59,6 +84,41 @@ impl ComponentCache {
         let path = self.artifact_path(wasm_bytes);
         atomic_write(&path, &artifact)?;
         // SAFETY: we just wrote this artifact from the same engine version.
+        Ok(unsafe { Component::deserialize_file(engine, &path)? })
+    }
+
+    /// Like `load()` but accepts an explicit `CacheKey` (e.g. an OCI layer digest).
+    pub fn load_by_key(
+        &self,
+        engine: &Engine,
+        key: &CacheKey,
+        wasm_bytes: &[u8],
+    ) -> Option<Component> {
+        let hex = key.as_str_key(wasm_bytes);
+        let path = self.dir.join(format!("{hex}.cwasm"));
+        if !path.exists() {
+            return None;
+        }
+        match unsafe { Component::deserialize_file(engine, &path) } {
+            Ok(c) => Some(c),
+            Err(_) => {
+                std::fs::remove_file(&path).ok();
+                None
+            }
+        }
+    }
+
+    /// Like `store()` but writes under an explicit `CacheKey`.
+    pub fn store_by_key(
+        &self,
+        engine: &Engine,
+        key: &CacheKey,
+        wasm_bytes: &[u8],
+    ) -> Result<Component> {
+        let artifact = engine.precompile_component(wasm_bytes)?;
+        let hex = key.as_str_key(wasm_bytes);
+        let path = self.dir.join(format!("{hex}.cwasm"));
+        atomic_write(&path, &artifact)?;
         Ok(unsafe { Component::deserialize_file(engine, &path)? })
     }
 

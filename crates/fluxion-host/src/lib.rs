@@ -8,8 +8,9 @@ pub mod ui;
 pub mod worker_registry;
 
 use anyhow::{Context, Result};
-use cache::ComponentCache;
+use cache::{CacheKey, ComponentCache};
 use fluxion_core::workflow::PermissionSet;
+use oci::OciClient;
 use lru::LruCache;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -77,6 +78,8 @@ pub struct FluxionHost {
     pre_cache: Mutex<LruCache<String, Arc<TaskComponentPre<HostState>>>>,
     /// Signals the epoch ticker thread to stop on drop.
     ticker_shutdown: Arc<AtomicBool>,
+    /// Optional OCI client for auto-pulling components by registry reference.
+    pub oci_client: Option<Arc<OciClient>>,
 }
 
 impl Drop for FluxionHost {
@@ -122,7 +125,145 @@ impl FluxionHost {
             mem_cache: Mutex::new(LruCache::new(NonZeroUsize::new(MEM_CACHE_CAP).unwrap())),
             pre_cache: Mutex::new(LruCache::new(NonZeroUsize::new(PRE_CACHE_CAP).unwrap())),
             ticker_shutdown,
+            oci_client: None,
         })
+    }
+
+    /// Attach an `OciClient` so `run_from_oci()` can auto-pull components.
+    pub fn with_oci_client(mut self, client: OciClient) -> Self {
+        self.oci_client = Some(Arc::new(client));
+        self
+    }
+
+    /// Pull a Wasm component from an OCI registry and execute it.
+    ///
+    /// The pulled bytes are cached in L1 + L2 by digest so repeated calls for
+    /// the same `reference` hit the LRU without re-fetching from the registry.
+    ///
+    /// `repository` and `reference` follow OCI conventions, e.g.
+    /// `("org/hello", "v1.0")`.
+    pub async fn run_from_oci(
+        &self,
+        repository: &str,
+        reference: &str,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+        env: &HashMap<String, String>,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
+        let client = self
+            .oci_client
+            .as_ref()
+            .context("no OciClient configured — call FluxionHost::with_oci_client() first")?;
+
+        let wasm_bytes = client
+            .pull(repository, reference)
+            .await
+            .with_context(|| format!("OCI pull {repository}:{reference}"))?;
+
+        // Derive the digest key from the pulled bytes so the LRU + disk cache
+        // can be keyed by content hash rather than re-hashing on every call.
+        use sha2::{Digest as _, Sha256};
+        let hex: String = Sha256::digest(&wasm_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let cache_key = CacheKey::Digest(format!("sha256:{hex}"));
+
+        self.run_component_with_key(&wasm_bytes, cache_key, input, perms, env)
+    }
+
+    /// Like `run_component_measured` but accepts raw wasm bytes + an explicit cache key.
+    ///
+    /// Used by `run_from_oci` to avoid re-hashing OCI-pulled bytes and to key
+    /// the LRU by digest rather than the slower path-based hash.
+    pub fn run_component_with_key(
+        &self,
+        wasm_bytes: &[u8],
+        cache_key: CacheKey,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+        env: &HashMap<String, String>,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
+        tracing::info!(
+            target: "fluxion.audit",
+            fs_read  = ?perms.filesystem.read,
+            fs_write = ?perms.filesystem.write,
+            net_allow = ?perms.network.allow,
+            memory_mb = perms.limits.memory_mb,
+            timeout_secs = perms.limits.timeout_secs,
+            "permission_grant"
+        );
+
+        let ctx = build_wasi_ctx(perms, env)?;
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
+            .build();
+        let state = HostState { ctx, table: ResourceTable::new(), limits };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+        store.set_epoch_deadline(perms.limits.timeout_secs * TICKS_PER_SEC);
+        store.epoch_deadline_trap();
+
+        let key = cache_key.as_str_key(wasm_bytes);
+
+        let t0 = Instant::now();
+        let component: Arc<Component> = {
+            if let Some(c) = self.mem_cache.lock().unwrap().get(&key) {
+                Arc::clone(c)
+            } else {
+                let c = Arc::new(
+                    match self.disk_cache.load_by_key(&self.engine, &cache_key, wasm_bytes) {
+                        Some(c) => c,
+                        None => self.disk_cache.store_by_key(&self.engine, &cache_key, wasm_bytes)?,
+                    },
+                );
+                self.mem_cache.lock().unwrap().put(key.clone(), Arc::clone(&c));
+                c
+            }
+        };
+        let compile = t0.elapsed();
+
+        let t1 = Instant::now();
+        let pre: Arc<TaskComponentPre<HostState>> = {
+            if let Some(p) = self.pre_cache.lock().unwrap().get(&key) {
+                Arc::clone(p)
+            } else {
+                let mut linker: Linker<HostState> = Linker::new(&self.engine);
+                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
+                self.pre_cache.lock().unwrap().put(key, Arc::clone(&p));
+                p
+            }
+        };
+        let instance = pre.instantiate(&mut store).map_err(|e| {
+            if is_oom_error(&e) {
+                anyhow::anyhow!("OOM: component exceeded memory_mb={} limit ({})", perms.limits.memory_mb, e)
+            } else {
+                e
+            }
+        })?;
+        let instantiate = t1.elapsed();
+
+        let task_input = exports::fluxion::task::processor::TaskInput {
+            content: input,
+            metadata: vec![],
+        };
+        let t2 = Instant::now();
+        let call_result = instance.fluxion_task_processor().call_process(&mut store, &task_input);
+        let execute = t2.elapsed();
+
+        let metrics = JobMetrics { compile, instantiate, execute };
+        match call_result {
+            Ok(Err(e)) => anyhow::bail!("Component error: {}", e),
+            Ok(Ok(output)) => Ok((output.content, metrics)),
+            Err(trap) => {
+                if is_epoch_trap(&trap) {
+                    anyhow::bail!("Timeout: killed after {}s (epoch interrupt)", perms.limits.timeout_secs)
+                } else {
+                    Err(trap)
+                }
+            }
+        }
     }
 
     pub fn run_component(
