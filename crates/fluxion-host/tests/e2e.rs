@@ -69,7 +69,7 @@ fn patch_pipeline_paths(wf: &mut Workflow, data_dir: &str, out_dir: &str) {
 /// vehicle-pipeline: first run fails at validate (row 184 has year=1999),
 /// then we fix normalized.csv and retry from validate — expect full success.
 #[tokio::test]
-#[ignore = "requires pre-built Wasm components"]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn vehicle_pipeline_validate_retry() {
     let data_dir = format!("/tmp/fluxion-e2e-{}-pipeline", std::process::id());
     let out_dir = format!("/tmp/fluxion-e2e-{}-output", std::process::id());

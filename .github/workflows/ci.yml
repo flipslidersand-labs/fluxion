@@ -112,7 +112,7 @@ jobs:
         run: cargo build -p fluxion-host -j2
 
       - name: E2E tests
-        run: cargo test -p fluxion-host --test e2e -- --ignored
+        run: cargo test -p fluxion-host --test e2e --features ci -j2
 
       - name: Upload logs on failure
         if: failure()
