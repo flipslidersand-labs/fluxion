@@ -219,6 +219,31 @@ cargo test --package fluxion-host --test e2e -- --ignored
 # memory-limits OOM enforcement            (<1s)
 ```
 
+## OCI Registry
+
+Push and pull Wasm components to/from OCI-compatible registries:
+
+```bash
+# Set up a local registry (optional)
+docker run -d -p 5000:5000 registry:2
+
+# Push a component
+fluxion registry push components/hello/target/wasm32-wasip1/debug/hello.wasm \
+  --to localhost:5000/fluxion/hello:latest
+
+# Pull a component (auto-pulls before execution)
+fluxion run examples/oci-registry.yaml
+```
+
+In YAML workflows, reference registry components via `oci_ref`:
+
+```yaml
+jobs:
+  greet:
+    oci_ref: localhost:5000/fluxion/hello:latest
+    input: '{"name":"World"}'
+```
+
 ## Status
 
 | Phase   | Description                                | Status  |
