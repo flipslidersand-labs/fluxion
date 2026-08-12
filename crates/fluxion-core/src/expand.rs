@@ -61,6 +61,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     fail_fast: false,
                     component_sha256: def.component_sha256.clone(),
                     reduce: None,
+                    executor: def.executor.clone(),
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -254,6 +255,7 @@ mod tests {
                 fail_fast: false,
                 component_sha256: None,
                 reduce: None,
+                executor: Default::default(),
             },
         );
         jobs.insert(
@@ -273,6 +275,7 @@ mod tests {
                 fail_fast: false,
                 component_sha256: None,
                 reduce: None,
+                executor: Default::default(),
             },
         );
 
