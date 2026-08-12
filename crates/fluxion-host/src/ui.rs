@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 use crate::api::ApiState;
+=======
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
 use axum::{
     Router,
     extract::{Path, State},
@@ -6,6 +9,10 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
+<<<<<<< HEAD
+=======
+use crate::api::ApiState;
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
 
 static INDEX_HTML: &str = include_str!("../assets/index.html");
 
@@ -14,14 +21,18 @@ pub fn router() -> Router<ApiState> {
         .route("/", get(index))
         .route("/ui/runs", get(ui_runs))
         .route("/ui/runs/{id}", get(ui_run_jobs))
+<<<<<<< HEAD
         .route("/ui/schedules", get(ui_schedules))
         .route("/ui/workers", get(ui_workers))
+=======
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
 }
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+<<<<<<< HEAD
 // ── Runs ──────────────────────────────────────────────────────────────────────
 
 async fn ui_runs(State(s): State<ApiState>) -> Result<impl IntoResponse, UiError> {
@@ -35,13 +46,26 @@ async fn ui_runs(State(s): State<ApiState>) -> Result<impl IntoResponse, UiError
     );
     if rows.is_empty() {
         body.push_str("<tr><td colspan=\"4\">No runs yet.</td></tr>");
+=======
+async fn ui_runs(State(s): State<ApiState>) -> Result<impl IntoResponse, UiError> {
+    let rows = s.store.lock().unwrap().list_runs(50)?;
+    let mut html = String::new();
+    if rows.is_empty() {
+        html.push_str("<tr><td colspan=\"4\">No runs yet.</td></tr>");
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
     } else {
         for r in &rows {
             let ts = format_ts(r.started_at);
             let badge = status_badge(&r.status);
+<<<<<<< HEAD
             body.push_str(&format!(
                 "<tr>\
                    <td><a href=\"/ui/runs/{id}\" hx-get=\"/ui/runs/{id}\" hx-target=\"#content\">{id}</a></td>\
+=======
+            html.push_str(&format!(
+                "<tr>\
+                   <td><a href=\"/ui/runs/{id}\">{id}</a></td>\
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
                    <td>{name}</td>\
                    <td>{badge}</td>\
                    <td>{ts}</td>\
@@ -51,9 +75,13 @@ async fn ui_runs(State(s): State<ApiState>) -> Result<impl IntoResponse, UiError
             ));
         }
     }
+<<<<<<< HEAD
     body.push_str("</tbody></table>");
     // Wrap in a self-refreshing div (every 5s).
     Ok(html_fragment(polling_wrap("/ui/runs", "5s", &body)))
+=======
+    Ok(html_fragment(html))
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
 }
 
 async fn ui_run_jobs(
@@ -61,6 +89,7 @@ async fn ui_run_jobs(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, UiError> {
     let jobs = s.store.lock().unwrap().get_run_jobs(&id)?;
+<<<<<<< HEAD
     let mut body = String::from(
         "<table>\
            <thead><tr>\
@@ -79,11 +108,36 @@ async fn ui_run_jobs(
                    <td>{job}</td>\
                    <td>{badge}</td>\
                    <td>{elapsed}</td>\
+=======
+    let mut html = String::from(
+        "<table style=\"width:100%;border-collapse:collapse\">\
+         <thead><tr>\
+           <th style=\"text-align:left;padding:.4rem .8rem;background:#343a40;color:#fff\">Job</th>\
+           <th style=\"text-align:left;padding:.4rem .8rem;background:#343a40;color:#fff\">Status</th>\
+           <th style=\"text-align:left;padding:.4rem .8rem;background:#343a40;color:#fff\">Elapsed (ms)</th>\
+         </tr></thead><tbody>",
+    );
+    if jobs.is_empty() {
+        html.push_str("<tr><td colspan=\"3\">No jobs recorded.</td></tr>");
+    } else {
+        for j in &jobs {
+            let badge = status_badge(&j.status);
+            let elapsed = j
+                .elapsed_ms
+                .map(|ms| ms.to_string())
+                .unwrap_or_default();
+            html.push_str(&format!(
+                "<tr>\
+                   <td style=\"padding:.4rem .8rem;border-bottom:1px solid #dee2e6\">{job}</td>\
+                   <td style=\"padding:.4rem .8rem;border-bottom:1px solid #dee2e6\">{badge}</td>\
+                   <td style=\"padding:.4rem .8rem;border-bottom:1px solid #dee2e6\">{elapsed}</td>\
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
                  </tr>",
                 job = escape(&j.job_id),
             ));
         }
     }
+<<<<<<< HEAD
     body.push_str("</tbody></table>");
     let url = format!("/ui/runs/{}", escape(&id));
     Ok(html_fragment(polling_wrap(&url, "5s", &body)))
@@ -166,6 +220,10 @@ fn polling_wrap(url: &str, interval: &str, inner: &str) -> String {
     format!(
         "<div hx-get=\"{url}\" hx-trigger=\"every {interval}\" hx-swap=\"outerHTML\">{inner}</div>",
     )
+=======
+    html.push_str("</tbody></table>");
+    Ok(html_fragment(html))
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
 }
 
 fn status_badge(status: &str) -> String {
@@ -179,10 +237,23 @@ fn status_badge(status: &str) -> String {
 }
 
 fn format_ts(secs: u64) -> String {
+<<<<<<< HEAD
     let s = secs % 60;
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
     let days = secs / 86400;
+=======
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(secs);
+    // Simple ISO-8601 approximation without external deps.
+    let total = secs;
+    let s = total % 60;
+    let m = (total / 60) % 60;
+    let h = (total / 3600) % 24;
+    let days = total / 86400;
+    // days since epoch → year/month/day is complex; just show epoch offset for now.
+    let _ = dt;
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
     format!("{days}d {h:02}:{m:02}:{s:02} UTC")
 }
 
@@ -196,10 +267,14 @@ fn escape(s: &str) -> String {
 fn html_fragment(body: String) -> Response {
     Response::builder()
         .status(StatusCode::OK)
+<<<<<<< HEAD
         .header(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         )
+=======
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
         .body(axum::body::Body::from(body))
         .unwrap()
 }
@@ -217,3 +292,7 @@ impl<E: Into<anyhow::Error>> From<E> for UiError {
         Self(e.into())
     }
 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> e7c4a73 (feat(fluxion-host): htmx ダッシュボード HTML テンプレート（runs 一覧） (#101))
