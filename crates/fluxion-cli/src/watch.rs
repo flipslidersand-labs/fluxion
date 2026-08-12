@@ -10,6 +10,12 @@ use std::time::Instant;
 /// Watch a workflow YAML file for changes and re-run on save.
 /// Debounces re-execution to avoid multiple triggers from rapid file changes.
 pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
+    // Validate the file exists and is parseable before entering the watch loop
+    if !path.exists() {
+        anyhow::bail!("{}: No such file or directory", path.display());
+    }
+    Workflow::from_file(&path)?;
+
     let path_display = path.display().to_string();
     println!(
         "[watch] Monitoring {} (debounce {}ms)",

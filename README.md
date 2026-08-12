@@ -50,6 +50,15 @@ fluxion logs <run-id>
 # List recent runs
 fluxion runs list [--limit 20]
 
+# Validate a workflow YAML (structure + optional component paths)
+fluxion validate examples/vehicle-pipeline.yaml
+fluxion validate examples/vehicle-pipeline.yaml --json  # machine-readable output
+fluxion validate examples/vehicle-pipeline.yaml --skip-wasm-check  # skip path checks
+
+# Watch a workflow YAML and re-run on every save
+fluxion watch examples/vehicle-pipeline.yaml
+fluxion watch examples/vehicle-pipeline.yaml --debounce 200  # debounce in ms (default 500)
+
 # Inspect a component's WIT interface
 fluxion inspect components/pipeline-stage/target/wasm32-wasip1/debug/pipeline_stage.wasm
 
