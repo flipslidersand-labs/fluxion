@@ -22,6 +22,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/schedules", get(list_schedules))
         .route("/api/workers", get(list_workers))
         .route("/metrics", get(metrics))
+        .merge(crate::ui::router())
         .with_state(state)
 }
 

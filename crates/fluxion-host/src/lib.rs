@@ -1,6 +1,7 @@
 pub mod api;
 pub mod cache;
 pub mod metrics;
+pub mod ui;
 pub mod remote;
 pub mod scheduler;
 pub mod worker_registry;
