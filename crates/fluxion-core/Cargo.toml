@@ -11,5 +11,11 @@ serde_yaml = { workspace = true }
 rusqlite   = { workspace = true }
 indexmap   = { version = "2", features = ["serde"] }
 
+[[bench]]
+name = "core_bench"
+harness = false
+
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+indexmap  = { version = "2", features = ["serde"] }
