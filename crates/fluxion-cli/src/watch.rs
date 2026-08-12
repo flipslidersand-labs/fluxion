@@ -53,8 +53,9 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
             }
             // Debounce timer fires: if we haven't seen a change for debounce_ms, trigger re-run
             _ = tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)), if last_change.is_some() => {
-                if let Some(last) = last_change {
-                    if last.elapsed() >= std::time::Duration::from_millis(debounce_ms) {
+                if let Some(last) = last_change
+                    && last.elapsed() >= std::time::Duration::from_millis(debounce_ms)
+                {
                         println!("[{}] File changed, running workflow...", fmt_time());
 
                         // Parse workflow
@@ -84,7 +85,6 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
                             }
                         }
                         last_change = None;
-                    }
                 }
             }
             // Ctrl+C or SIGTERM signal
