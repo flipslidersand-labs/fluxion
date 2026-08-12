@@ -137,7 +137,14 @@ pub struct JobDefinition {
 
 /// How a fan-in job aggregates outputs from its foreach source.
 /// Only valid when `input_from` is set.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// YAML examples:
+/// ```yaml
+/// reduce: json_array
+/// reduce:
+///   custom: /path/to/reducer.wasm
+/// ```
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReduceMode {
     /// Concatenate raw bytes from all child outputs.
@@ -147,7 +154,60 @@ pub enum ReduceMode {
     /// Deep-merge child outputs as JSON objects (last-write-wins on key conflict).
     JsonMerge,
     /// Pass outputs to an external Wasm component for custom reduction.
-    Custom { component: String },
+    /// The value is the path to the `.wasm` component.
+    Custom(String),
+}
+
+// serde_yaml 0.9 cannot deserialize externally-tagged enums with non-unit
+// variants from YAML mappings; implement manually to handle both forms:
+//   reduce: json_array          (string → unit variant)
+//   reduce:
+//     custom: /path/to/r.wasm  (map → Custom newtype)
+impl<'de> serde::Deserialize<'de> for ReduceMode {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct RMVisitor;
+        impl<'de> Visitor<'de> for RMVisitor {
+            type Value = ReduceMode;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    f,
+                    r#""concat", "json_array", "json_merge", or {{custom: <path>}}"#
+                )
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "concat" => Ok(ReduceMode::Concat),
+                    "json_array" => Ok(ReduceMode::JsonArray),
+                    "json_merge" => Ok(ReduceMode::JsonMerge),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["concat", "json_array", "json_merge", "custom"],
+                    )),
+                }
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| de::Error::custom("empty map for reduce mode"))?;
+                match key.as_str() {
+                    "custom" => {
+                        let component: String = map.next_value()?;
+                        while map.next_key::<de::IgnoredAny>()?.is_some() {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                        Ok(ReduceMode::Custom(component))
+                    }
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["concat", "json_array", "json_merge", "custom"],
+                    )),
+                }
+            }
+        }
+        de.deserialize_any(RMVisitor)
+    }
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────
@@ -608,14 +668,13 @@ jobs:
     depends_on: [process]
     input_from: process
     reduce:
-      custom:
-        component: /path/to/reducer.wasm
+      custom: /path/to/reducer.wasm
 "#;
         let wf: Workflow = serde_yaml::from_str(src).unwrap();
-        assert!(matches!(
+        assert_eq!(
             wf.jobs["aggregate"].reduce,
-            Some(ReduceMode::Custom { .. })
-        ));
+            Some(ReduceMode::Custom("/path/to/reducer.wasm".to_string()))
+        );
     }
 
     #[test]

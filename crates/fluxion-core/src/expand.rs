@@ -60,6 +60,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     output_size_limit_mb: def.output_size_limit_mb,
                     fail_fast: false,
                     component_sha256: def.component_sha256.clone(),
+                    reduce: None,
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -121,11 +122,19 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
     })
 }
 
-/// Extract a JSON array from `input` at `path`.
+/// Extract items from `input` using a JSONPath `path` expression.
 ///
-/// Supported path forms:
-/// - `"$"` or `"$[*]"` — use the top-level value as-is (must be an array)
-/// - `"$.field"` — get a field from a JSON object
+/// The full RFC 9535 JSONPath syntax is supported, including nested paths,
+/// wildcards, slice notation, and filter expressions:
+///
+/// - `"$"` — root value (must be an array; its elements are returned)
+/// - `"$[*]"` / `"$.items[*]"` — each matched node is returned as an item
+/// - `"$.items[*].id"` — nested path; one item per matching leaf
+/// - `"$.data[?(@.active==true)]"` — filter expression
+///
+/// When the query returns a single match that is a JSON array, the array is
+/// unwrapped so callers receive the individual elements — this preserves
+/// backward-compatible behaviour for paths like `"$"` and `"$.field"`.
 pub fn extract_jsonpath_array(path: &str, input: &str) -> Result<Vec<Value>> {
     // Empty input → treat as empty array for idempotency.
     if input.trim().is_empty() {
@@ -135,47 +144,20 @@ pub fn extract_jsonpath_array(path: &str, input: &str) -> Result<Vec<Value>> {
     let root: Value = serde_json::from_str(input)
         .with_context(|| format!("foreach input is not valid JSON: {:?}", input))?;
 
-    let val = if path == "$" || path == "$[*]" {
-        root
-    } else if let Some(field) = path.strip_prefix("$.") {
-        root.get(field).cloned().with_context(|| {
-            format!(
-                "foreach path '{}': field '{}' not found in JSON",
-                path, field
-            )
-        })?
-    } else {
-        bail!(
-            "Unsupported foreach JSONPath '{}'. Supported: '$', '$[*]', '$.field'",
-            path
-        );
-    };
+    let jpath = serde_json_path::JsonPath::parse(path)
+        .with_context(|| format!("invalid JSONPath expression: '{}'", path))?;
 
-    match val {
-        Value::Array(arr) => Ok(arr),
-        other => bail!(
-            "foreach path '{}' resolved to {}, expected an array",
-            path,
-            other.type_str()
-        ),
-    }
-}
+    let matches: Vec<&Value> = jpath.query(&root).all();
 
-trait TypeStr {
-    fn type_str(&self) -> &'static str;
-}
-
-impl TypeStr for Value {
-    fn type_str(&self) -> &'static str {
-        match self {
-            Value::Null => "null",
-            Value::Bool(_) => "bool",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
+    // Backward compat: `$` and `$.field` produce a single match that IS the
+    // array. Unwrap it so callers get the individual elements.
+    if matches.len() == 1 {
+        if let Value::Array(arr) = matches[0] {
+            return Ok(arr.clone());
         }
     }
+
+    Ok(matches.into_iter().cloned().collect())
 }
 
 #[cfg(test)]
@@ -207,8 +189,46 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_path_errors() {
-        assert!(extract_jsonpath_array("$.a.b.c", r#"{"a":{"b":{"c":[]}}}"#).is_err());
+    fn nested_path_supported() {
+        let items = extract_jsonpath_array("$.a.b.c", r#"{"a":{"b":{"c":[1,2,3]}}}"#).unwrap();
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn wildcard_nested_extracts_leaves() {
+        let items = extract_jsonpath_array(
+            "$.items[*].id",
+            r#"{"items":[{"id":"x"},{"id":"y"},{"id":"z"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], serde_json::json!("x"));
+        assert_eq!(items[2], serde_json::json!("z"));
+    }
+
+    #[test]
+    fn filter_expression_matches_active() {
+        let items = extract_jsonpath_array(
+            "$.data[?(@.active==true)]",
+            r#"{"data":[{"id":1,"active":true},{"id":2,"active":false},{"id":3,"active":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn filter_expression_returns_empty_when_none_match() {
+        let items = extract_jsonpath_array(
+            "$.data[?(@.active==true)]",
+            r#"{"data":[{"id":1,"active":false}]}"#,
+        )
+        .unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn invalid_jsonpath_syntax_errors() {
+        assert!(extract_jsonpath_array("not-a-path", r#"[]"#).is_err());
     }
 
     #[test]
@@ -233,6 +253,7 @@ mod tests {
                 output_size_limit_mb: None,
                 fail_fast: false,
                 component_sha256: None,
+                reduce: None,
             },
         );
         jobs.insert(
@@ -251,6 +272,7 @@ mod tests {
                 output_size_limit_mb: None,
                 fail_fast: false,
                 component_sha256: None,
+                reduce: None,
             },
         );
 
