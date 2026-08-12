@@ -239,6 +239,7 @@ impl RunStore {
 
 // ── Worker registry ───────────────────────────────────────────────────────────
 
+#[derive(serde::Serialize)]
 pub struct WorkerEntry {
     pub url: String,
     pub registered_at: u64,
@@ -306,6 +307,7 @@ impl RunStore {
 
 // ── Schedule registry ─────────────────────────────────────────────────────────
 
+#[derive(serde::Serialize)]
 pub struct ScheduleEntry {
     pub id: String,
     pub workflow_path: String,
@@ -406,6 +408,7 @@ impl RunStore {
     }
 }
 
+#[derive(serde::Serialize)]
 pub struct RunSummary {
     pub id: String,
     pub workflow_name: String,

@@ -1,3 +1,4 @@
+pub mod api;
 pub mod cache;
 pub mod metrics;
 pub mod remote;
