@@ -131,6 +131,24 @@ pub struct JobDefinition {
     /// Aggregation mode for fan-in jobs. Must be used together with `input_from`.
     #[serde(default)]
     pub reduce: Option<ReduceMode>,
+    /// Execution backend for this job.
+    /// `local` (default) runs the Wasm component in-process via wasmtime.
+    /// `remote` dispatches the job to an HTTP worker via fluxion-worker.
+    #[serde(default)]
+    pub executor: ExecutorKind,
+}
+
+// ── ExecutorKind ──────────────────────────────────────────────────────────────
+
+/// Execution backend for a job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorKind {
+    /// Run the Wasm component in-process via wasmtime (default).
+    #[default]
+    Local,
+    /// Dispatch to an HTTP remote worker (fluxion-worker).
+    Remote,
 }
 
 // ── ReduceMode ────────────────────────────────────────────────────────────────
@@ -715,5 +733,48 @@ jobs:
 "#,
         );
         assert!(wf.validate().is_ok());
+    }
+
+    // ── ExecutorKind ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn executor_kind_defaults_to_local() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: test
+jobs:
+  step:
+    component: x.wasm
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["step"].executor, ExecutorKind::Local);
+    }
+
+    #[test]
+    fn executor_kind_parses_remote() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: test
+jobs:
+  step:
+    component: x.wasm
+    executor: remote
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["step"].executor, ExecutorKind::Remote);
+    }
+
+    #[test]
+    fn executor_kind_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ExecutorKind::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExecutorKind::Remote).unwrap(),
+            "\"remote\""
+        );
     }
 }
