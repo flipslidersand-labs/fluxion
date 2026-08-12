@@ -135,6 +135,38 @@ impl RegistryStore {
         Ok(())
     }
 
+    /// Register a component by its OCI reference and local wasm path.
+    /// Returns the entry ID.
+    pub fn register(&self, oci_ref: &OciRef, wasm_path: &str) -> Result<String> {
+        let id = entry_id(oci_ref);
+        let entry = RegistryEntry {
+            id: id.clone(),
+            oci_ref: oci_ref.clone(),
+            wasm_path: wasm_path.to_string(),
+            created_at: now_secs(),
+        };
+        self.upsert(&entry)?;
+        Ok(id)
+    }
+
+    /// Resolve an OCI reference to its locally stored entry, if any.
+    /// Matches on registry + repository + tag (or digest when tag is None).
+    pub fn resolve(&self, oci_ref: &OciRef) -> Result<Option<RegistryEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, registry, repository, tag, digest, wasm_path, created_at
+             FROM oci_components
+             WHERE registry = ?1 AND repository = ?2
+               AND (tag IS ?3 OR (?3 IS NULL AND digest IS ?4))
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(
+            params![oci_ref.registry, oci_ref.repository, oci_ref.tag, oci_ref.digest],
+            row_to_entry,
+        )?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Insert or replace a component entry.
     pub fn upsert(&self, entry: &RegistryEntry) -> Result<()> {
         let r = &entry.oci_ref;
