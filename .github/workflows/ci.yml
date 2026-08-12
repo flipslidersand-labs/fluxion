@@ -67,6 +67,9 @@ jobs:
   e2e:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_LOG: fluxion_host=debug,fluxion_core=debug
     steps:
       - uses: actions/checkout@v4
 
@@ -110,6 +113,14 @@ jobs:
 
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e -- --ignored
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ github.run_id }}
+          path: /tmp/fluxion-e2e-*/
+          retention-days: 7
 
   fmt:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
