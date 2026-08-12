@@ -6,39 +6,45 @@
   <title>Fluxion Dashboard</title>
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f8f9fa; color: #212529; }
-    h1 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f8f9fa; color: #212529; }
+    header { background: #343a40; color: #fff; padding: .75rem 2rem; display: flex; align-items: center; gap: 2rem; }
+    header h1 { font-size: 1.1rem; margin: 0; }
+    nav a { color: #adb5bd; text-decoration: none; font-size: .9rem; padding: .3rem .6rem; border-radius: 4px; }
+    nav a:hover { background: #495057; color: #fff; }
+    main { padding: 1.5rem 2rem; }
     table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
-    th { background: #343a40; color: #fff; text-align: left; padding: .6rem 1rem; font-size: .85rem; }
+    th { background: #495057; color: #fff; text-align: left; padding: .6rem 1rem; font-size: .85rem; }
     td { padding: .6rem 1rem; border-bottom: 1px solid #dee2e6; font-size: .9rem; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: #f1f3f5; }
     .badge { display: inline-block; padding: .2rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 600; }
-    .badge-running   { background: #d0ebff; color: #1864ab; }
-    .badge-succeeded { background: #d3f9d8; color: #1b5e20; }
-    .badge-failed    { background: #ffe3e3; color: #c62828; }
-    .badge-pending   { background: #f1f3f5; color: #495057; }
+    .badge-running    { background: #d0ebff; color: #1864ab; }
+    .badge-succeeded  { background: #d3f9d8; color: #1b5e20; }
+    .badge-failed     { background: #ffe3e3; color: #c62828; }
+    .badge-pending    { background: #f1f3f5; color: #495057; }
+    .badge-healthy    { background: #d3f9d8; color: #1b5e20; }
+    .badge-unreachable{ background: #ffe3e3; color: #c62828; }
+    .badge-unknown    { background: #f1f3f5; color: #868e96; }
     a { color: #1971c2; text-decoration: none; }
     a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>Fluxion Dashboard</h1>
-  <table>
-    <thead>
-      <tr>
-        <th>Run ID</th>
-        <th>Workflow</th>
-        <th>Status</th>
-        <th>Started At</th>
-      </tr>
-    </thead>
-    <tbody
-      hx-get="/ui/runs"
-      hx-trigger="load, every 5s"
-      hx-swap="innerHTML">
-      <tr><td colspan="4">Loading…</td></tr>
-    </tbody>
-  </table>
+  <header>
+    <h1>Fluxion</h1>
+    <nav>
+      <a href="#" hx-get="/ui/runs"      hx-target="#content" hx-swap="innerHTML">Runs</a>
+      <a href="#" hx-get="/ui/schedules" hx-target="#content" hx-swap="innerHTML">Schedules</a>
+      <a href="#" hx-get="/ui/workers"   hx-target="#content" hx-swap="innerHTML">Workers</a>
+    </nav>
+  </header>
+  <main>
+    <div id="content"
+         hx-get="/ui/runs"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p>Loading…</p>
+    </div>
+  </main>
 </body>
 </html>
