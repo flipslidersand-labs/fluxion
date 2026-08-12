@@ -119,6 +119,12 @@ enum Commands {
         #[arg(long)]
         skip_wasm_check: bool,
     },
+    /// Start the REST API + Prometheus server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
     /// Start the MCP server (stdio transport)
     McpServe,
     /// Manage workflow schedules (cron-based recurring execution)
@@ -387,6 +393,11 @@ async fn run(command: Commands) -> Result<()> {
             skip_wasm_check,
         } => {
             cmd_validate(&path, json, skip_wasm_check);
+        }
+
+        Commands::Serve { port } => {
+            println!("Starting fluxion API server on http://localhost:{port}");
+            fluxion_host::api::start(port).await?;
         }
 
         Commands::McpServe => {

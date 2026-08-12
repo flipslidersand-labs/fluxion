@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -68,6 +69,17 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
             .unwrap(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Bind the API + metrics router on `port` and serve until the process exits.
+pub async fn start(port: u16) -> anyhow::Result<()> {
+    let store = Arc::new(Mutex::new(fluxion_core::store::RunStore::open()?));
+    let app = router(ApiState { store });
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tracing::info!("fluxion API server listening on http://{addr}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 struct ApiError(anyhow::Error);
