@@ -9,7 +9,8 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 rusqlite   = { workspace = true }
-indexmap   = { version = "2", features = ["serde"] }
+indexmap         = { version = "2", features = ["serde"] }
+serde_json_path  = { workspace = true }
 
 [[bench]]
 name = "core_bench"
