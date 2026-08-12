@@ -128,6 +128,26 @@ pub struct JobDefinition {
     /// When present, the file is verified before execution; mismatch causes the job to fail.
     #[serde(default)]
     pub component_sha256: Option<String>,
+    /// Aggregation mode for fan-in jobs. Must be used together with `input_from`.
+    #[serde(default)]
+    pub reduce: Option<ReduceMode>,
+}
+
+// ── ReduceMode ────────────────────────────────────────────────────────────────
+
+/// How a fan-in job aggregates outputs from its foreach source.
+/// Only valid when `input_from` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReduceMode {
+    /// Concatenate raw bytes from all child outputs.
+    Concat,
+    /// Wrap each child output as an element of a JSON array.
+    JsonArray,
+    /// Deep-merge child outputs as JSON objects (last-write-wins on key conflict).
+    JsonMerge,
+    /// Pass outputs to an external Wasm component for custom reduction.
+    Custom { component: String },
 }
 
 // ── Permission types ──────────────────────────────────────────────────────────
@@ -201,6 +221,7 @@ pub enum ValidationError {
     InputFromNotForeach { job: String, src: String },
     CyclicDependency,
     ComponentNotFound { job: String, path: String },
+    ReduceWithoutInputFrom { job: String },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -221,6 +242,9 @@ impl std::fmt::Display for ValidationError {
             Self::CyclicDependency => write!(f, "Workflow contains a circular dependency"),
             Self::ComponentNotFound { job, path } => {
                 write!(f, "Job '{job}': component not found at '{path}'")
+            }
+            Self::ReduceWithoutInputFrom { job } => {
+                write!(f, "Job '{job}': `reduce` requires `input_from`")
             }
         }
     }
@@ -346,6 +370,11 @@ impl Workflow {
                     }
                     _ => {}
                 }
+            }
+            if def.reduce.is_some() && def.input_from.is_none() {
+                report.errors.push(ValidationError::ReduceWithoutInputFrom {
+                    job: job_id.clone(),
+                });
             }
         }
 
@@ -546,5 +575,86 @@ jobs:
         let mut report = ValidationReport::default();
         report.errors.push(ValidationError::CyclicDependency);
         assert!(report.into_result().is_err());
+    }
+
+    #[test]
+    fn parse_reduce_yaml() {
+        let src = r#"
+name: reduce-test
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+    reduce: json_array
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert_eq!(wf.jobs["aggregate"].reduce, Some(ReduceMode::JsonArray));
+    }
+
+    #[test]
+    fn parse_reduce_custom_yaml() {
+        let src = r#"
+name: reduce-custom
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+    reduce:
+      custom:
+        component: /path/to/reducer.wasm
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert!(matches!(
+            wf.jobs["aggregate"].reduce,
+            Some(ReduceMode::Custom { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_reduce_without_input_from() {
+        let wf = make_wf(
+            r#"
+name: bad-reduce
+jobs:
+  a:
+    component: a.wasm
+    reduce: concat
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ReduceWithoutInputFrom { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_reduce_with_input_from_is_ok() {
+        let wf = make_wf(
+            r#"
+name: good-reduce
+jobs:
+  source:
+    component: a.wasm
+    foreach: "$.items"
+  sink:
+    component: b.wasm
+    depends_on: [source]
+    input_from: source
+    reduce: json_merge
+"#,
+        );
+        assert!(wf.validate().is_ok());
     }
 }
