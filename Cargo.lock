@@ -801,6 +801,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1074,11 +1088,13 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "dashmap",
  "fluxion-core",
  "fluxion-host",
  "hyper",
  "hyper-util",
  "prometheus",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -1089,6 +1105,7 @@ dependencies = [
  "tokio-rustls",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3698,6 +3715,7 @@ version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]
