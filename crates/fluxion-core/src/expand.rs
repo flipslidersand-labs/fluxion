@@ -162,9 +162,7 @@ pub fn expand_foreach_dynamic(
     depth: usize,
 ) -> Result<(Vec<String>, IndexMap<String, JobDefinition>)> {
     if depth > MAX_FOREACH_DEPTH {
-        bail!(
-            "foreach nesting depth limit ({MAX_FOREACH_DEPTH}) exceeded for job '{job_id}'"
-        );
+        bail!("foreach nesting depth limit ({MAX_FOREACH_DEPTH}) exceeded for job '{job_id}'");
     }
 
     let path = def
@@ -557,7 +555,10 @@ mod tests {
         };
         let dep_output = br#"["a","b"]"#;
         let (_, children) = expand_foreach_dynamic("job", &def, dep_output, 1).unwrap();
-        assert!(children["job.0"].fail_fast, "child must inherit fail_fast=true");
+        assert!(
+            children["job.0"].fail_fast,
+            "child must inherit fail_fast=true"
+        );
         assert!(children["job.1"].fail_fast);
     }
 
@@ -604,6 +605,9 @@ mod tests {
         };
         let dep_output = br#"["x"]"#;
         let result = expand_foreach_dynamic("deep", &def, dep_output, MAX_FOREACH_DEPTH);
-        assert!(result.is_ok(), "depth == MAX_FOREACH_DEPTH should be allowed");
+        assert!(
+            result.is_ok(),
+            "depth == MAX_FOREACH_DEPTH should be allowed"
+        );
     }
 }
