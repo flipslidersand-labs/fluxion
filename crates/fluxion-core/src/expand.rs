@@ -141,8 +141,14 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
     })
 }
 
+/// Maximum depth for nested dynamic foreach expansion.
+pub const MAX_FOREACH_DEPTH: usize = 4;
+
 /// Expand a single dynamic foreach job at runtime, using the output bytes of a
 /// completed dependency as the JSON input for the JSONPath expression.
+///
+/// `depth` is the nesting level of this expansion (1 = first level, 2 = nested, …).
+/// Returns an error when `depth > MAX_FOREACH_DEPTH`.
 ///
 /// Returns the child job IDs (e.g. `["process.0", "process.1", ...]`) and the
 /// new child `JobDefinition`s to inject into the workflow.
@@ -153,7 +159,14 @@ pub fn expand_foreach_dynamic(
     job_id: &str,
     def: &JobDefinition,
     dep_output: &[u8],
+    depth: usize,
 ) -> Result<(Vec<String>, IndexMap<String, JobDefinition>)> {
+    if depth > MAX_FOREACH_DEPTH {
+        bail!(
+            "foreach nesting depth limit ({MAX_FOREACH_DEPTH}) exceeded for job '{job_id}'"
+        );
+    }
+
     let path = def
         .foreach
         .as_deref()
@@ -183,7 +196,7 @@ pub fn expand_foreach_dynamic(
             input_from: None,
             max_parallel: def.max_parallel,
             output_size_limit_mb: def.output_size_limit_mb,
-            fail_fast: false,
+            fail_fast: def.fail_fast,
             component_sha256: def.component_sha256.clone(),
             reduce: None,
         };
@@ -348,7 +361,7 @@ mod tests {
             reduce: None,
         };
         let dep_output = br#"{"items":["x","y","z"]}"#;
-        let (child_ids, children) = expand_foreach_dynamic("process", &def, dep_output).unwrap();
+        let (child_ids, children) = expand_foreach_dynamic("process", &def, dep_output, 1).unwrap();
 
         assert_eq!(child_ids, vec!["process.0", "process.1", "process.2"]);
         assert_eq!(children.len(), 3);
@@ -379,7 +392,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
         };
-        let (ids, children) = expand_foreach_dynamic("job", &def, b"").unwrap();
+        let (ids, children) = expand_foreach_dynamic("job", &def, b"", 1).unwrap();
         assert!(ids.is_empty());
         assert!(children.is_empty());
     }
@@ -522,5 +535,75 @@ mod tests {
 
         let map = &expanded.foreach_map;
         assert_eq!(map["process"], vec!["process.0", "process.1", "process.2"]);
+    }
+
+    #[test]
+    fn fail_fast_propagated_to_children() {
+        let def = JobDefinition {
+            component: "t.wasm".to_string(),
+            depends_on: vec![],
+            input: None,
+            permissions: Default::default(),
+            worker: None,
+            env: Default::default(),
+            when: None,
+            foreach: Some("$".to_string()),
+            input_from: None,
+            max_parallel: None,
+            output_size_limit_mb: None,
+            fail_fast: true,
+            component_sha256: None,
+            reduce: None,
+        };
+        let dep_output = br#"["a","b"]"#;
+        let (_, children) = expand_foreach_dynamic("job", &def, dep_output, 1).unwrap();
+        assert!(children["job.0"].fail_fast, "child must inherit fail_fast=true");
+        assert!(children["job.1"].fail_fast);
+    }
+
+    #[test]
+    fn depth_limit_rejects_over_max() {
+        let def = JobDefinition {
+            component: "t.wasm".to_string(),
+            depends_on: vec![],
+            input: None,
+            permissions: Default::default(),
+            worker: None,
+            env: Default::default(),
+            when: None,
+            foreach: Some("$".to_string()),
+            input_from: None,
+            max_parallel: None,
+            output_size_limit_mb: None,
+            fail_fast: false,
+            component_sha256: None,
+            reduce: None,
+        };
+        let dep_output = br#"["x"]"#;
+        let result = expand_foreach_dynamic("deep", &def, dep_output, MAX_FOREACH_DEPTH + 1);
+        assert!(result.is_err(), "should reject depth > MAX_FOREACH_DEPTH");
+    }
+
+    #[test]
+    fn depth_at_max_is_ok() {
+        let def = JobDefinition {
+            component: "t.wasm".to_string(),
+            depends_on: vec![],
+            input: None,
+            permissions: Default::default(),
+            worker: None,
+            env: Default::default(),
+            when: None,
+            foreach: Some("$".to_string()),
+            input_from: None,
+            max_parallel: None,
+            output_size_limit_mb: None,
+            fail_fast: false,
+            component_sha256: None,
+            reduce: None,
+        };
+        let dep_output = br#"["x"]"#;
+        let result = expand_foreach_dynamic("deep", &def, dep_output, MAX_FOREACH_DEPTH);
+        assert!(result.is_ok(), "depth == MAX_FOREACH_DEPTH should be allowed");
     }
 }
