@@ -10,7 +10,7 @@ use wasmtime::{Engine, component::Component};
 /// - A wasmtime upgrade automatically invalidates all entries (new key → cache miss →
 ///   recompile), preventing UB from loading a stale artifact with `deserialize_file`.
 pub struct ComponentCache {
-    pub(crate) dir: PathBuf,
+    pub dir: PathBuf,
 }
 
 impl Default for ComponentCache {
@@ -62,7 +62,7 @@ impl ComponentCache {
         Ok(unsafe { Component::deserialize_file(engine, &path)? })
     }
 
-    pub(crate) fn artifact_path(&self, wasm_bytes: &[u8]) -> PathBuf {
+    pub fn artifact_path(&self, wasm_bytes: &[u8]) -> PathBuf {
         self.dir.join(format!("{}.cwasm", cache_key(wasm_bytes)))
     }
 }
