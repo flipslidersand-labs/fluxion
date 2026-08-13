@@ -23,9 +23,9 @@ opentelemetry        = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 hickory-resolver     = { workspace = true }
 fluxion-core  = { path = "../fluxion-core" }
+tempfile      = "3"
 
 [features]
 ci = []
 
 [dev-dependencies]
-tempfile = "3"
