@@ -26,7 +26,14 @@ hickory-resolver     = { workspace = true }
 fluxion-core  = { path = "../fluxion-core" }
 tempfile      = "3"
 
+[[bench]]
+name    = "host_bench"
+harness = false
+
 [features]
 ci = []
 
 [dev-dependencies]
+criterion = { workspace = true }
+wasmtime  = { workspace = true }
+indexmap  = { version = "2", features = ["serde"] }
