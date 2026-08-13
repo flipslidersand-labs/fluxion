@@ -1,0 +1,60 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "crates/fluxion-host/benches/**"
+      - "crates/fluxion-core/benches/**"
+      - "crates/fluxion-host/src/**"
+      - "crates/fluxion-core/src/**"
+      - "components/hello/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  bench:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build hello component
+        working-directory: components/hello
+        run: cargo component build
+
+      - name: Compile benchmarks (no-run)
+        run: cargo bench -j2 --no-run
+
+      - name: Run benchmarks (bencher format)
+        run: |
+          cargo bench -j2 -- --output-format bencher | tee bench_output.txt
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        with:
+          tool: cargo
+          output-file-path: bench_output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: "150%"
+          fail-on-alert: false

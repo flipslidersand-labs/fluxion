@@ -5,7 +5,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fluxion_core::dag::Dag;
 use fluxion_core::workflow::{JobDefinition, Workflow};
 use fluxion_host::cache::ComponentCache;
-use fluxion_host::FluxionHost;
+use fluxion_host::{FluxionHost, scheduler};
 use indexmap::IndexMap;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -141,5 +141,82 @@ fn bench_run_component(c: &mut Criterion) {
     let _ = wasm_bytes;
 }
 
-criterion_group!(benches, bench_cache, bench_dag_build, bench_run_component);
+// ── scheduler::run end-to-end benchmark ──────────────────────────────────────
+
+fn serial_workflow(n: usize, component: &str) -> Workflow {
+    let mut jobs = IndexMap::new();
+    for i in 0..n {
+        let dep = if i > 0 { vec![format!("job_{}", i - 1)] } else { vec![] };
+        let mut job = dummy_job(dep);
+        job.component = component.to_string();
+        jobs.insert(format!("job_{}", i), job);
+    }
+    Workflow { name: format!("serial-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+}
+
+fn parallel_workflow(n: usize, component: &str) -> Workflow {
+    let mut jobs = IndexMap::new();
+    for i in 0..n {
+        let mut job = dummy_job(vec![]);
+        job.component = component.to_string();
+        jobs.insert(format!("job_{}", i), job);
+    }
+    Workflow { name: format!("parallel-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+}
+
+fn bench_workflow_run(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let hello_path = workspace_root()
+        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    let hello_str = hello_path.to_string_lossy().into_owned();
+
+    // Warm wasmtime cache before measuring so we only measure scheduler overhead.
+    let host = Arc::new(FluxionHost::new().expect("FluxionHost::new"));
+    let perms = fluxion_core::workflow::PermissionSet::default();
+    host.run_component(&hello_path, b"warm".to_vec(), &perms)
+        .expect("warm-up");
+
+    let mut group = c.benchmark_group("workflow_run");
+    group.measurement_time(std::time::Duration::from_secs(15));
+    group.sample_size(10);
+
+    let tmp_wf_path = std::env::temp_dir().join("bench_wf.yaml");
+
+    for n in [1usize, 3, 5] {
+        let wf = serial_workflow(n, &hello_str);
+        group.bench_with_input(
+            BenchmarkId::new("serial", n),
+            &(wf, tmp_wf_path.clone()),
+            |b, (wf, wf_path)| {
+                b.iter(|| {
+                    rt.block_on(scheduler::run_silent(wf, wf_path, Arc::clone(&host)))
+                        .expect("run_silent")
+                });
+            },
+        );
+    }
+
+    for n in [1usize, 3, 5] {
+        let wf = parallel_workflow(n, &hello_str);
+        group.bench_with_input(
+            BenchmarkId::new("parallel", n),
+            &(wf, tmp_wf_path.clone()),
+            |b, (wf, wf_path)| {
+                b.iter(|| {
+                    rt.block_on(scheduler::run_silent(wf, wf_path, Arc::clone(&host)))
+                        .expect("run_silent")
+                });
+            },
+        );
+    }
+
+    group.finish();
+    drop(host);
+}
+
+criterion_group!(benches, bench_cache, bench_dag_build, bench_run_component, bench_workflow_run);
 criterion_main!(benches);
