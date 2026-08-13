@@ -338,15 +338,14 @@ async fn map_reduce_workflow() {
     );
 
     for job in &result.jobs {
-        assert_eq!(
-            job.status, "succeeded",
-            "job {} should succeed",
-            job.job_id
-        );
+        assert_eq!(job.status, "succeeded", "job {} should succeed", job.job_id);
     }
 
     // aggregate must appear last in the result list (fan-in)
-    let agg = result.jobs.iter().find(|j| j.job_id.starts_with("aggregate"));
+    let agg = result
+        .jobs
+        .iter()
+        .find(|j| j.job_id.starts_with("aggregate"));
     assert!(agg.is_some(), "aggregate job must be present in results");
 }
 
@@ -374,5 +373,9 @@ async fn map_reduce_concat_mode() {
     }
 
     let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
-    assert!(result.success, "concat map-reduce should succeed: {:?}", result);
+    assert!(
+        result.success,
+        "concat map-reduce should succeed: {:?}",
+        result
+    );
 }

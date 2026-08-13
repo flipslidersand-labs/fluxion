@@ -309,10 +309,7 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "Job '{job}': `reduce` requires `input_from`")
             }
             Self::ForeachNestingTooDeep { max, found } => {
-                write!(
-                    f,
-                    "foreach nesting depth {found} exceeds maximum of {max}"
-                )
+                write!(f, "foreach nesting depth {found} exceeds maximum of {max}")
             }
         }
     }

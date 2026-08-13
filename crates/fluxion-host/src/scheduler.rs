@@ -525,12 +525,19 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         Some(d) if is_dynamic_foreach(d) => d.clone(),
                         _ => continue,
                     };
-                    let all_deps_done = dag.deps.get(dyn_id.as_str()).into_iter().flatten().all(|d| {
-                        matches!(
-                            statuses.get(d.as_str()),
-                            Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
-                        )
-                    });
+                    let all_deps_done =
+                        dag.deps
+                            .get(dyn_id.as_str())
+                            .into_iter()
+                            .flatten()
+                            .all(|d| {
+                                matches!(
+                                    statuses.get(d.as_str()),
+                                    Some(JobStatus::Succeeded { .. })
+                                        | Some(JobStatus::Skipped)
+                                        | Some(JobStatus::Cancelled)
+                                )
+                            });
                     if !all_deps_done {
                         continue;
                     }
@@ -546,15 +553,19 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                     let depth = event.job_id.chars().filter(|&c| c == '.').count() + 1;
                     match expand_foreach_dynamic(dyn_id, &def, &dep_output, depth) {
                         Err(e) => {
-                            tracing::warn!("dynamic foreach expansion failed for '{}': {e}", dyn_id);
+                            tracing::warn!(
+                                "dynamic foreach expansion failed for '{}': {e}",
+                                dyn_id
+                            );
                             continue;
                         }
                         Ok((child_ids, child_defs)) => {
                             // Inject children into workflow and DAG.
-                            let child_deps: std::collections::HashMap<String, Vec<String>> = child_ids
-                                .iter()
-                                .map(|cid| (cid.clone(), def.depends_on.clone()))
-                                .collect();
+                            let child_deps: std::collections::HashMap<String, Vec<String>> =
+                                child_ids
+                                    .iter()
+                                    .map(|cid| (cid.clone(), def.depends_on.clone()))
+                                    .collect();
                             for (cid, cdef) in &child_defs {
                                 wf.jobs.insert(cid.clone(), cdef.clone());
                                 statuses.insert(cid.clone(), JobStatus::Pending);
@@ -574,7 +585,10 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                     d.extend(child_ids.iter().cloned());
                                 }
                                 for cid in &child_ids {
-                                    dag.dependents.entry(cid.clone()).or_default().push(waiter.clone());
+                                    dag.dependents
+                                        .entry(cid.clone())
+                                        .or_default()
+                                        .push(waiter.clone());
                                 }
                             }
                             // Remove the placeholder.
@@ -584,17 +598,31 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                             foreach_map.insert(dyn_id.clone(), child_ids.clone());
                             // Launch children whose deps are all satisfied.
                             for cid in &child_ids {
-                                let c_deps_done = dag.deps.get(cid.as_str()).into_iter().flatten().all(|d| {
-                                    matches!(
-                                        statuses.get(d.as_str()),
-                                        Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
-                                    )
-                                });
+                                let c_deps_done =
+                                    dag.deps.get(cid.as_str()).into_iter().flatten().all(|d| {
+                                        matches!(
+                                            statuses.get(d.as_str()),
+                                            Some(JobStatus::Succeeded { .. })
+                                                | Some(JobStatus::Skipped)
+                                                | Some(JobStatus::Cancelled)
+                                        )
+                                    });
                                 if c_deps_done {
-                                    if print_progress { print_running(cid, pad); }
+                                    if print_progress {
+                                        print_running(cid, pad);
+                                    }
                                     store.upsert_job(run_id, cid, &JobStatus::Running)?;
-                                    let c_workers = resolve_workers(cid, &wf, &workers, &rr, &strategy).await;
-                                    launch(cid, &wf, host.clone(), tx.clone(), c_workers, sem.clone(), None);
+                                    let c_workers =
+                                        resolve_workers(cid, &wf, &workers, &rr, &strategy).await;
+                                    launch(
+                                        cid,
+                                        &wf,
+                                        host.clone(),
+                                        tx.clone(),
+                                        c_workers,
+                                        sem.clone(),
+                                        None,
+                                    );
                                     statuses.insert(cid.clone(), JobStatus::Running);
                                     in_flight += 1;
                                 }
@@ -618,7 +646,9 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 let all_done = dag.deps.get(dep.as_str()).into_iter().flatten().all(|d| {
                     matches!(
                         statuses.get(d.as_str()),
-                        Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
+                        Some(JobStatus::Succeeded { .. })
+                            | Some(JobStatus::Skipped)
+                            | Some(JobStatus::Cancelled)
                     )
                 });
                 if all_done {
