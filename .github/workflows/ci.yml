@@ -65,8 +65,12 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
   e2e:
-    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    # PR のみ実行（feature branch push はスキップ → GitHub ホスト消費ゼロ）
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ${{ vars.ARC_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
