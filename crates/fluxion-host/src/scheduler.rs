@@ -534,11 +534,17 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                     if !all_deps_done {
                         continue;
                     }
-                    let dep_output = job_outputs
-                        .get(&event.job_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    match expand_foreach_dynamic(dyn_id, &def, &dep_output) {
+                    // For dynamic foreach with input_from, merge all dep outputs (fan-in).
+                    // Otherwise use the single triggering dep's output.
+                    let dep_output: Vec<u8> = if def.input_from.is_some() {
+                        build_fanin_input(dyn_id, &wf, &foreach_map, &job_outputs)
+                            .unwrap_or_default()
+                    } else {
+                        job_outputs.get(&event.job_id).cloned().unwrap_or_default()
+                    };
+                    // depth = number of dots in the triggering dep's ID + 1
+                    let depth = event.job_id.chars().filter(|&c| c == '.').count() + 1;
+                    match expand_foreach_dynamic(dyn_id, &def, &dep_output, depth) {
                         Err(e) => {
                             tracing::warn!("dynamic foreach expansion failed for '{}': {e}", dyn_id);
                             continue;

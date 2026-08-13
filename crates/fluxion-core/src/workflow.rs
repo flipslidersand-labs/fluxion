@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +283,7 @@ pub enum ValidationError {
     CyclicDependency,
     ComponentNotFound { job: String, path: String },
     ReduceWithoutInputFrom { job: String },
+    ForeachNestingTooDeep { max: usize, found: usize },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -305,6 +307,12 @@ impl std::fmt::Display for ValidationError {
             }
             Self::ReduceWithoutInputFrom { job } => {
                 write!(f, "Job '{job}': `reduce` requires `input_from`")
+            }
+            Self::ForeachNestingTooDeep { max, found } => {
+                write!(
+                    f,
+                    "foreach nesting depth {found} exceeds maximum of {max}"
+                )
             }
         }
     }
@@ -377,6 +385,51 @@ fn has_cycle(jobs: &IndexMap<String, JobDefinition>) -> bool {
         .any(|id| dfs(id.as_str(), jobs, &mut visited, &mut stack))
 }
 
+/// Compute the maximum foreach nesting depth in a workflow.
+///
+/// A "nesting depth" is the length of the longest chain of dynamic foreach jobs
+/// connected through `depends_on`. Dynamic foreach = `foreach` is set and `input` is absent.
+/// Returns 0 if no dynamic foreach jobs exist.
+fn foreach_nesting_depth(jobs: &IndexMap<String, JobDefinition>) -> usize {
+    fn is_dynamic(def: &JobDefinition) -> bool {
+        def.foreach.is_some() && def.input.is_none()
+    }
+
+    fn depth_of<'a>(
+        job_id: &'a str,
+        jobs: &'a IndexMap<String, JobDefinition>,
+        cache: &mut HashMap<&'a str, usize>,
+    ) -> usize {
+        if let Some(&d) = cache.get(job_id) {
+            return d;
+        }
+        let def = match jobs.get(job_id) {
+            Some(d) => d,
+            None => return 0,
+        };
+        if !is_dynamic(def) {
+            cache.insert(job_id, 0);
+            return 0;
+        }
+        // Max depth of dynamic foreach predecessors + 1 for self
+        let pred_max = def
+            .depends_on
+            .iter()
+            .map(|dep| depth_of(dep.as_str(), jobs, cache))
+            .max()
+            .unwrap_or(0);
+        let d = pred_max + 1;
+        cache.insert(job_id, d);
+        d
+    }
+
+    let mut cache: HashMap<&str, usize> = HashMap::new();
+    jobs.keys()
+        .map(|id| depth_of(id.as_str(), jobs, &mut cache))
+        .max()
+        .unwrap_or(0)
+}
+
 // ── Workflow impl ─────────────────────────────────────────────────────────────
 
 impl Workflow {
@@ -440,6 +493,15 @@ impl Workflow {
 
         if has_cycle(&self.jobs) {
             report.errors.push(ValidationError::CyclicDependency);
+        }
+
+        let max_depth = crate::expand::MAX_FOREACH_DEPTH;
+        let found_depth = foreach_nesting_depth(&self.jobs);
+        if found_depth > max_depth {
+            report.errors.push(ValidationError::ForeachNestingTooDeep {
+                max: max_depth,
+                found: found_depth,
+            });
         }
 
         report
@@ -715,5 +777,70 @@ jobs:
 "#,
         );
         assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_nested_foreach_within_limit_is_ok() {
+        let wf = make_wf(
+            r#"
+name: two-level
+jobs:
+  source:
+    component: a.wasm
+  level1:
+    component: b.wasm
+    foreach: "$.groups"
+    depends_on: [source]
+  level2:
+    component: c.wasm
+    foreach: "$[*]"
+    depends_on: [level1]
+    input_from: level1
+"#,
+        );
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_nested_foreach_too_deep_is_error() {
+        // Build a 5-level chain of dynamic foreach jobs (exceeds MAX_FOREACH_DEPTH=4)
+        let wf = make_wf(
+            r#"
+name: too-deep
+jobs:
+  source:
+    component: a.wasm
+  l1:
+    component: b.wasm
+    foreach: "$.a"
+    depends_on: [source]
+  l2:
+    component: c.wasm
+    foreach: "$.b"
+    depends_on: [l1]
+  l3:
+    component: d.wasm
+    foreach: "$.c"
+    depends_on: [l2]
+  l4:
+    component: e.wasm
+    foreach: "$.d"
+    depends_on: [l3]
+  l5:
+    component: f.wasm
+    foreach: "$.e"
+    depends_on: [l4]
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ForeachNestingTooDeep { .. })),
+            "expected ForeachNestingTooDeep error, got: {:?}",
+            report.errors
+        );
     }
 }

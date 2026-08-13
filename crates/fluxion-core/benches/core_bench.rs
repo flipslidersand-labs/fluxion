@@ -21,6 +21,7 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         output_size_limit_mb: None,
         fail_fast: false,
         component_sha256: None,
+        reduce: None,
     }
 }
 
