@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use fluxion_core::{
     dag::Dag,
     store::RunStore,
-    workflow::{PermissionSet, Workflow},
+    workflow::{PermissionSet, ReduceMode, Workflow},
 };
 use fluxion_host::{FluxionHost, scheduler, scheduler::LbStrategy};
 use std::path::PathBuf;
@@ -43,6 +43,9 @@ enum Commands {
         /// Load-balancing strategy for distributing jobs across remote workers
         #[arg(long, value_enum, default_value_t = LbStrategy::RoundRobin)]
         lb_strategy: LbStrategy,
+        /// Default reduce strategy for fan-in jobs without an explicit `reduce:` in YAML
+        #[arg(long, value_enum, default_value_t = CliReduceMode::JsonArray)]
+        reduce_mode: CliReduceMode,
     },
     /// Retry a previous run from a specific job
     Retry {
@@ -198,6 +201,39 @@ enum ComponentCommands {
     },
 }
 
+/// Reduce strategy for fan-in jobs (`--reduce-mode` CLI flag).
+#[derive(Clone, Copy, Debug, Default, PartialEq, clap::ValueEnum)]
+enum CliReduceMode {
+    /// Collect each child output as an element in a JSON array (default).
+    #[default]
+    JsonArray,
+    /// Concatenate text outputs as a single JSON string.
+    Concat,
+    /// Deep-merge JSON object outputs by key (last writer wins).
+    JsonMerge,
+}
+
+impl From<CliReduceMode> for ReduceMode {
+    fn from(m: CliReduceMode) -> Self {
+        match m {
+            CliReduceMode::JsonArray => ReduceMode::JsonArray,
+            CliReduceMode::Concat => ReduceMode::Concat,
+            CliReduceMode::JsonMerge => ReduceMode::JsonMerge,
+        }
+    }
+}
+
+/// Set `reduce` on all fan-in jobs that don't already have an explicit mode.
+fn apply_default_reduce_mode(mut wf: Workflow, default: CliReduceMode) -> Workflow {
+    let mode: ReduceMode = default.into();
+    for def in wf.jobs.values_mut() {
+        if def.input_from.is_some() && def.reduce.is_none() {
+            def.reduce = Some(mode.clone());
+        }
+    }
+    wf
+}
+
 #[derive(Subcommand)]
 enum RunsCommands {
     /// List recent runs
@@ -238,9 +274,11 @@ async fn run(command: Commands) -> Result<()> {
             dry_run,
             metrics_port,
             lb_strategy,
+            reduce_mode,
         } => {
             let wf = Workflow::from_file(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+            let wf = apply_default_reduce_mode(wf, reduce_mode);
             if dry_run {
                 cmd_dry_run(&wf)?;
                 return Ok(());

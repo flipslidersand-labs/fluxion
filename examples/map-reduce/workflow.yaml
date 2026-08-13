@@ -1,0 +1,20 @@
+name: map-reduce
+# Classic Map/Reduce pattern:
+#   fetch  → generates a list of items
+#   transform → foreach job, one child per item (Map phase)
+#   aggregate → collects all transform outputs into a JSON array (Reduce phase)
+jobs:
+  fetch:
+    component: ./components/hello/hello.wasm
+    input: '{"items": ["alpha", "beta", "gamma"]}'
+
+  transform:
+    component: ./components/hello/hello.wasm
+    foreach: "$.items"
+    depends_on: [fetch]
+
+  aggregate:
+    component: ./components/hello/hello.wasm
+    depends_on: [transform]
+    input_from: transform
+    reduce: json_array

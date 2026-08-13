@@ -304,3 +304,75 @@ async fn memory_limits_oom_enforcement() {
         oom.reason
     );
 }
+
+// ── Map/Reduce E2E tests ──────────────────────────────────────────────────────
+
+/// map-reduce: fetch → foreach transform (3 children) → aggregate (reduce json_array).
+/// Validates that the workflow runs to completion with the correct job count.
+#[tokio::test]
+#[ignore = "requires pre-built Wasm components"]
+async fn map_reduce_workflow() {
+    let host = Arc::new(FluxionHost::new().unwrap());
+    let wf_path = workspace_root()
+        .join("examples")
+        .join("map-reduce")
+        .join("workflow.yaml");
+    let mut wf = Workflow::from_file(&wf_path).expect("load map-reduce yaml");
+
+    // Patch all component paths to the hello component binary.
+    let hello = wasm2("hello");
+    for job in wf.jobs.values_mut() {
+        job.component = hello.clone();
+    }
+
+    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+
+    assert!(result.success, "map-reduce should succeed: {:?}", result);
+
+    // fetch + 3 transform children (alpha/beta/gamma) + aggregate = 5 jobs
+    assert_eq!(
+        result.jobs.len(),
+        5,
+        "expected 5 jobs (fetch + 3 transform + aggregate): {:?}",
+        result.jobs.iter().map(|j| &j.job_id).collect::<Vec<_>>()
+    );
+
+    for job in &result.jobs {
+        assert_eq!(
+            job.status, "succeeded",
+            "job {} should succeed",
+            job.job_id
+        );
+    }
+
+    // aggregate must appear last in the result list (fan-in)
+    let agg = result.jobs.iter().find(|j| j.job_id.starts_with("aggregate"));
+    assert!(agg.is_some(), "aggregate job must be present in results");
+}
+
+/// map-reduce with --reduce-mode concat: aggregate receives concatenated output.
+#[tokio::test]
+#[ignore = "requires pre-built Wasm components"]
+async fn map_reduce_concat_mode() {
+    use fluxion_core::workflow::ReduceMode;
+
+    let host = Arc::new(FluxionHost::new().unwrap());
+    let wf_path = workspace_root()
+        .join("examples")
+        .join("map-reduce")
+        .join("workflow.yaml");
+    let mut wf = Workflow::from_file(&wf_path).expect("load map-reduce yaml");
+
+    let hello = wasm2("hello");
+    for job in wf.jobs.values_mut() {
+        job.component = hello.clone();
+    }
+
+    // Override aggregate's reduce mode to Concat.
+    if let Some(agg) = wf.jobs.get_mut("aggregate") {
+        agg.reduce = Some(ReduceMode::Concat);
+    }
+
+    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    assert!(result.success, "concat map-reduce should succeed: {:?}", result);
+}

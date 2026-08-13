@@ -11,7 +11,7 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, TlsConfig, Workflow},
+    workflow::{PermissionSet, ReduceMode, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
@@ -805,6 +805,9 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 /// Build fan-in input for a job with `input_from`.  Returns `None` if the job
 /// has no `input_from`, or if outputs are not yet available (falls back to the
 /// YAML `input` field).
+///
+/// The reduction strategy is taken from the job's `reduce` field (defaulting to
+/// [`ReduceMode::JsonArray`] when absent).
 fn build_fanin_input(
     job_id: &str,
     wf: &Workflow,
@@ -815,19 +818,55 @@ fn build_fanin_input(
     let src = def.input_from.as_deref()?;
     let children = foreach_map.get(src)?;
 
-    // Collect outputs in order, falling back to null for missing outputs.
-    let values: Vec<serde_json::Value> = children
+    let raw_outputs: Vec<Option<&[u8]>> = children
         .iter()
-        .map(|child_id| {
-            if let Some(bytes) = job_outputs.get(child_id) {
-                serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
-            }
-        })
+        .map(|cid| job_outputs.get(cid).map(|v| v.as_slice()))
         .collect();
 
-    serde_json::to_vec(&values).ok()
+    let mode = def.reduce.as_ref().unwrap_or(&ReduceMode::JsonArray);
+    apply_reduce(mode, &raw_outputs)
+}
+
+/// Apply a ReduceMode to a list of raw byte outputs.
+fn apply_reduce(mode: &ReduceMode, outputs: &[Option<&[u8]>]) -> Option<Vec<u8>> {
+    match mode {
+        ReduceMode::JsonArray => {
+            let values: Vec<serde_json::Value> = outputs
+                .iter()
+                .map(|o| match o {
+                    Some(b) => serde_json::from_slice(b).unwrap_or(serde_json::Value::Null),
+                    None => serde_json::Value::Null,
+                })
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+        ReduceMode::Concat => {
+            let mut buf = Vec::new();
+            for b in outputs.iter().flatten() {
+                // Strip JSON string quotes if the output is a JSON string.
+                if let Ok(s) = serde_json::from_slice::<String>(b) {
+                    buf.extend_from_slice(s.as_bytes());
+                } else {
+                    buf.extend_from_slice(b);
+                }
+            }
+            // Wrap as a JSON string for downstream consumption.
+            serde_json::to_vec(&String::from_utf8_lossy(&buf).as_ref()).ok()
+        }
+        ReduceMode::JsonMerge => {
+            let mut merged = serde_json::Map::new();
+            for b in outputs.iter().flatten() {
+                if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice(b) {
+                    merged.extend(map);
+                }
+            }
+            serde_json::to_vec(&serde_json::Value::Object(merged)).ok()
+        }
+        ReduceMode::Custom(_) => {
+            // Custom reducer not yet supported at runtime — fall back to json_array.
+            apply_reduce(&ReduceMode::JsonArray, outputs)
+        }
+    }
 }
 
 /// Print foreach group progress when a child job finishes.
