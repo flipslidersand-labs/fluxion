@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use fluxion_core::{
     dag::Dag,
-    expand::expand_foreach,
+    expand::{expand_foreach, expand_foreach_dynamic, is_dynamic_foreach},
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
@@ -320,12 +320,12 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         strategy,
         workers,
     } = opts;
-    // ── Expand foreach jobs ─────────────────────────────────────────────────
+    // ── Expand static foreach jobs (dynamic foreach jobs are expanded at runtime) ─
     let expanded = expand_foreach(wf, None)?;
-    let wf = &expanded.workflow;
-    let foreach_map = &expanded.foreach_map;
+    let mut wf = expanded.workflow;
+    let mut foreach_map = expanded.foreach_map;
 
-    let dag = Dag::build(wf)?;
+    let mut dag = Dag::build(&wf)?;
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
 
     let mut statuses: HashMap<String, JobStatus> = wf
@@ -367,10 +367,10 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        let job_workers = resolve_workers(&job_id, wf, &workers, &rr, &strategy).await;
+        let job_workers = resolve_workers(&job_id, &wf, &workers, &rr, &strategy).await;
         launch(
             &job_id,
-            wf,
+            &wf,
             host.clone(),
             tx.clone(),
             job_workers,
@@ -390,11 +390,11 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
-            let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
+            let job_workers = resolve_workers(job_id, &wf, &workers, &rr, &strategy).await;
+            let fanin_input = build_fanin_input(job_id, &wf, &foreach_map, &job_outputs);
             launch(
                 job_id,
-                wf,
+                &wf,
                 host.clone(),
                 tx.clone(),
                 job_workers,
@@ -442,7 +442,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
                 // Print foreach group progress if applicable
                 if print_progress {
-                    print_foreach_progress(&event.job_id, foreach_map, &statuses, pad);
+                    print_foreach_progress(&event.job_id, &foreach_map, &statuses, pad);
                 }
             }
             JobStatus::Failed { elapsed, reason } => {
@@ -510,19 +510,116 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         }
 
         if overall_success {
-            for dep in dag.dependents.get(&event.job_id).into_iter().flatten() {
-                if pre_succeeded.contains_key(dep) {
+            // ── Dynamic foreach expansion ─────────────────────────────────────────
+            // When a job completes, check if any dependent is a dynamic foreach job
+            // (foreach set, no static input). If all its deps are now done, expand it
+            // using this job's output as the array source, then inject children.
+            {
+                let deps_of_completed: Vec<String> = dag
+                    .dependents
+                    .get(&event.job_id)
+                    .cloned()
+                    .unwrap_or_default();
+                for dyn_id in &deps_of_completed {
+                    let def = match wf.jobs.get(dyn_id.as_str()) {
+                        Some(d) if is_dynamic_foreach(d) => d.clone(),
+                        _ => continue,
+                    };
+                    let all_deps_done = dag.deps.get(dyn_id.as_str()).into_iter().flatten().all(|d| {
+                        matches!(
+                            statuses.get(d.as_str()),
+                            Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
+                        )
+                    });
+                    if !all_deps_done {
+                        continue;
+                    }
+                    let dep_output = job_outputs
+                        .get(&event.job_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    match expand_foreach_dynamic(dyn_id, &def, &dep_output) {
+                        Err(e) => {
+                            tracing::warn!("dynamic foreach expansion failed for '{}': {e}", dyn_id);
+                            continue;
+                        }
+                        Ok((child_ids, child_defs)) => {
+                            // Inject children into workflow and DAG.
+                            let child_deps: std::collections::HashMap<String, Vec<String>> = child_ids
+                                .iter()
+                                .map(|cid| (cid.clone(), def.depends_on.clone()))
+                                .collect();
+                            for (cid, cdef) in &child_defs {
+                                wf.jobs.insert(cid.clone(), cdef.clone());
+                                statuses.insert(cid.clone(), JobStatus::Pending);
+                                store.upsert_job(run_id, cid, &JobStatus::Pending).ok();
+                            }
+                            dag.insert_nodes(&child_deps);
+                            // Register fan-in dependents: any job that depended on the
+                            // dynamic placeholder now depends on all children instead.
+                            let fanin_waiters: Vec<String> = dag
+                                .dependents
+                                .get(dyn_id.as_str())
+                                .cloned()
+                                .unwrap_or_default();
+                            for waiter in &fanin_waiters {
+                                if let Some(d) = dag.deps.get_mut(waiter.as_str()) {
+                                    d.retain(|x| x != dyn_id);
+                                    d.extend(child_ids.iter().cloned());
+                                }
+                                for cid in &child_ids {
+                                    dag.dependents.entry(cid.clone()).or_default().push(waiter.clone());
+                                }
+                            }
+                            // Remove the placeholder.
+                            dag.remove_node(dyn_id);
+                            wf.jobs.shift_remove(dyn_id.as_str());
+                            statuses.remove(dyn_id.as_str());
+                            foreach_map.insert(dyn_id.clone(), child_ids.clone());
+                            // Launch children whose deps are all satisfied.
+                            for cid in &child_ids {
+                                let c_deps_done = dag.deps.get(cid.as_str()).into_iter().flatten().all(|d| {
+                                    matches!(
+                                        statuses.get(d.as_str()),
+                                        Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
+                                    )
+                                });
+                                if c_deps_done {
+                                    if print_progress { print_running(cid, pad); }
+                                    store.upsert_job(run_id, cid, &JobStatus::Running)?;
+                                    let c_workers = resolve_workers(cid, &wf, &workers, &rr, &strategy).await;
+                                    launch(cid, &wf, host.clone(), tx.clone(), c_workers, sem.clone(), None);
+                                    statuses.insert(cid.clone(), JobStatus::Running);
+                                    in_flight += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Standard dep-ready check ──────────────────────────────────────────
+            let dependents_snapshot: Vec<String> = dag
+                .dependents
+                .get(&event.job_id)
+                .cloned()
+                .unwrap_or_default();
+            for dep in &dependents_snapshot {
+                if pre_succeeded.contains_key(dep.as_str()) {
                     continue;
                 }
                 // All deps must be in a terminal done state (Succeeded OR Skipped).
-                let all_done = dag.deps[dep].iter().all(|d| {
+                let all_done = dag.deps.get(dep.as_str()).into_iter().flatten().all(|d| {
                     matches!(
-                        statuses[d],
-                        JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled
+                        statuses.get(d.as_str()),
+                        Some(JobStatus::Succeeded { .. }) | Some(JobStatus::Skipped) | Some(JobStatus::Cancelled)
                     )
                 });
                 if all_done {
-                    let job_def = &wf.jobs[dep];
+                    let job_def = match wf.jobs.get(dep.as_str()) {
+                        Some(j) => j,
+                        None => continue, // was a dynamic foreach placeholder, already removed
+                    };
 
                     // Cancel fan-in if any foreach child failed.
                     let foreach_child_failed = if let Some(src) = &job_def.input_from {
@@ -623,18 +720,18 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 &JobStatus::Running,
                                             )?;
                                             let dw_workers = resolve_workers(
-                                                downstream, wf, &workers, &rr, &strategy,
+                                                downstream, &wf, &workers, &rr, &strategy,
                                             )
                                             .await;
                                             let fanin_input = build_fanin_input(
                                                 downstream,
-                                                wf,
-                                                foreach_map,
+                                                &wf,
+                                                &foreach_map,
                                                 &job_outputs,
                                             );
                                             launch(
                                                 downstream,
-                                                wf,
+                                                &wf,
                                                 host.clone(),
                                                 tx.clone(),
                                                 dw_workers,
@@ -653,11 +750,11 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                             print_running(dep, pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                        let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
-                        let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        let dep_workers = resolve_workers(dep, &wf, &workers, &rr, &strategy).await;
+                        let fanin_input = build_fanin_input(dep, &wf, &foreach_map, &job_outputs);
                         launch(
                             dep,
-                            wf,
+                            &wf,
                             host.clone(),
                             tx.clone(),
                             dep_workers,
