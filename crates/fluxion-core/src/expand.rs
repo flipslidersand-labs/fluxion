@@ -234,9 +234,7 @@ pub fn extract_jsonpath_array(path: &str, input: &str) -> Result<Vec<Value>> {
 
     // Backward compat: `$` and `$.field` produce a single match that IS the
     // array. Unwrap it so callers get the individual elements.
-    if matches.len() == 1
-        && let Value::Array(arr) = matches[0]
-    {
+    if matches.len() == 1 && let Value::Array(arr) = matches[0] {
         return Ok(arr.clone());
     }
 
