@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use fluxion_core::{
     dag::Dag,
     store::RunStore,
-    workflow::{PermissionSet, Workflow},
+    workflow::{PermissionSet, Workflow, check_yaml_warnings},
 };
 use fluxion_host::{FluxionHost, scheduler, scheduler::LbStrategy};
 use std::path::PathBuf;
@@ -118,6 +118,9 @@ enum Commands {
         /// Skip checking whether component .wasm files exist on disk
         #[arg(long)]
         skip_wasm_check: bool,
+        /// Treat warnings as errors (exit code 1 if any warnings exist)
+        #[arg(long)]
+        strict: bool,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -385,8 +388,9 @@ async fn run(command: Commands) -> Result<()> {
             path,
             json,
             skip_wasm_check,
+            strict,
         } => {
-            cmd_validate(&path, json, skip_wasm_check);
+            cmd_validate(&path, json, skip_wasm_check, strict);
         }
 
         Commands::McpServe => {
@@ -471,59 +475,104 @@ fn cmd_dot(path: &str) -> Result<()> {
 
 // ── fluxion validate ──────────────────────────────────────────────────────────
 
-fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool) {
+fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
     // Step 1: read file
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Cannot read '{path}': {e}");
             if json {
-                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg], "warnings": []}));
             } else {
-                eprintln!("ERROR: {msg}");
+                eprintln!("✗ {msg}");
             }
             std::process::exit(1);
         }
     };
 
-    // Step 2: parse YAML (separate from validation so we get a clear parse error)
+    // Step 2: parse YAML
     let wf: Workflow = match serde_yaml::from_str(&src) {
         Ok(w) => w,
         Err(e) => {
             let msg = format!("YAML parse error: {e}");
             if json {
-                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg]}));
+                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg], "warnings": []}));
             } else {
-                eprintln!("ERROR: {msg}");
+                eprintln!("✗ YAML syntax error: {e}");
             }
             std::process::exit(1);
         }
     };
 
-    // Step 3: structural validation (deps, cycles, input_from)
+    if !json {
+        println!("✓ YAML syntax OK");
+    }
+
+    // Step 3: structural validation (deps, cycles, input_from, reduce)
     let mut report = wf.validate();
 
-    // Step 4: component path existence check (opt-out with --skip-wasm-check)
+    // Step 4: warnings from raw YAML (e.g. limits: at top level)
+    report.warnings.extend(check_yaml_warnings(&src));
+
+    // Step 5: component path existence check (opt-out with --skip-wasm-check)
     if !skip_wasm_check {
         let path_report = wf.check_component_paths();
         report.errors.extend(path_report.errors);
     }
 
+    let job_count = wf.jobs.len();
+    let error_count = report.errors.len();
+    let warn_count = report.warnings.len();
+
     if json {
         let out = serde_json::json!({
-            "ok": report.is_ok(),
+            "ok": report.is_ok() && !(strict && warn_count > 0),
             "errors": report.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+            "warnings": report.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
-    } else if report.is_ok() {
-        println!("✓ {path}: Validation passed");
     } else {
+        // DAG summary
+        if report.errors.iter().any(|e| matches!(e, fluxion_core::workflow::ValidationError::CyclicDependency)) {
+            eprintln!("✗ DAG: cyclic dependency detected ({job_count} jobs)");
+        } else {
+            println!("✓ DAG: no cycles ({job_count} jobs)");
+        }
+
+        // Component paths
+        let missing: Vec<_> = report.errors.iter().filter(|e| {
+            matches!(e, fluxion_core::workflow::ValidationError::ComponentNotFound { .. })
+        }).collect();
+        if missing.is_empty() && !skip_wasm_check {
+            println!("✓ Components: all {job_count} paths exist");
+        } else if !missing.is_empty() {
+            eprintln!("✗ Components: {} path(s) missing", missing.len());
+        }
+
+        // Remaining structural errors
         for err in &report.errors {
-            eprintln!("ERROR: {err}");
+            if !matches!(err, fluxion_core::workflow::ValidationError::CyclicDependency | fluxion_core::workflow::ValidationError::ComponentNotFound { .. }) {
+                eprintln!("✗ {err}");
+            }
+        }
+
+        // Warnings
+        for w in &report.warnings {
+            eprintln!("⚠ {w}");
+        }
+
+        // Summary
+        if error_count == 0 && warn_count == 0 {
+            println!("\nValidation passed");
+        } else if error_count == 0 && !strict {
+            println!("\nValidation passed ({warn_count} warning(s))");
+        } else {
+            eprintln!("\nValidation failed ({error_count} error(s), {warn_count} warning(s))");
         }
     }
 
-    if !report.is_ok() {
+    let fail = !report.is_ok() || (strict && warn_count > 0);
+    if fail {
         std::process::exit(1);
     }
 }

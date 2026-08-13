@@ -310,9 +310,27 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ValidationWarning {
+    /// `limits:` written at the job top level instead of under `permissions:`.
+    LimitsAtTopLevel { job: String },
+}
+
+impl std::fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LimitsAtTopLevel { job } => write!(
+                f,
+                "job \"{job}\": `limits:` at top level (ignored) — move it under `permissions:`",
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ValidationReport {
     pub errors: Vec<ValidationError>,
+    pub warnings: Vec<ValidationWarning>,
 }
 
 impl ValidationReport {
@@ -340,6 +358,28 @@ impl std::fmt::Display for ValidationReport {
         }
         Ok(())
     }
+}
+
+/// Check for common YAML structural mistakes that parse successfully but are silently
+/// wrong — e.g. `limits:` at job top level instead of under `permissions:`.
+/// Takes the raw YAML source so it can inspect keys that serde would drop.
+pub fn check_yaml_warnings(src: &str) -> Vec<ValidationWarning> {
+    let mut warnings = Vec::new();
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(src) else {
+        return warnings;
+    };
+    let Some(jobs) = doc.get("jobs").and_then(|v| v.as_mapping()) else {
+        return warnings;
+    };
+    for (job_key, job_val) in jobs {
+        let job_name = job_key.as_str().unwrap_or("?");
+        if job_val.get("limits").is_some() {
+            warnings.push(ValidationWarning::LimitsAtTopLevel {
+                job: job_name.to_string(),
+            });
+        }
+    }
+    warnings
 }
 
 // DFS cycle detection — kept in workflow.rs to avoid a circular import with dag.rs.
