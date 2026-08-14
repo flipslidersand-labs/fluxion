@@ -11,7 +11,7 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, TlsConfig, Workflow},
+    workflow::{ExecutorKind, PermissionSet, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
@@ -326,6 +326,17 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
     let foreach_map = &expanded.foreach_map;
 
     let dag = Dag::build(wf)?;
+
+    // Validate: executor:remote jobs require at least one worker configured.
+    for (job_id, job) in &wf.jobs {
+        if job.executor == ExecutorKind::Remote && job.worker.is_none() && workers.is_empty() {
+            anyhow::bail!(
+                "job '{}' uses executor:remote but no workers are configured",
+                job_id
+            );
+        }
+    }
+
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
 
     let mut statuses: HashMap<String, JobStatus> = wf
@@ -904,6 +915,7 @@ fn launch(
 ) {
     crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
+    let executor = wf.jobs[&job_id].executor.clone();
     let component = wf.jobs[&job_id].component.clone();
     let input = input_override.unwrap_or_else(|| {
         wf.jobs[&job_id]
@@ -957,23 +969,28 @@ fn launch(
                 return;
             }
 
-            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
-                let c = component.clone();
-                let p = perms.clone();
-                let e = env.clone();
-                let i = input.clone();
-                match tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
-                    tokio::task::spawn_blocking(move || host.run_component_measured(&c, i, &p, &e)),
-                )
-                .await
-                {
-                    Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
-                    Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
-                    Ok(Ok(r)) => r,
+            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = match executor {
+                ExecutorKind::Remote => {
+                    run_with_failover(&workers, &component, &input, &perms, &env).await
                 }
-            } else {
-                run_with_failover(&workers, &component, &input, &perms, &env).await
+                ExecutorKind::Local => {
+                    let c = component.clone();
+                    let p = perms.clone();
+                    let e = env.clone();
+                    let i = input.clone();
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            host.run_component_measured(&c, i, &p, &e)
+                        }),
+                    )
+                    .await
+                    {
+                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                        Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
+                        Ok(Ok(r)) => r,
+                    }
+                }
             };
 
             let elapsed = start.elapsed();
@@ -1387,5 +1404,75 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(&d1), "error should list {d1}: {msg}");
         assert!(msg.contains(&d2), "error should list {d2}: {msg}");
+    }
+
+    // ── ExecutorKind dispatch validation ─────────────────────────────────────
+
+    fn wf_with_executor(executor: &str, has_workers: bool) -> Workflow {
+        let workers_json = if has_workers {
+            r#"[{"url":"http://w1"}]"#.to_string()
+        } else {
+            "[]".to_string()
+        };
+        let s = format!(
+            r#"{{"name":"t","jobs":{{"j":{{"component":"x.wasm","executor":"{executor}"}}}},"workers":{workers_json}}}"#
+        );
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remote_executor_without_workers_is_rejected() {
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("remote", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        let err = execute(&wf, opts).await.expect_err("should fail");
+        assert!(
+            err.to_string().contains("executor:remote"),
+            "error should mention executor:remote: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_executor_without_workers_is_accepted_at_validation() {
+        // Just tests that execute() doesn't bail on executor:local with no workers.
+        // The job itself will fail (no wasm), but the validation passes.
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("local", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run2",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        // Should not fail with the "executor:remote without workers" error.
+        // It may fail for other reasons (e.g., missing wasm file), but that's OK.
+        let result = execute(&wf, opts).await;
+        if let Err(ref e) = result {
+            assert!(
+                !e.to_string().contains("executor:remote"),
+                "local executor should not trigger remote-worker validation: {e}"
+            );
+        }
     }
 }
