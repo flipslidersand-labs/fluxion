@@ -1010,7 +1010,15 @@ fn launch(
 
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = match executor {
                 ExecutorKind::Remote => {
-                    run_with_failover(&workers, &component, &input, &perms, &env).await
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        run_with_failover(&workers, &component, &input, &perms, &env),
+                    )
+                    .await
+                    {
+                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                        Ok(r) => r,
+                    }
                 }
                 ExecutorKind::Local => {
                     let c = component.clone();
