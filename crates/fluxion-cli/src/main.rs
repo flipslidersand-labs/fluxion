@@ -168,6 +168,9 @@ enum WorkerCommands {
         /// Path to the PEM-encoded CA certificate used to verify clients (mTLS)
         #[arg(long, requires = "tls_cert", requires = "tls_key")]
         ca_cert: Option<PathBuf>,
+        /// Enable POST /jobs and GET /jobs/:id async endpoints
+        #[arg(long)]
+        async_jobs: bool,
     },
     /// Register a worker URL in the local registry
     Register {
@@ -338,6 +341,7 @@ async fn run(command: Commands) -> Result<()> {
                 tls_cert,
                 tls_key,
                 ca_cert,
+                async_jobs,
             } => {
                 let tls = match (tls_cert, tls_key, ca_cert) {
                     (Some(cert), Some(key), Some(ca)) => {
@@ -345,7 +349,7 @@ async fn run(command: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                fluxion_worker::serve(port, metrics_port, tls).await?;
+                fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
             }
             WorkerCommands::Register { url } => {
                 let store = RunStore::open()?;

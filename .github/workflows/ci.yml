@@ -114,6 +114,9 @@ jobs:
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
 
+      - name: Distributed E2E tests
+        run: cargo test -p fluxion-cli --test e2e_distributed --features ci -- --test-threads=1
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

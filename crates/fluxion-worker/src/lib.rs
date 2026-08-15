@@ -447,7 +447,12 @@ async fn handle_cas_put(
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
-pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>) -> Result<()> {
+pub async fn serve(
+    port: u16,
+    metrics_port: Option<u16>,
+    tls: Option<WorkerTls>,
+    async_jobs: bool,
+) -> Result<()> {
     let state = AppState {
         host: Arc::new(FluxionHost::new()?),
         jobs: Arc::new(DashMap::new()),
@@ -457,14 +462,19 @@ pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>)
         tokio::spawn(fluxion_host::metrics::serve(mp));
     }
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/run", post(handle_run))
-        .route("/jobs", post(handle_submit))
-        .route("/jobs/{job_id}", get(handle_job_status))
         .route("/health", get(handle_health))
         .route("/components/{sha256}", head(handle_cas_head))
-        .route("/components/{sha256}", put(handle_cas_put))
-        .with_state(state);
+        .route("/components/{sha256}", put(handle_cas_put));
+
+    if async_jobs {
+        app = app
+            .route("/jobs", post(handle_submit))
+            .route("/jobs/{job_id}", get(handle_job_status));
+    }
+
+    let app = app.with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
 
