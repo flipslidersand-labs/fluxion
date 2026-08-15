@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use dashmap::DashMap;
 use fluxion_core::workflow::PermissionSet;
 use fluxion_host::FluxionHost;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 /// Global counter of jobs currently executing on this worker.
 /// Reported in the `/health` response so the host-side scheduler can
@@ -35,6 +37,25 @@ fn cas_dir() -> PathBuf {
 fn cas_path(sha256: &str) -> PathBuf {
     cas_dir().join(sha256).with_extension("wasm")
 }
+
+// ── Async job store ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Serialize)]
+pub struct JobEntry {
+    pub status: JobStatus,
+    pub output: Option<String>,
+    pub error: Option<String>,
+}
+
+type JobStore = Arc<DashMap<String, JobEntry>>;
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -69,6 +90,27 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct SubmitResponse {
+    pub job_id: String,
+}
+
+#[derive(Serialize)]
+pub struct JobStatusResponse {
+    pub status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Shared state passed to all axum handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub host: Arc<FluxionHost>,
+    pub jobs: JobStore,
+}
+
 /// mTLS configuration for the worker server.
 pub struct WorkerTls {
     /// Path to the PEM-encoded server certificate.
@@ -82,9 +124,10 @@ pub struct WorkerTls {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 async fn handle_run(
-    State(host): State<Arc<FluxionHost>>,
+    State(state): State<AppState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let host = state.host;
     // Resolve component bytes: try CAS first, fall back to inline bytes.
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
         let p = cas_path(sha256);
@@ -201,6 +244,145 @@ async fn handle_run(
     }))
 }
 
+async fn handle_submit(
+    State(state): State<AppState>,
+    Json(req): Json<RunRequest>,
+) -> Result<Json<SubmitResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let job_id = Uuid::new_v4().to_string();
+
+    // Resolve component bytes synchronously before spawning.
+    let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
+        let p = cas_path(sha256);
+        if p.exists() {
+            CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            std::fs::read(&p).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: e.to_string() }),
+                )
+            })?
+        } else {
+            CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            match &req.component {
+                Some(b64) => B64.decode(b64).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse { error: format!("invalid component base64: {e}") }),
+                    )
+                })?,
+                None => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "component {sha256} not in CAS — upload via PUT /components/{sha256}"
+                            ),
+                        }),
+                    ))
+                }
+            }
+        }
+    } else {
+        CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+        let b64 = req.component.as_deref().unwrap_or("");
+        B64.decode(b64).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: format!("invalid component base64: {e}") }),
+            )
+        })?
+    };
+
+    let input = B64.decode(&req.input).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: format!("invalid input base64: {e}") }),
+        )
+    })?;
+
+    state.jobs.insert(
+        job_id.clone(),
+        JobEntry { status: JobStatus::Running, output: None, error: None },
+    );
+    ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
+
+    let jobs = Arc::clone(&state.jobs);
+    let host = Arc::clone(&state.host);
+    let jid = job_id.clone();
+    tokio::spawn(async move {
+        let mut tmp = match NamedTempFile::new() {
+            Ok(f) => f,
+            Err(e) => {
+                jobs.insert(
+                    jid,
+                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                );
+                ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        if let Err(e) = tmp.write_all(&component_bytes) {
+            jobs.insert(
+                jid,
+                JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+            );
+            ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        let tmp_path = tmp.path().to_path_buf();
+        let perms = req.permissions;
+        let env = req.env;
+        let result = tokio::task::spawn_blocking(move || {
+            host.run_component_measured(&tmp_path, input, &perms, &env)
+        })
+        .await;
+        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
+        match result {
+            Ok(Ok((output, _))) => {
+                jobs.insert(
+                    jid,
+                    JobEntry {
+                        status: JobStatus::Succeeded,
+                        output: Some(B64.encode(&output)),
+                        error: None,
+                    },
+                );
+            }
+            Ok(Err(e)) => {
+                jobs.insert(
+                    jid,
+                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                );
+            }
+            Err(e) => {
+                jobs.insert(
+                    jid,
+                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                );
+            }
+        }
+    });
+
+    Ok(Json(SubmitResponse { job_id }))
+}
+
+async fn handle_job_status(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state.jobs.get(&job_id) {
+        Some(entry) => Ok(Json(JobStatusResponse {
+            status: entry.status.clone(),
+            output: entry.output.clone(),
+            error: entry.error.clone(),
+        })),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("job {job_id} not found") }),
+        )),
+    }
+}
+
 async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -212,7 +394,10 @@ async fn handle_health() -> Json<serde_json::Value> {
 
 // ── CAS endpoints ─────────────────────────────────────────────────────────────
 
-async fn handle_cas_head(AxumPath(sha256): AxumPath<String>) -> StatusCode {
+async fn handle_cas_head(
+    _state: State<AppState>,
+    AxumPath(sha256): AxumPath<String>,
+) -> StatusCode {
     if cas_path(&sha256).exists() {
         StatusCode::OK
     } else {
@@ -221,6 +406,7 @@ async fn handle_cas_head(AxumPath(sha256): AxumPath<String>) -> StatusCode {
 }
 
 async fn handle_cas_put(
+    _state: State<AppState>,
     AxumPath(sha256): AxumPath<String>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
@@ -262,7 +448,10 @@ async fn handle_cas_put(
 // ── Server ────────────────────────────────────────────────────────────────────
 
 pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>) -> Result<()> {
-    let host = Arc::new(FluxionHost::new()?);
+    let state = AppState {
+        host: Arc::new(FluxionHost::new()?),
+        jobs: Arc::new(DashMap::new()),
+    };
 
     if let Some(mp) = metrics_port {
         tokio::spawn(fluxion_host::metrics::serve(mp));
@@ -270,10 +459,12 @@ pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>)
 
     let app = Router::new()
         .route("/run", post(handle_run))
+        .route("/jobs", post(handle_submit))
+        .route("/jobs/{job_id}", get(handle_job_status))
         .route("/health", get(handle_health))
         .route("/components/{sha256}", head(handle_cas_head))
         .route("/components/{sha256}", put(handle_cas_put))
-        .with_state(host);
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
 
@@ -350,5 +541,64 @@ async fn serve_tls(app: Router, addr: &str, tls: WorkerTls) -> Result<()> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state() -> AppState {
+        AppState {
+            host: Arc::new(FluxionHost::new().unwrap()),
+            jobs: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn job_store_running_then_succeeded() {
+        let state = make_state();
+        let job_id = Uuid::new_v4().to_string();
+
+        state.jobs.insert(
+            job_id.clone(),
+            JobEntry { status: JobStatus::Running, output: None, error: None },
+        );
+        assert!(matches!(
+            state.jobs.get(&job_id).unwrap().status,
+            JobStatus::Running
+        ));
+
+        state.jobs.insert(
+            job_id.clone(),
+            JobEntry {
+                status: JobStatus::Succeeded,
+                output: Some("dGVzdA==".to_string()),
+                error: None,
+            },
+        );
+        let entry = state.jobs.get(&job_id).unwrap();
+        assert!(matches!(entry.status, JobStatus::Succeeded));
+        assert_eq!(entry.output.as_deref(), Some("dGVzdA=="));
+    }
+
+    #[tokio::test]
+    async fn job_store_missing_returns_none() {
+        let state = make_state();
+        assert!(state.jobs.get("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn job_store_failed_records_error() {
+        let state = make_state();
+        let job_id = Uuid::new_v4().to_string();
+
+        state.jobs.insert(
+            job_id.clone(),
+            JobEntry { status: JobStatus::Failed, output: None, error: Some("boom".to_string()) },
+        );
+        let entry = state.jobs.get(&job_id).unwrap();
+        assert!(matches!(entry.status, JobStatus::Failed));
+        assert_eq!(entry.error.as_deref(), Some("boom"));
     }
 }
