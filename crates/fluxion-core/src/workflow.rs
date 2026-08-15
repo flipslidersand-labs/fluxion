@@ -136,6 +136,10 @@ pub struct JobDefinition {
     /// `remote` dispatches the job to an HTTP worker via fluxion-worker.
     #[serde(default)]
     pub executor: ExecutorKind,
+    /// When `true` and `executor: remote`, uses POST /jobs (fire-and-poll)
+    /// instead of the synchronous POST /run.
+    #[serde(default)]
+    pub async_dispatch: bool,
 }
 
 // ── ExecutorKind ──────────────────────────────────────────────────────────────

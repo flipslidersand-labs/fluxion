@@ -903,6 +903,53 @@ async fn run_with_failover(
     unreachable!("resolve_workers never returns an empty list here")
 }
 
+/// Async variant of `run_with_failover` — uses POST /jobs + polling GET /jobs/:id.
+/// The timeout is embedded inside `run_remote_async` (perms.limits.timeout_secs + 30).
+async fn run_with_failover_async(
+    workers: &[WorkerInfo],
+    component: &str,
+    input: &[u8],
+    perms: &PermissionSet,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<(Vec<u8>, crate::JobMetrics)> {
+    let mut tried: Vec<String> = Vec::new();
+    for (i, worker) in workers.iter().enumerate() {
+        let last = i + 1 == workers.len();
+        match remote::run_remote_async(
+            &worker.url,
+            component,
+            input.to_vec(),
+            perms,
+            env,
+            worker.tls.as_ref(),
+        )
+        .await
+        {
+            Ok(r) => {
+                crate::metrics::WORKER_HEALTH
+                    .with_label_values(&[&worker.url])
+                    .set(1.0);
+                return Ok(r);
+            }
+            Err(e) => {
+                tried.push(format!("{}: {e}", worker.url));
+                if e.is_failover() && !last {
+                    crate::metrics::WORKER_HEALTH
+                        .with_label_values(&[&worker.url])
+                        .set(0.0);
+                    tracing::warn!(worker = %worker.url, error = %e, "async worker unreachable, failing over");
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "async job dispatch failed [{}]",
+                    tried.join("; ")
+                ));
+            }
+        }
+    }
+    unreachable!("resolve_workers never returns an empty list here")
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
@@ -916,6 +963,7 @@ fn launch(
     crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
     let executor = wf.jobs[&job_id].executor.clone();
+    let async_dispatch = wf.jobs[&job_id].async_dispatch;
     let component = wf.jobs[&job_id].component.clone();
     let input = input_override.unwrap_or_else(|| {
         wf.jobs[&job_id]
@@ -971,14 +1019,18 @@ fn launch(
 
             let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = match executor {
                 ExecutorKind::Remote => {
-                    match tokio::time::timeout(
-                        Duration::from_secs(timeout_secs),
-                        run_with_failover(&workers, &component, &input, &perms, &env),
-                    )
-                    .await
-                    {
-                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
-                        Ok(r) => r,
+                    if async_dispatch {
+                        run_with_failover_async(&workers, &component, &input, &perms, &env).await
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_secs(timeout_secs),
+                            run_with_failover(&workers, &component, &input, &perms, &env),
+                        )
+                        .await
+                        {
+                            Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                            Ok(r) => r,
+                        }
                     }
                 }
                 ExecutorKind::Local => {
