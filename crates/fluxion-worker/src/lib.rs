@@ -274,14 +274,16 @@ async fn handle_submit(
                         }),
                     )
                 })?,
-                None => return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!(
+                None => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: format!(
                             "component {sha256} not in CAS — upload via PUT /components/{sha256}"
                         ),
-                    }),
-                )),
+                        }),
+                    ))
+                }
             }
         }
     } else {
