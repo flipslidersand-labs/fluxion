@@ -202,8 +202,8 @@ pub async fn run_remote_async(
     };
     let base_url = worker_url.trim_end_matches('/');
 
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(perms.limits.timeout_secs + 30));
+    let mut builder =
+        reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 30));
     if let Some(tls) = tls {
         let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
         let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
@@ -218,7 +218,9 @@ pub async fn run_remote_async(
             .add_root_certificate(ca_cert)
             .use_rustls_tls();
     }
-    let client = builder.build().map_err(|e| RemoteError::Execution(e.into()))?;
+    let client = builder
+        .build()
+        .map_err(|e| RemoteError::Execution(e.into()))?;
 
     let cas_check_url = format!("{}/components/{}", base_url, sha256);
     let worker_has_component = client
@@ -276,8 +278,10 @@ pub async fn run_remote_async(
         )));
     }
 
-    let submit_json: serde_json::Value =
-        resp.json().await.map_err(|e| RemoteError::Execution(e.into()))?;
+    let submit_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| RemoteError::Execution(e.into()))?;
     let job_id = submit_json["job_id"]
         .as_str()
         .ok_or_else(|| {
@@ -287,8 +291,8 @@ pub async fn run_remote_async(
 
     // Poll GET /jobs/:id until done or deadline.
     let poll_url = format!("{}/jobs/{}", base_url, job_id);
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(perms.limits.timeout_secs + 30);
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(perms.limits.timeout_secs + 30);
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -299,11 +303,10 @@ pub async fn run_remote_async(
             )));
         }
 
-        let poll_resp = client
-            .get(&poll_url)
-            .send()
-            .await
-            .map_err(|e| RemoteError::Unreachable(anyhow::anyhow!("poll {}: {}", poll_url, e)))?;
+        let poll_resp =
+            client.get(&poll_url).send().await.map_err(|e| {
+                RemoteError::Unreachable(anyhow::anyhow!("poll {}: {}", poll_url, e))
+            })?;
 
         if !poll_resp.status().is_success() {
             let status = poll_resp.status();
@@ -316,8 +319,10 @@ pub async fn run_remote_async(
             )));
         }
 
-        let status_json: serde_json::Value =
-            poll_resp.json().await.map_err(|e| RemoteError::Execution(e.into()))?;
+        let status_json: serde_json::Value = poll_resp
+            .json()
+            .await
+            .map_err(|e| RemoteError::Execution(e.into()))?;
 
         match status_json["status"].as_str().unwrap_or("running") {
             "succeeded" => {
@@ -327,7 +332,10 @@ pub async fn run_remote_async(
                 return Ok((output, JobMetrics::default()));
             }
             "failed" => {
-                let err = status_json["error"].as_str().unwrap_or("unknown error").to_string();
+                let err = status_json["error"]
+                    .as_str()
+                    .unwrap_or("unknown error")
+                    .to_string();
                 return Err(RemoteError::Execution(anyhow::anyhow!(
                     "async job {} failed: {}",
                     job_id,

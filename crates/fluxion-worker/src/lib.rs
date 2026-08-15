@@ -361,7 +361,9 @@ async fn handle_submit(
             std::fs::read(&p).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse { error: e.to_string() }),
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
                 )
             })?
         } else {
@@ -370,19 +372,19 @@ async fn handle_submit(
                 Some(b64) => B64.decode(b64).map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse { error: format!("invalid component base64: {e}") }),
+                        Json(ErrorResponse {
+                            error: format!("invalid component base64: {e}"),
+                        }),
                     )
                 })?,
-                None => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        Json(ErrorResponse {
-                            error: format!(
-                                "component {sha256} not in CAS — upload via PUT /components/{sha256}"
-                            ),
-                        }),
-                    ))
-                }
+                None => return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "component {sha256} not in CAS — upload via PUT /components/{sha256}"
+                        ),
+                    }),
+                )),
             }
         }
     } else {
@@ -391,7 +393,9 @@ async fn handle_submit(
         B64.decode(b64).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: format!("invalid component base64: {e}") }),
+                Json(ErrorResponse {
+                    error: format!("invalid component base64: {e}"),
+                }),
             )
         })?
     };
@@ -399,13 +403,19 @@ async fn handle_submit(
     let input = B64.decode(&req.input).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: format!("invalid input base64: {e}") }),
+            Json(ErrorResponse {
+                error: format!("invalid input base64: {e}"),
+            }),
         )
     })?;
 
     state.jobs.insert(
         job_id.clone(),
-        JobEntry { status: JobStatus::Running, output: None, error: None },
+        JobEntry {
+            status: JobStatus::Running,
+            output: None,
+            error: None,
+        },
     );
     ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
 
@@ -418,7 +428,11 @@ async fn handle_submit(
             Err(e) => {
                 jobs.insert(
                     jid,
-                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                    JobEntry {
+                        status: JobStatus::Failed,
+                        output: None,
+                        error: Some(e.to_string()),
+                    },
                 );
                 ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
                 return;
@@ -427,7 +441,11 @@ async fn handle_submit(
         if let Err(e) = tmp.write_all(&component_bytes) {
             jobs.insert(
                 jid,
-                JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                JobEntry {
+                    status: JobStatus::Failed,
+                    output: None,
+                    error: Some(e.to_string()),
+                },
             );
             ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
             return;
@@ -454,13 +472,21 @@ async fn handle_submit(
             Ok(Err(e)) => {
                 jobs.insert(
                     jid,
-                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                    JobEntry {
+                        status: JobStatus::Failed,
+                        output: None,
+                        error: Some(e.to_string()),
+                    },
                 );
             }
             Err(e) => {
                 jobs.insert(
                     jid,
-                    JobEntry { status: JobStatus::Failed, output: None, error: Some(e.to_string()) },
+                    JobEntry {
+                        status: JobStatus::Failed,
+                        output: None,
+                        error: Some(e.to_string()),
+                    },
                 );
             }
         }
@@ -481,7 +507,9 @@ async fn handle_job_status(
         })),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("job {job_id} not found") }),
+            Json(ErrorResponse {
+                error: format!("job {job_id} not found"),
+            }),
         )),
     }
 }
@@ -675,7 +703,11 @@ mod tests {
 
         state.jobs.insert(
             job_id.clone(),
-            JobEntry { status: JobStatus::Running, output: None, error: None },
+            JobEntry {
+                status: JobStatus::Running,
+                output: None,
+                error: None,
+            },
         );
         assert!(matches!(
             state.jobs.get(&job_id).unwrap().status,
@@ -708,7 +740,11 @@ mod tests {
 
         state.jobs.insert(
             job_id.clone(),
-            JobEntry { status: JobStatus::Failed, output: None, error: Some("boom".to_string()) },
+            JobEntry {
+                status: JobStatus::Failed,
+                output: None,
+                error: Some("boom".to_string()),
+            },
         );
         let entry = state.jobs.get(&job_id).unwrap();
         assert!(matches!(entry.status, JobStatus::Failed));
