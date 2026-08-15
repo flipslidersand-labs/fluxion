@@ -41,7 +41,10 @@ fn wait_for_worker(port: u16, timeout: Duration) {
                 return;
             }
         }
-        assert!(std::time::Instant::now() < deadline, "worker did not start in time");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not start in time"
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
 }
@@ -54,12 +57,16 @@ fn two_job_remote_workflow_both_succeed() {
     let hello = hello_wasm();
 
     // Start worker with --async-jobs on a background thread.
-    let mut worker = std::process::Command::new(
-        assert_cmd::cargo::cargo_bin("fluxion"),
-    )
-    .args(["worker", "serve", "--port", &port.to_string(), "--async-jobs"])
-    .spawn()
-    .expect("spawn worker");
+    let mut worker = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluxion"))
+        .args([
+            "worker",
+            "serve",
+            "--port",
+            &port.to_string(),
+            "--async-jobs",
+        ])
+        .spawn()
+        .expect("spawn worker");
 
     // Wait for the worker to be ready.
     wait_for_worker(port, Duration::from_secs(10));
