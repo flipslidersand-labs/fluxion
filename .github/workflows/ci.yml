@@ -26,40 +26,33 @@ jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: build-test
 
       - name: Build
         run: cargo build --workspace -j2
 
       - name: Test
-        run: cargo test --workspace -j2
+        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
 
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: clippy
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
@@ -115,6 +108,9 @@ jobs:
       - name: Build host
         run: cargo build -p fluxion-host -j2
 
+      - name: Host unit tests
+        run: cargo test -p fluxion-host --lib -j2
+
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
 
@@ -133,4 +129,3 @@ jobs:
       - uses: actions/checkout@v4
       - name: Format check
         run: cargo fmt --all -- --check
-
