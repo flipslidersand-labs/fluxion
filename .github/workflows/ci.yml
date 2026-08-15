@@ -27,6 +27,7 @@ jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -37,14 +38,10 @@ jobs:
           for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: build-test
+
       - name: Build
         run: cargo build --workspace -j2
       - name: Test
@@ -54,6 +51,7 @@ jobs:
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,14 +62,10 @@ jobs:
           for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: clippy
+
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
@@ -120,6 +114,11 @@ jobs:
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
       - name: Build host
         run: cargo build -p fluxion-host -j2
+
+      - name: Host unit tests
+        run: cargo test -p fluxion-host --lib -j2
+
+
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
       - name: Upload logs on failure
