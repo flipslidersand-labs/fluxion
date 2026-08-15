@@ -24,7 +24,7 @@ use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
 use wasmtime_wasi::{DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 /// Per-invocation timing breakdown for a single component run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct JobMetrics {
     /// Time to load and compile the .wasm file via wasmtime.
     pub compile: Duration,

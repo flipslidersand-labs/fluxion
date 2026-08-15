@@ -79,6 +79,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     component_sha256: def.component_sha256.clone(),
                     reduce: None,
                     executor: def.executor.clone(),
+                    async_dispatch: def.async_dispatch,
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -490,6 +491,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
         jobs.insert(
@@ -510,6 +512,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
 
