@@ -13,7 +13,7 @@ pub async fn pull(oci_ref: &str, output: Option<PathBuf>) -> Result<()> {
             .rsplit('/')
             .next()
             .unwrap_or("component")
-            .splitn(2, ':')
+            .split(':')
             .next()
             .unwrap_or("component");
         PathBuf::from(format!("{name}.wasm"))
