@@ -18,9 +18,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn hello_wasm_bytes() -> Vec<u8> {
-    let path = workspace_root()
-        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
-    std::fs::read(&path).expect("hello.wasm not built — run `cargo component build` in components/hello")
+    let path = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    std::fs::read(&path)
+        .expect("hello.wasm not built — run `cargo component build` in components/hello")
 }
 
 fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
@@ -45,10 +45,20 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
 fn chain_workflow(n: usize) -> Workflow {
     let mut jobs = IndexMap::new();
     for i in 0..n {
-        let dep = if i > 0 { vec![format!("job_{}", i - 1)] } else { vec![] };
+        let dep = if i > 0 {
+            vec![format!("job_{}", i - 1)]
+        } else {
+            vec![]
+        };
         jobs.insert(format!("job_{}", i), dummy_job(dep));
     }
-    Workflow { name: format!("chain-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+    Workflow {
+        name: format!("chain-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
+    }
 }
 
 // ── ComponentCache benchmarks ─────────────────────────────────────────────────
@@ -114,8 +124,7 @@ fn bench_dag_build(c: &mut Criterion) {
 fn bench_run_component(c: &mut Criterion) {
     let host = Arc::new(FluxionHost::new().expect("FluxionHost::new"));
     let wasm_bytes = hello_wasm_bytes();
-    let wasm_path = workspace_root()
-        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    let wasm_path = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
     let perms = fluxion_core::workflow::PermissionSet::default();
 
     // Warm the component cache (mem + disk) before measuring.
@@ -146,12 +155,22 @@ fn bench_run_component(c: &mut Criterion) {
 fn serial_workflow(n: usize, component: &str) -> Workflow {
     let mut jobs = IndexMap::new();
     for i in 0..n {
-        let dep = if i > 0 { vec![format!("job_{}", i - 1)] } else { vec![] };
+        let dep = if i > 0 {
+            vec![format!("job_{}", i - 1)]
+        } else {
+            vec![]
+        };
         let mut job = dummy_job(dep);
         job.component = component.to_string();
         jobs.insert(format!("job_{}", i), job);
     }
-    Workflow { name: format!("serial-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+    Workflow {
+        name: format!("serial-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
+    }
 }
 
 fn parallel_workflow(n: usize, component: &str) -> Workflow {
@@ -161,7 +180,13 @@ fn parallel_workflow(n: usize, component: &str) -> Workflow {
         job.component = component.to_string();
         jobs.insert(format!("job_{}", i), job);
     }
-    Workflow { name: format!("parallel-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+    Workflow {
+        name: format!("parallel-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
+    }
 }
 
 fn bench_workflow_run(c: &mut Criterion) {
@@ -170,8 +195,8 @@ fn bench_workflow_run(c: &mut Criterion) {
         .build()
         .expect("tokio runtime");
 
-    let hello_path = workspace_root()
-        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    let hello_path =
+        workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
     let hello_str = hello_path.to_string_lossy().into_owned();
 
     // Warm wasmtime cache before measuring so we only measure scheduler overhead.
@@ -218,5 +243,11 @@ fn bench_workflow_run(c: &mut Criterion) {
     drop(host);
 }
 
-criterion_group!(benches, bench_cache, bench_dag_build, bench_run_component, bench_workflow_run);
+criterion_group!(
+    benches,
+    bench_cache,
+    bench_dag_build,
+    bench_run_component,
+    bench_workflow_run
+);
 criterion_main!(benches);
