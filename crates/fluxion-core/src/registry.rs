@@ -21,10 +21,10 @@ CREATE INDEX IF NOT EXISTS idx_oci_components_repo
 /// Parsed reference to an OCI image: `registry/repository[:tag][@digest]`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OciRef {
-    pub registry:   String,
+    pub registry: String,
     pub repository: String,
-    pub tag:        Option<String>,
-    pub digest:     Option<String>,
+    pub tag: Option<String>,
+    pub digest: Option<String>,
 }
 
 impl OciRef {
@@ -42,7 +42,10 @@ impl OciRef {
             // Make sure the colon is not part of the registry host (e.g. host:port).
             let before = &without_digest[..idx];
             if before.contains('/') {
-                (&without_digest[..idx], Some(without_digest[idx + 1..].to_string()))
+                (
+                    &without_digest[..idx],
+                    Some(without_digest[idx + 1..].to_string()),
+                )
             } else {
                 (without_digest, None)
             }
@@ -56,7 +59,12 @@ impl OciRef {
             .map(|(r, p)| (r.to_string(), p.to_string()))
             .ok_or_else(|| anyhow::anyhow!("OciRef must contain at least one '/': {s}"))?;
 
-        Ok(Self { registry, repository, tag, digest })
+        Ok(Self {
+            registry,
+            repository,
+            tag,
+            digest,
+        })
     }
 
     /// Canonical string representation.
@@ -77,9 +85,9 @@ impl OciRef {
 /// A single entry in the local OCI component registry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegistryEntry {
-    pub id:         String,
-    pub oci_ref:    OciRef,
-    pub wasm_path:  String,
+    pub id: String,
+    pub oci_ref: OciRef,
+    pub wasm_path: String,
     pub created_at: u64,
 }
 
@@ -101,18 +109,24 @@ impl RegistryStore {
         }
         let conn = Connection::open(&path)?;
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Open from an existing connection (for tests / in-memory DBs).
     pub fn from_conn(conn: Connection) -> Result<Self> {
         Self::init_schema(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     fn db_path() -> std::path::PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home).join(".fluxion").join("registry.db")
+        std::path::PathBuf::from(home)
+            .join(".fluxion")
+            .join("registry.db")
     }
 
     fn init_schema(conn: &Connection) -> Result<()> {
@@ -203,12 +217,12 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegistryEntry> {
     Ok(RegistryEntry {
         id: row.get(0)?,
         oci_ref: OciRef {
-            registry:   row.get(1)?,
+            registry: row.get(1)?,
             repository: row.get(2)?,
-            tag:        row.get(3)?,
-            digest:     row.get(4)?,
+            tag: row.get(3)?,
+            digest: row.get(4)?,
         },
-        wasm_path:  row.get(5)?,
+        wasm_path: row.get(5)?,
         created_at: row.get(6)?,
     })
 }
@@ -243,19 +257,19 @@ mod tests {
 
     fn sample_ref() -> OciRef {
         OciRef {
-            registry:   "ghcr.io".to_string(),
+            registry: "ghcr.io".to_string(),
             repository: "flipslidersand/hello".to_string(),
-            tag:        Some("v1.0".to_string()),
-            digest:     None,
+            tag: Some("v1.0".to_string()),
+            digest: None,
         }
     }
 
     fn sample_entry() -> RegistryEntry {
         let r = sample_ref();
         RegistryEntry {
-            id:         entry_id(&r),
-            oci_ref:    r,
-            wasm_path:  "/tmp/hello.wasm".to_string(),
+            id: entry_id(&r),
+            oci_ref: r,
+            wasm_path: "/tmp/hello.wasm".to_string(),
             created_at: now_secs(),
         }
     }
@@ -284,10 +298,10 @@ mod tests {
         let store = in_memory_store();
         for i in 0..3u32 {
             let r = OciRef {
-                registry:   "ghcr.io".into(),
+                registry: "ghcr.io".into(),
                 repository: format!("flipslidersand/cmp-{i}"),
-                tag:        Some("latest".into()),
-                digest:     None,
+                tag: Some("latest".into()),
+                digest: None,
             };
             let e = RegistryEntry {
                 id: entry_id(&r),
@@ -314,10 +328,27 @@ mod tests {
     #[test]
     fn find_by_repo_filters_correctly() {
         let store = in_memory_store();
-        let r1 = OciRef { registry: "ghcr.io".into(), repository: "org/a".into(), tag: None, digest: None };
-        let r2 = OciRef { registry: "ghcr.io".into(), repository: "org/b".into(), tag: None, digest: None };
+        let r1 = OciRef {
+            registry: "ghcr.io".into(),
+            repository: "org/a".into(),
+            tag: None,
+            digest: None,
+        };
+        let r2 = OciRef {
+            registry: "ghcr.io".into(),
+            repository: "org/b".into(),
+            tag: None,
+            digest: None,
+        };
         for r in [&r1, &r2] {
-            store.upsert(&RegistryEntry { id: entry_id(r), oci_ref: r.clone(), wasm_path: "/x.wasm".into(), created_at: 0 }).unwrap();
+            store
+                .upsert(&RegistryEntry {
+                    id: entry_id(r),
+                    oci_ref: r.clone(),
+                    wasm_path: "/x.wasm".into(),
+                    created_at: 0,
+                })
+                .unwrap();
         }
         let found = store.find_by_repo("ghcr.io", "org/a").expect("find");
         assert_eq!(found.len(), 1);
