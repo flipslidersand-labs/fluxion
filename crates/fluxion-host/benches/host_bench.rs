@@ -4,8 +4,8 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fluxion_core::dag::Dag;
 use fluxion_core::workflow::{JobDefinition, Workflow};
-use fluxion_host::cache::ComponentCache;
 use fluxion_host::FluxionHost;
+use fluxion_host::cache::ComponentCache;
 use indexmap::IndexMap;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -18,9 +18,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn hello_wasm_bytes() -> Vec<u8> {
-    let path = workspace_root()
-        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
-    std::fs::read(&path).expect("hello.wasm not built — run `cargo component build` in components/hello")
+    let path = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    std::fs::read(&path)
+        .expect("hello.wasm not built — run `cargo component build` in components/hello")
 }
 
 fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
@@ -45,10 +45,20 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
 fn chain_workflow(n: usize) -> Workflow {
     let mut jobs = IndexMap::new();
     for i in 0..n {
-        let dep = if i > 0 { vec![format!("job_{}", i - 1)] } else { vec![] };
+        let dep = if i > 0 {
+            vec![format!("job_{}", i - 1)]
+        } else {
+            vec![]
+        };
         jobs.insert(format!("job_{}", i), dummy_job(dep));
     }
-    Workflow { name: format!("chain-{n}"), jobs, workers: vec![], max_parallel: None, workers_srv: None }
+    Workflow {
+        name: format!("chain-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
+    }
 }
 
 // ── ComponentCache benchmarks ─────────────────────────────────────────────────
@@ -114,8 +124,7 @@ fn bench_dag_build(c: &mut Criterion) {
 fn bench_run_component(c: &mut Criterion) {
     let host = Arc::new(FluxionHost::new().expect("FluxionHost::new"));
     let wasm_bytes = hello_wasm_bytes();
-    let wasm_path = workspace_root()
-        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    let wasm_path = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
     let perms = fluxion_core::workflow::PermissionSet::default();
 
     // Warm the component cache (mem + disk) before measuring.
