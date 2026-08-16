@@ -1072,6 +1072,7 @@ dependencies = [
  "prometheus",
  "reqwest",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "tempfile",
  "tokio",

@@ -47,6 +47,26 @@ impl Dag {
             .map(|(id, _)| id.clone())
             .collect()
     }
+
+    /// Insert new job nodes into an existing DAG (used for dynamic foreach expansion).
+    ///
+    /// `new_deps` must only reference jobs that are already in the DAG or other
+    /// entries in `new_deps`. New jobs are appended to `topo_order` in the order
+    /// they appear in `new_jobs`.
+    pub fn insert_nodes(&mut self, new_jobs: &[String], new_deps: &HashMap<String, Vec<String>>) {
+        for job_id in new_jobs {
+            let deps = new_deps.get(job_id).cloned().unwrap_or_default();
+            for dep in &deps {
+                self.dependents
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(job_id.clone());
+            }
+            self.deps.insert(job_id.clone(), deps);
+            self.dependents.entry(job_id.clone()).or_default();
+            self.topo_order.push(job_id.clone());
+        }
+    }
 }
 
 /// Kahn's algorithm: topological sort. Errors on cycle.

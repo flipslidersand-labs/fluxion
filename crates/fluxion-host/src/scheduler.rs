@@ -323,11 +323,21 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         workers,
     } = opts;
     // ── Expand foreach jobs ─────────────────────────────────────────────────
+    // Static expand: jobs with `foreach:` AND a static `input:` field are expanded now.
+    // Jobs with `foreach:` but NO `input:` remain as dynamic templates; expanded at runtime.
     let expanded = expand_foreach(wf, None)?;
-    let wf = &expanded.workflow;
-    let foreach_map = &expanded.foreach_map;
+    let mut wf = expanded.workflow;
+    let mut foreach_map = expanded.foreach_map;
 
-    let dag = Dag::build(wf)?;
+    // Track which jobs are dynamic foreach templates (have `foreach` but no `input`).
+    let dynamic_templates: std::collections::HashSet<String> = wf
+        .jobs
+        .iter()
+        .filter(|(_, def)| def.foreach.is_some() && def.input.is_none())
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let mut dag = Dag::build(&wf)?;
 
     // Validate: executor:remote jobs require at least one worker configured.
     for (job_id, job) in &wf.jobs {
@@ -380,10 +390,10 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        let job_workers = resolve_workers(&job_id, wf, &workers, &rr, &strategy).await;
+        let job_workers = resolve_workers(&job_id, &wf, &workers, &rr, &strategy).await;
         launch(
             &job_id,
-            wf,
+            &wf,
             host.clone(),
             tx.clone(),
             job_workers,
@@ -403,12 +413,12 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
-            let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
-            let fanin_input = apply_custom_reduce(host.clone(), job_id, wf, fanin_input).await;
+            let job_workers = resolve_workers(job_id, &wf, &workers, &rr, &strategy).await;
+            let fanin_input = build_fanin_input(job_id, &wf, &foreach_map, &job_outputs);
+            let fanin_input = apply_custom_reduce(host.clone(), job_id, &wf, fanin_input).await;
             launch(
                 job_id,
-                wf,
+                &wf,
                 host.clone(),
                 tx.clone(),
                 job_workers,
@@ -456,7 +466,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
                 // Print foreach group progress if applicable
                 if print_progress {
-                    print_foreach_progress(&event.job_id, foreach_map, &statuses, pad);
+                    print_foreach_progress(&event.job_id, &foreach_map, &statuses, pad);
                 }
             }
             JobStatus::Failed { elapsed, reason } => {
@@ -524,7 +534,17 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         }
 
         if overall_success {
-            for dep in dag.dependents.get(&event.job_id).into_iter().flatten() {
+            // Collect dependents into a Vec so we can mutate `dag`/`wf` inside the loop
+            // (needed for dynamic foreach expansion which inserts new nodes at runtime).
+            let ready_deps: Vec<String> = dag
+                .dependents
+                .get(&event.job_id)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+
+            for dep in &ready_deps {
                 if pre_succeeded.contains_key(dep) {
                     continue;
                 }
@@ -535,6 +555,125 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled
                     )
                 });
+                if all_done && dynamic_templates.contains(dep) {
+                    // ── Dynamic foreach expansion ────────────────────────────────────
+                    // The template job had no static input; expand now using the output
+                    // of the predecessor that just completed.
+                    let predecessor_output = job_outputs
+                        .get(&event.job_id)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(b"");
+                    let template_def = wf.jobs[dep].clone();
+                    match fluxion_core::expand::expand_foreach_dynamic(
+                        dep,
+                        &template_def,
+                        predecessor_output,
+                    ) {
+                        Ok(children) => {
+                            let child_ids: Vec<String> =
+                                children.iter().map(|(id, _)| id.clone()).collect();
+
+                            // Register children in wf and statuses.
+                            for (id, child_def) in &children {
+                                wf.jobs.insert(id.clone(), child_def.clone());
+                                statuses.insert(id.clone(), JobStatus::Pending);
+                            }
+
+                            // Mark template as immediately succeeded (it "ran" by expanding).
+                            let zero = std::time::Duration::ZERO;
+                            wf.jobs.shift_remove(dep);
+                            store.upsert_job(
+                                run_id,
+                                dep,
+                                &JobStatus::Succeeded { elapsed: zero },
+                            )?;
+                            statuses.insert(dep.clone(), JobStatus::Succeeded { elapsed: zero });
+
+                            // Update foreach_map with the actual children.
+                            foreach_map.insert(dep.clone(), child_ids.clone());
+
+                            // Insert children into the DAG.
+                            let child_deps: std::collections::HashMap<String, Vec<String>> =
+                                child_ids
+                                    .iter()
+                                    .map(|id| (id.clone(), template_def.depends_on.clone()))
+                                    .collect();
+                            dag.insert_nodes(&child_ids, &child_deps);
+
+                            // Update any fan-in jobs (input_from = dep) to wait for
+                            // the actual children instead of the template.
+                            let fanin_jobs: Vec<String> = wf
+                                .jobs
+                                .iter()
+                                .filter(|(_, d)| d.input_from.as_deref() == Some(dep.as_str()))
+                                .map(|(id, _)| id.clone())
+                                .collect();
+                            for fanin_id in &fanin_jobs {
+                                let fanin_def = wf.jobs.get_mut(fanin_id).unwrap();
+                                fanin_def.depends_on.retain(|d| d != dep);
+                                for child_id in &child_ids {
+                                    if !fanin_def.depends_on.contains(child_id) {
+                                        fanin_def.depends_on.push(child_id.clone());
+                                    }
+                                }
+                                dag.deps
+                                    .insert(fanin_id.clone(), fanin_def.depends_on.clone());
+                                if let Some(v) = dag.dependents.get_mut(dep.as_str()) {
+                                    v.retain(|d| d != fanin_id);
+                                }
+                                for child_id in &child_ids {
+                                    dag.dependents
+                                        .entry(child_id.clone())
+                                        .or_default()
+                                        .push(fanin_id.clone());
+                                }
+                                statuses.insert(fanin_id.clone(), JobStatus::Pending);
+                            }
+
+                            // Launch all expanded children immediately.
+                            for child_id in &child_ids {
+                                if print_progress {
+                                    print_running(child_id, pad);
+                                }
+                                store.upsert_job(run_id, child_id, &JobStatus::Running)?;
+                                statuses.insert(child_id.clone(), JobStatus::Running);
+                                let child_workers =
+                                    resolve_workers(child_id, &wf, &workers, &rr, &strategy).await;
+                                launch(
+                                    child_id,
+                                    &wf,
+                                    host.clone(),
+                                    tx.clone(),
+                                    child_workers,
+                                    sem.clone(),
+                                    None,
+                                );
+                                in_flight += 1;
+                            }
+                        }
+                        Err(e) => {
+                            let reason = format!("dynamic foreach expansion failed: {e}");
+                            store.upsert_job(
+                                run_id,
+                                dep,
+                                &JobStatus::Failed {
+                                    elapsed: std::time::Duration::ZERO,
+                                    reason: reason.clone(),
+                                },
+                            )?;
+                            statuses.insert(
+                                dep.clone(),
+                                JobStatus::Failed {
+                                    elapsed: std::time::Duration::ZERO,
+                                    reason,
+                                },
+                            );
+                            overall_success = false;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if all_done {
                     let job_def = &wf.jobs[dep];
 
@@ -637,25 +776,25 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 &JobStatus::Running,
                                             )?;
                                             let dw_workers = resolve_workers(
-                                                downstream, wf, &workers, &rr, &strategy,
+                                                downstream, &wf, &workers, &rr, &strategy,
                                             )
                                             .await;
                                             let fanin_input = build_fanin_input(
                                                 downstream,
-                                                wf,
-                                                foreach_map,
+                                                &wf,
+                                                &foreach_map,
                                                 &job_outputs,
                                             );
                                             let fanin_input = apply_custom_reduce(
                                                 host.clone(),
                                                 downstream,
-                                                wf,
+                                                &wf,
                                                 fanin_input,
                                             )
                                             .await;
                                             launch(
                                                 downstream,
-                                                wf,
+                                                &wf,
                                                 host.clone(),
                                                 tx.clone(),
                                                 dw_workers,
@@ -674,13 +813,13 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                             print_running(dep, pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                        let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
-                        let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        let dep_workers = resolve_workers(dep, &wf, &workers, &rr, &strategy).await;
+                        let fanin_input = build_fanin_input(dep, &wf, &foreach_map, &job_outputs);
                         let fanin_input =
-                            apply_custom_reduce(host.clone(), dep, wf, fanin_input).await;
+                            apply_custom_reduce(host.clone(), dep, &wf, fanin_input).await;
                         launch(
                             dep,
-                            wf,
+                            &wf,
                             host.clone(),
                             tx.clone(),
                             dep_workers,
