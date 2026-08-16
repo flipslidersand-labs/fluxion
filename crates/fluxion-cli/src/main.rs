@@ -133,6 +133,26 @@ enum Commands {
         #[command(subcommand)]
         action: RegistryCommands,
     },
+    /// Build a Wasm component from source (Python, etc.)
+    Build {
+        #[command(subcommand)]
+        action: BuildCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuildCommands {
+    /// Compile a Python script into a Wasm component via componentize-py
+    Python {
+        /// Path to the Python script (must implement Processor.process())
+        script: PathBuf,
+        /// Output .wasm path
+        #[arg(long, short, default_value = "component.wasm")]
+        out: PathBuf,
+        /// Path to the WIT directory
+        #[arg(long, default_value = "./wit")]
+        wit_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -454,6 +474,15 @@ async fn run(command: Commands) -> Result<()> {
             }
             RegistryCommands::List { registry, repo } => {
                 registry::list(&registry, &repo).await?;
+            }
+        },
+        Commands::Build { action } => match action {
+            BuildCommands::Python {
+                script,
+                out,
+                wit_path,
+            } => {
+                build::build_python(&script, &out, &wit_path)?;
             }
         },
     }
