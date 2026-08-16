@@ -63,7 +63,10 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(body) => Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )
             .body(axum::body::Body::from(body))
             .unwrap(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
