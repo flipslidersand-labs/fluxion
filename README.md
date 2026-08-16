@@ -83,7 +83,8 @@ fluxion/
 │   ├── network-probe/   # TCP connect; demonstrates network caps (wasip2)
 │   ├── pipeline-stage/  # 4-stage ETL: fetch → normalize → validate → export
 │   ├── spin/            # CPU busy-loop; used in timeout / epoch-interrupt demos
-│   └── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   ├── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   └── python-hello/    # Minimal Python component (requires componentize-py)
 ├── examples/
 │   ├── vehicle-pipeline.yaml     # 4-stage DAG — validate fails on bad year, retry fixes it
 │   ├── resource-limits-demo.yaml # spin-forever killed by epoch timeout after 2s
@@ -179,6 +180,75 @@ fluxion run examples/memory-limits-demo.yaml
 # oom-job  FAILED   0.00s   (OOM: component exceeded memory_mb=1 limit)
 ```
 
+## Python Components
+
+Fluxion supports Python components via [componentize-py](https://github.com/bytecodealliance/componentize-py).
+Requires **Python 3.10+** and **componentize-py 0.5+**.
+
+### Install
+
+```bash
+pip install componentize-py
+```
+
+### Build
+
+```bash
+# Auto-generates task.py stub if it doesn't exist, then compiles to Wasm
+fluxion build python my_script.py --out component.wasm --wit-path wit/
+```
+
+Or use the provided sample:
+
+```bash
+# Build components/python-hello → hello.wasm
+bash scripts/build-python-hello.sh
+```
+
+### Implement
+
+Your script must export a `Processor` class with a `process` method:
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Tuple
+
+@dataclass
+class TaskInput:
+    content: List[int] = field(default_factory=list)
+    metadata: List[Tuple[str, str]] = field(default_factory=list)
+
+@dataclass
+class TaskOutput:
+    content: List[int] = field(default_factory=list)
+    metadata: List[Tuple[str, str]] = field(default_factory=list)
+
+class Processor:
+    def process(self, input: TaskInput) -> TaskOutput:
+        message = b"hello from python"
+        return TaskOutput(content=list(message))
+```
+
+### Run
+
+```bash
+fluxion component run hello.wasm
+# → output bytes: [104, 101, 108, 108, 111, ...]
+# → decoded: "hello from python"
+```
+
+### WIT Interface
+
+| Record | Field | WIT Type | Python Type |
+| ------ | ----- | -------- | ----------- |
+| `task-input` | `content` | `list<u8>` | `List[int]` |
+| `task-input` | `metadata` | `list<tuple<string, string>>` | `List[Tuple[str, str]]` |
+| `task-output` | `content` | `list<u8>` | `List[int]` |
+| `task-output` | `metadata` | `list<tuple<string, string>>` | `List[Tuple[str, str]]` |
+
+`process` returns `result<task-output, string>` — raise an exception in Python to signal the error string.
+
 ## MCP Integration
 
 Fluxion exposes an MCP server for use with Claude Code or any MCP-compatible AI editor.
@@ -229,6 +299,7 @@ cargo test --package fluxion-host --test e2e -- --ignored
 | Phase 4 | Persistence (SQLite) + retry from any job  | ✅ Done |
 | Phase 5 | OpenTelemetry tracing                      | ✅ Done |
 | Phase 6 | MCP server (5 tools)                       | ✅ Done |
+| Phase 7 | Python components (`fluxion build python`) | ✅ Done |
 
 ## License
 
