@@ -383,7 +383,6 @@ fn sha256_digest(bytes: &[u8]) -> String {
 }
 
 // ── Unit tests (no network) ───────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +443,5 @@ mod tests {
         let json = serde_json::to_string(&manifest).expect("serialize");
         let parsed: OciManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.schema_version, 2);
-        assert_eq!(parsed.layers[0].media_type, WASM_LAYER_TYPE);
-    }
+        assert_eq!(parsed.layers[0].media_type, WASM_LAYER_TYPE);    }
 }

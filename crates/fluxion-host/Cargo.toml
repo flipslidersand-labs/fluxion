@@ -30,6 +30,8 @@ tempfile      = "3"
 name    = "host_bench"
 harness = false
 
+tempfile = "3"
+
 [features]
 ci = []
 ui-metrics = []
