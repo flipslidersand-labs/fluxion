@@ -20,9 +20,7 @@ impl CacheKey {
     /// Produce the canonical 64-hex-char string used as LRU / disk-cache identifier.
     pub fn as_str_key(&self, wasm_bytes: &[u8]) -> String {
         match self {
-            CacheKey::Digest(d) => {
-                d.strip_prefix("sha256:").unwrap_or(d).to_string()
-            }
+            CacheKey::Digest(d) => d.strip_prefix("sha256:").unwrap_or(d).to_string(),
             CacheKey::Path(_) => wasm_key(wasm_bytes),
         }
     }

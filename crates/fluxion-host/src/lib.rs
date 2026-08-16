@@ -10,8 +10,8 @@ pub mod worker_registry;
 use anyhow::{Context, Result};
 use cache::{CacheKey, ComponentCache};
 use fluxion_core::workflow::PermissionSet;
-use oci::OciClient;
 use lru::LruCache;
+use oci::OciClient;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -198,7 +198,11 @@ impl FluxionHost {
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
             .build();
-        let state = HostState { ctx, table: ResourceTable::new(), limits };
+        let state = HostState {
+            ctx,
+            table: ResourceTable::new(),
+            limits,
+        };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
         store.set_epoch_deadline(perms.limits.timeout_secs * TICKS_PER_SEC);
@@ -212,12 +216,21 @@ impl FluxionHost {
                 Arc::clone(c)
             } else {
                 let c = Arc::new(
-                    match self.disk_cache.load_by_key(&self.engine, &cache_key, wasm_bytes) {
+                    match self
+                        .disk_cache
+                        .load_by_key(&self.engine, &cache_key, wasm_bytes)
+                    {
                         Some(c) => c,
-                        None => self.disk_cache.store_by_key(&self.engine, &cache_key, wasm_bytes)?,
+                        None => {
+                            self.disk_cache
+                                .store_by_key(&self.engine, &cache_key, wasm_bytes)?
+                        }
                     },
                 );
-                self.mem_cache.lock().unwrap().put(key.clone(), Arc::clone(&c));
+                self.mem_cache
+                    .lock()
+                    .unwrap()
+                    .put(key.clone(), Arc::clone(&c));
                 c
             }
         };
@@ -237,7 +250,11 @@ impl FluxionHost {
         };
         let instance = pre.instantiate(&mut store).map_err(|e| {
             if is_oom_error(&e) {
-                anyhow::anyhow!("OOM: component exceeded memory_mb={} limit ({})", perms.limits.memory_mb, e)
+                anyhow::anyhow!(
+                    "OOM: component exceeded memory_mb={} limit ({})",
+                    perms.limits.memory_mb,
+                    e
+                )
             } else {
                 e
             }
@@ -249,16 +266,25 @@ impl FluxionHost {
             metadata: vec![],
         };
         let t2 = Instant::now();
-        let call_result = instance.fluxion_task_processor().call_process(&mut store, &task_input);
+        let call_result = instance
+            .fluxion_task_processor()
+            .call_process(&mut store, &task_input);
         let execute = t2.elapsed();
 
-        let metrics = JobMetrics { compile, instantiate, execute };
+        let metrics = JobMetrics {
+            compile,
+            instantiate,
+            execute,
+        };
         match call_result {
             Ok(Err(e)) => anyhow::bail!("Component error: {}", e),
             Ok(Ok(output)) => Ok((output.content, metrics)),
             Err(trap) => {
                 if is_epoch_trap(&trap) {
-                    anyhow::bail!("Timeout: killed after {}s (epoch interrupt)", perms.limits.timeout_secs)
+                    anyhow::bail!(
+                        "Timeout: killed after {}s (epoch interrupt)",
+                        perms.limits.timeout_secs
+                    )
                 } else {
                     Err(trap)
                 }
