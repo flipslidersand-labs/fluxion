@@ -1,3 +1,4 @@
+use crate::api::ApiState;
 use axum::{
     Router,
     extract::{Path, State},
@@ -5,7 +6,6 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use crate::api::ApiState;
 
 static INDEX_HTML: &str = include_str!("../assets/index.html");
 
@@ -62,10 +62,7 @@ async fn ui_run_jobs(
     } else {
         for j in &jobs {
             let badge = status_badge(&j.status);
-            let elapsed = j
-                .elapsed_ms
-                .map(|ms| ms.to_string())
-                .unwrap_or_default();
+            let elapsed = j.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default();
             html.push_str(&format!(
                 "<tr>\
                    <td style=\"padding:.4rem .8rem;border-bottom:1px solid #dee2e6\">{job}</td>\
@@ -114,7 +111,10 @@ fn escape(s: &str) -> String {
 fn html_fragment(body: String) -> Response {
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )
         .body(axum::body::Body::from(body))
         .unwrap()
 }
@@ -132,4 +132,3 @@ impl<E: Into<anyhow::Error>> From<E> for UiError {
         Self(e.into())
     }
 }
-
