@@ -1,3 +1,4 @@
+mod build;
 mod mcp;
 mod registry;
 mod telemetry;
