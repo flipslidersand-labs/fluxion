@@ -27,7 +27,11 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
 fn chain_workflow(n: usize) -> Workflow {
     let mut jobs = IndexMap::new();
     for i in 0..n {
-        let dep = if i > 0 { vec![format!("job_{}", i - 1)] } else { vec![] };
+        let dep = if i > 0 {
+            vec![format!("job_{}", i - 1)]
+        } else {
+            vec![]
+        };
         jobs.insert(format!("job_{}", i), dummy_job(dep));
     }
     Workflow {
@@ -111,7 +115,9 @@ fn bench_run_store(c: &mut Criterion) {
 
     // Restore HOME (best-effort; benches run in isolation anyway)
     // SAFETY: single-threaded context.
-    unsafe { let _ = std::env::remove_var("HOME"); }
+    unsafe {
+        let _ = std::env::remove_var("HOME");
+    }
 }
 
 criterion_group!(benches, bench_dag_build, bench_run_store);
