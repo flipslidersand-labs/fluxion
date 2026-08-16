@@ -45,7 +45,8 @@ jobs:
         run: cargo build --workspace -j2
 
       - name: Test
-        run: cargo test --workspace -j2
+        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
 
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
