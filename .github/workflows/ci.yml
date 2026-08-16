@@ -25,7 +25,7 @@ env:
 jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +50,7 @@ jobs:
 
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +71,7 @@ jobs:
 
   e2e:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
@@ -131,7 +131,7 @@ jobs:
 
   fmt:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: Format check
