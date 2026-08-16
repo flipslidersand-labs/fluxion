@@ -4,7 +4,6 @@
 //!
 //! Layer media type: `application/vnd.wasm.content.layer.v0+wasm`
 //! Manifest media type: `application/vnd.oci.image.manifest.v1+json`
-
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use reqwest::{Client, StatusCode, header};
@@ -157,7 +156,6 @@ impl OciClient {
     /// Returns the raw Wasm bytes.
     pub async fn pull(&self, repository: &str, reference: &str) -> Result<Vec<u8>> {
         let manifest = self.fetch_manifest(repository, reference).await?;
-
         // Find the first Wasm layer.
         let layer = manifest
             .layers
