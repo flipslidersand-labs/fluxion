@@ -1,4 +1,5 @@
 mod mcp;
+mod registry;
 mod telemetry;
 mod watch;
 
@@ -125,6 +126,37 @@ enum Commands {
     Schedule {
         #[command(subcommand)]
         action: ScheduleCommands,
+    },
+    /// OCI registry operations — pull, push, and list Wasm components
+    Registry {
+        #[command(subcommand)]
+        action: RegistryCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Pull a Wasm component from an OCI registry
+    Pull {
+        /// OCI reference (e.g. ghcr.io/org/repo:latest)
+        oci_ref: String,
+        /// Save to this path (default: derived from ref)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Push a Wasm component to an OCI registry
+    Push {
+        /// Path to the .wasm file
+        path: PathBuf,
+        /// OCI reference (e.g. localhost:5000/myapp:v1)
+        oci_ref: String,
+    },
+    /// List tags for a repository
+    List {
+        /// Registry hostname (e.g. localhost:5000)
+        registry: String,
+        /// Repository name (e.g. myorg/myapp)
+        repo: String,
     },
 }
 
@@ -409,6 +441,18 @@ async fn run(command: Commands) -> Result<()> {
             }
             ScheduleCommands::Daemon => {
                 cmd_schedule_daemon().await?;
+            }
+        },
+
+        Commands::Registry { action } => match action {
+            RegistryCommands::Pull { oci_ref, output } => {
+                registry::pull(&oci_ref, output).await?;
+            }
+            RegistryCommands::Push { path, oci_ref } => {
+                registry::push(&path, &oci_ref).await?;
+            }
+            RegistryCommands::List { registry, repo } => {
+                registry::list(&registry, &repo).await?;
             }
         },
     }

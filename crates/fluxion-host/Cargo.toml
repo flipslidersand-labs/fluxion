@@ -30,3 +30,5 @@ tempfile = "3"
 ci = []
 
 [dev-dependencies]
+serde_yaml = { workspace = true }
+tempfile   = { workspace = true }

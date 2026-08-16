@@ -67,6 +67,11 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
       - uses: actions/checkout@v4
 
