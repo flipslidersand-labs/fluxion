@@ -504,7 +504,7 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
                     serde_json::json!({"ok": false, "errors": [msg], "warnings": []})
                 );
             } else {
-                eprintln!("✗ YAML syntax error: {e}");
+                eprintln!("✗ YAML parse error: {e}");
             }
             std::process::exit(1);
         }
@@ -544,7 +544,7 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
             .iter()
             .any(|e| matches!(e, fluxion_core::workflow::ValidationError::CyclicDependency))
         {
-            eprintln!("✗ DAG: cyclic dependency detected ({job_count} jobs)");
+            eprintln!("✗ DAG: circular dependency detected ({job_count} jobs)");
         } else {
             println!("✓ DAG: no cycles ({job_count} jobs)");
         }
@@ -563,7 +563,9 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
         if missing.is_empty() && !skip_wasm_check {
             println!("✓ Components: all {job_count} paths exist");
         } else if !missing.is_empty() {
-            eprintln!("✗ Components: {} path(s) missing", missing.len());
+            for m in &missing {
+                eprintln!("✗ component not found: {m}");
+            }
         }
 
         // Remaining structural errors
