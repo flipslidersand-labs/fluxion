@@ -154,8 +154,7 @@ pub fn extract_jsonpath_array(path: &str, input: &str) -> Result<Vec<Value>> {
     if matches.len() == 1
         && let Value::Array(arr) = matches[0]
     {
-            return Ok(arr.clone());
-        }
+        return Ok(arr.clone());
     }
 
     Ok(matches.into_iter().cloned().collect())
