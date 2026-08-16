@@ -162,7 +162,10 @@ mod tests {
     #[test]
     fn resolve_prefers_component_path() {
         let s = store();
-        let j = job("/local/x.wasm", Some(OciRef::parse("ghcr.io/org/x:v1").unwrap()));
+        let j = job(
+            "/local/x.wasm",
+            Some(OciRef::parse("ghcr.io/org/x:v1").unwrap()),
+        );
         assert_eq!(resolve_component_path(&j, &s).unwrap(), "/local/x.wasm");
     }
 
@@ -173,7 +176,10 @@ mod tests {
         s.register(&oci, "/cached/hello.wasm").unwrap();
 
         let j = job("", Some(oci));
-        assert_eq!(resolve_component_path(&j, &s).unwrap(), "/cached/hello.wasm");
+        assert_eq!(
+            resolve_component_path(&j, &s).unwrap(),
+            "/cached/hello.wasm"
+        );
     }
 
     #[test]

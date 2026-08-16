@@ -161,7 +161,12 @@ impl RegistryStore {
              ORDER BY created_at DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(
-            params![oci_ref.registry, oci_ref.repository, oci_ref.tag, oci_ref.digest],
+            params![
+                oci_ref.registry,
+                oci_ref.repository,
+                oci_ref.tag,
+                oci_ref.digest
+            ],
             row_to_entry,
         )?;
         Ok(rows.next().transpose()?)
