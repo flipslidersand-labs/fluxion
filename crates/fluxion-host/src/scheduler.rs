@@ -1496,10 +1496,7 @@ mod tests {
     async fn fanin_json_merge_merges_objects() {
         let wf = fanin_wf(Some(r#""json_merge""#));
         let foreach_map = fanin_map();
-        let outputs = fanin_outputs(
-            br#"{"a":1,"b":2}"#,
-            br#"{"b":99,"c":3}"#,
-        );
+        let outputs = fanin_outputs(br#"{"a":1,"b":2}"#, br#"{"b":99,"c":3}"#);
         let host = Arc::new(FluxionHost::new().unwrap());
         let result = build_fanin_input("aggregate", &wf, &foreach_map, &outputs, host)
             .await
