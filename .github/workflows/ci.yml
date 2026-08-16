@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install system deps
         run: sudo apt-get install -y build-essential
       - name: Cache cargo
@@ -52,6 +54,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install system deps
         run: sudo apt-get install -y build-essential
       - name: Cache cargo
@@ -75,6 +79,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip1,wasm32-wasip2
       - name: Install system deps
         run: sudo apt-get install -y build-essential
       - name: Cache cargo (host + components)
@@ -93,10 +100,6 @@ jobs:
             components/spin/target
           key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-e2e-
-      - name: Install Wasm targets
-        run: |
-          rustup target add wasm32-wasip1
-          rustup target add wasm32-wasip2
       - name: Install cargo-component
         run: |
           if ! command -v cargo-component &>/dev/null; then
@@ -126,5 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
