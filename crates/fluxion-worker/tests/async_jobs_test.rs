@@ -67,7 +67,10 @@ async fn post_jobs_returns_202_with_job_id() {
     let id = body["job_id"].as_str().unwrap();
     assert!(!id.is_empty(), "job_id must not be empty");
     // Must be a valid UUID v4.
-    assert!(uuid::Uuid::parse_str(id).is_ok(), "job_id must be a UUID: {id}");
+    assert!(
+        uuid::Uuid::parse_str(id).is_ok(),
+        "job_id must be a UUID: {id}"
+    );
 }
 
 #[tokio::test]

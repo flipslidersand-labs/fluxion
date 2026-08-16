@@ -107,7 +107,11 @@ async fn handle_submit_job(
 
     state.jobs.insert(
         job_id.clone(),
-        JobEntry { status: "running".into(), output: None, error: None },
+        JobEntry {
+            status: "running".into(),
+            output: None,
+            error: None,
+        },
     );
 
     let state2 = state.clone();
@@ -142,7 +146,9 @@ async fn handle_get_job(
         Some(entry) => Ok(Json(entry.clone())),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("job {id} not found") }),
+            Json(ErrorResponse {
+                error: format!("job {id} not found"),
+            }),
         )),
     }
 }
