@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
