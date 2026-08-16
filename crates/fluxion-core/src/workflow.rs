@@ -140,6 +140,11 @@ pub struct JobDefinition {
     /// instead of the synchronous POST /run.
     #[serde(default)]
     pub async_dispatch: bool,
+    /// OCI reference (`registry/repo:tag` or `registry/repo@sha256:…`).
+    /// When set, the component is pulled from the OCI registry at runtime
+    /// and the `component` field is ignored.
+    #[serde(default)]
+    pub oci_ref: Option<String>,
 }
 
 // ── ExecutorKind ──────────────────────────────────────────────────────────────

@@ -63,6 +63,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     reduce: None,
                     executor: def.executor.clone(),
                     async_dispatch: def.async_dispatch,
+                    oci_ref: def.oci_ref.clone(),
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -258,6 +259,7 @@ mod tests {
                 reduce: None,
                 executor: Default::default(),
                 async_dispatch: false,
+                oci_ref: None,
             },
         );
         jobs.insert(
@@ -279,6 +281,7 @@ mod tests {
                 reduce: None,
                 executor: Default::default(),
                 async_dispatch: false,
+                oci_ref: None,
             },
         );
 

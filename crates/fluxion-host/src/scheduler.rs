@@ -965,6 +965,7 @@ fn launch(
     let executor = wf.jobs[&job_id].executor.clone();
     let async_dispatch = wf.jobs[&job_id].async_dispatch;
     let component = wf.jobs[&job_id].component.clone();
+    let oci_ref = wf.jobs[&job_id].oci_ref.clone();
     let input = input_override.unwrap_or_else(|| {
         wf.jobs[&job_id]
             .input
@@ -996,6 +997,64 @@ fn launch(
                 }
             } else {
                 perms
+            };
+
+            // OCI auto-pull: if oci_ref is set, pull the component and write it to
+            // a temp file, then replace `component` for the rest of this invocation.
+            // The existing SHA-256 cache keys on wasm bytes, so the component is
+            // cached automatically after the first pull.
+            let (component, _oci_tmpfile) = if let Some(ref r) = oci_ref {
+                match crate::oci::pull(r).await {
+                    Ok(bytes) => {
+                        use std::io::Write as _;
+                        match tempfile::Builder::new()
+                            .suffix(".wasm")
+                            .tempfile()
+                            .and_then(|mut f| {
+                                f.write_all(&bytes)?;
+                                Ok(f)
+                            }) {
+                            Ok(f) => {
+                                let path = f.path().to_string_lossy().into_owned();
+                                (path, Some(f))
+                            }
+                            Err(e) => {
+                                let elapsed = start.elapsed();
+                                let _ = tx.send(JobEvent {
+                                    job_id: job_id.clone(),
+                                    status: JobStatus::Failed {
+                                        elapsed,
+                                        reason: format!("OCI tmp write failed: {e}"),
+                                    },
+                                    output: None,
+                                    compile_us: 0,
+                                    instantiate_us: 0,
+                                    execute_us: 0,
+                                });
+                                crate::metrics::ACTIVE_JOBS.dec();
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let elapsed = start.elapsed();
+                        let _ = tx.send(JobEvent {
+                            job_id: job_id.clone(),
+                            status: JobStatus::Failed {
+                                elapsed,
+                                reason: format!("OCI pull failed for '{}': {e}", r),
+                            },
+                            output: None,
+                            compile_us: 0,
+                            instantiate_us: 0,
+                            execute_us: 0,
+                        });
+                        crate::metrics::ACTIVE_JOBS.dec();
+                        return;
+                    }
+                }
+            } else {
+                (component, None)
             };
 
             // Verify SHA-256 digest before loading the component (supply-chain protection).
