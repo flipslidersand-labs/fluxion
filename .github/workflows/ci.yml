@@ -153,4 +153,5 @@ jobs:
     with:
       model: 'claude-haiku-4-5-20251001'
       fail-on-high: false
+      ignore-paths: "*.lock,*.toml"
     secrets: inherit
