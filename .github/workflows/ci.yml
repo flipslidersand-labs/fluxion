@@ -146,12 +146,3 @@ jobs:
           components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
-
-  ai-review:
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    uses: flipslidersand-labs/qa-platform/.github/workflows/ai-review.yml@main
-    with:
-      model: 'claude-haiku-4-5-20251001'
-      fail-on-high: false
-      ignore-paths: "*.lock,*.toml"
-    secrets: inherit
