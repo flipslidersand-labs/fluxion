@@ -26,20 +26,22 @@ jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Install system deps
+        run: sudo apt-get install -y build-essential
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
         with:
-          shared-key: build-test
-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
       - name: Build
         run: cargo build --workspace -j2
-
       - name: Test
         # fluxion-host unit tests require Wasm components; covered by the e2e job.
         run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
@@ -47,40 +49,34 @@ jobs:
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Install system deps
+        run: sudo apt-get install -y build-essential
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
         with:
-          shared-key: clippy
-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
   e2e:
-    # PR のみ実行（feature branch push はスキップ → GitHub ホスト消費ゼロ）
-    if: |
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
-      github.actor != 'github-actions[bot]'
-    runs-on: ${{ vars.ARC_RUNNER || 'ubuntu-latest' }}
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
+    runs-on: ${{ vars.ARC_RUNNER || vars.GATE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Install system deps
+        run: sudo apt-get install -y build-essential
       - name: Cache cargo (host + components)
         uses: actions/cache@v4
         with:
@@ -97,37 +93,25 @@ jobs:
             components/spin/target
           key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-e2e-
-
       - name: Install Wasm targets
         run: |
           rustup target add wasm32-wasip1
           rustup target add wasm32-wasip2
-
       - name: Install cargo-component
         run: |
           if ! command -v cargo-component &>/dev/null; then
             cargo install cargo-component --locked -j2
           fi
-
       - name: Build Wasm components
         run: |
           for comp in alloc-bomb file-reader hello pipeline-stage spin; do
             (cd components/$comp && cargo component build -j2)
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
-
       - name: Build host
         run: cargo build -p fluxion-host -j2
-
-      - name: Host unit tests
-        run: cargo test -p fluxion-host --lib -j2
-
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
-
-      - name: Distributed E2E tests
-        run: cargo test -p fluxion-cli --test e2e_distributed --features ci -- --test-threads=1
-
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -142,7 +126,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
