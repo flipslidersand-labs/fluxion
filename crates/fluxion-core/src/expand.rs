@@ -428,7 +428,13 @@ mod tests {
                 reduce: None,
             },
         );
-        let wf = Workflow { name: "t".to_string(), jobs, workers: vec![], max_parallel: None, workers_srv: None };
+        let wf = Workflow {
+            name: "t".to_string(),
+            jobs,
+            workers: vec![],
+            max_parallel: None,
+            workers_srv: None,
+        };
         let expanded = expand_foreach(&wf, None).unwrap();
         let fw = &expanded.workflow;
 
