@@ -23,18 +23,56 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # fmt + clippy + build + test を qa-workflows の reusable に集約。
-  # fluxion-host の unit test は Wasm component を要するため e2e job で担保し、
-  # ここでは core/cli/worker のみ対象（従来の build-test と同スコープ）。
-  checks:
+  build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
-    with:
-      runner: ubuntu-latest
-      test-args: "-p fluxion-core -p fluxion-cli -p fluxion-worker"
-      clippy-args: "--workspace"
-      system-deps: "build-essential libssl-dev pkg-config"
-      run-coverage: false
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install system deps
+        run: |
+          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
+          sudo apt-get install -y build-essential libssl-dev pkg-config
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build
+        run: cargo build --workspace -j2
+      - name: Test
+        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
+
+  clippy:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install system deps
+        run: |
+          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
+          sudo apt-get install -y build-essential libssl-dev pkg-config
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
 
   e2e:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
@@ -49,7 +87,9 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-wasip1,wasm32-wasip2
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev pkg-config
+        run: |
+          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
+          sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo (host + components)
         uses: actions/cache@v4
         with:
@@ -88,3 +128,14 @@ jobs:
           name: e2e-logs-${{ github.run_id }}
           path: /tmp/fluxion-e2e-*/
           retention-days: 7
+
+  fmt:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        run: cargo fmt --all -- --check
