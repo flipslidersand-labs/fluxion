@@ -30,6 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -48,6 +50,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -135,5 +139,8 @@ jobs:
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
