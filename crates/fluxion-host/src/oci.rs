@@ -47,7 +47,10 @@ pub struct Credentials {
 
 impl Credentials {
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self { username: username.into(), password: password.into() }
+        Self {
+            username: username.into(),
+            password: password.into(),
+        }
     }
 
     fn basic_header(&self) -> String {
@@ -79,7 +82,11 @@ impl OciClient {
             .use_rustls_tls()
             .build()
             .context("failed to build reqwest client")?;
-        Ok(Self { client, base_url: base_url.into(), credentials })
+        Ok(Self {
+            client,
+            base_url: base_url.into(),
+            credentials,
+        })
     }
 
     // ── Authorization ─────────────────────────────────────────────────────────
@@ -100,7 +107,10 @@ impl OciClient {
 
     /// `GET /v2/<repository>/manifests/<reference>`
     async fn fetch_manifest(&self, repository: &str, reference: &str) -> Result<OciManifest> {
-        let url = format!("{}/v2/{}/manifests/{}", self.base_url, repository, reference);
+        let url = format!(
+            "{}/v2/{}/manifests/{}",
+            self.base_url, repository, reference
+        );
         let rb = self
             .client
             .get(&url)
@@ -113,7 +123,9 @@ impl OciClient {
             bail!("GET {url} → {status}: {body}");
         }
 
-        resp.json::<OciManifest>().await.context("parse manifest JSON")
+        resp.json::<OciManifest>()
+            .await
+            .context("parse manifest JSON")
     }
 
     /// `GET /v2/<repository>/blobs/<digest>`
@@ -143,11 +155,7 @@ impl OciClient {
     /// 3. Verify SHA-256 digest against the manifest descriptor
     ///
     /// Returns the raw Wasm bytes.
-    pub async fn pull(
-        &self,
-        repository: &str,
-        reference: &str,
-    ) -> Result<Vec<u8>> {
+    pub async fn pull(&self, repository: &str, reference: &str) -> Result<Vec<u8>> {
         let manifest = self.fetch_manifest(repository, reference).await?;
 
         // Find the first Wasm layer.
@@ -166,7 +174,10 @@ impl OciClient {
 
         // Verify SHA-256.
         let actual_digest = sha256_digest(&bytes);
-        let expected = layer.digest.strip_prefix("sha256:").unwrap_or(&layer.digest);
+        let expected = layer
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&layer.digest);
         if actual_digest != expected {
             bail!(
                 "digest mismatch for {repository} layer {}: expected sha256:{expected}, got sha256:{actual_digest}",
@@ -253,7 +264,8 @@ impl OciClient {
         let config_bytes = b"{}";
         let config_digest = format!("sha256:{}", sha256_digest(config_bytes));
         // Push config blob (same two-step flow, but inline for brevity).
-        self.push_blob(repository, config_bytes).await
+        self.push_blob(repository, config_bytes)
+            .await
             .context("push config blob")?;
 
         let manifest = OciManifest {
@@ -274,7 +286,10 @@ impl OciClient {
         let manifest_json = serde_json::to_vec(&manifest).context("serialize manifest")?;
         let manifest_digest = format!("sha256:{}", sha256_digest(&manifest_json));
 
-        let manifest_url = format!("{}/v2/{}/manifests/{}", self.base_url, repository, reference);
+        let manifest_url = format!(
+            "{}/v2/{}/manifests/{}",
+            self.base_url, repository, reference
+        );
         let m_resp = self
             .add_auth(
                 self.client
