@@ -72,13 +72,14 @@ async fn get_api_runs_returns_empty_json() {
 
     let resp = client().get(&url).send().await.expect("request");
     assert_eq!(resp.status(), 200);
-    assert!(resp
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .contains("application/json"));
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body, serde_json::json!([]));
 }
@@ -161,4 +162,3 @@ async fn get_api_runs_id_jobs_returns_empty_for_known_run() {
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(parsed, serde_json::json!([]));
 }
-
