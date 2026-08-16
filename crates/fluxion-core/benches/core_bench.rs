@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fluxion_core::dag::Dag;
 use fluxion_core::store::RunStore;
-use fluxion_core::workflow::{JobDefinition, Workflow};
+use fluxion_core::workflow::{JobDefinition, NetworkPermission, PermissionSet, Workflow};
 use indexmap::IndexMap;
 
 // ── workflow fixtures ─────────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         output_size_limit_mb: None,
         fail_fast: false,
         component_sha256: None,
+        reduce: None,
     }
 }
 
@@ -120,5 +121,42 @@ fn bench_run_store(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_dag_build, bench_run_store);
+// ── PermissionSet benchmarks ──────────────────────────────────────────────────
+
+fn bench_permission_check(c: &mut Criterion) {
+    let mut group = c.benchmark_group("permission_check");
+
+    // deny-all: empty allowlist — the common fast path for sandboxed jobs
+    let deny_all = PermissionSet::default();
+    group.bench_function("network_deny_all", |b| {
+        b.iter(|| deny_all.network.is_deny_all())
+    });
+
+    // allow-list with 5 entries — checks whether addr is in the list
+    let mut allow5 = PermissionSet::default();
+    allow5.network = NetworkPermission {
+        allow: vec![
+            "127.0.0.1:8080".to_string(),
+            "10.0.0.1:443".to_string(),
+            "api.example.com:443".to_string(),
+            "db.internal:5432".to_string(),
+            "cache.internal:6379".to_string(),
+        ],
+    };
+    group.bench_function("network_allows_hit", |b| {
+        b.iter(|| allow5.network.allows("db.internal:5432"))
+    });
+    group.bench_function("network_allows_miss", |b| {
+        b.iter(|| allow5.network.allows("evil.example.com:1234"))
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_dag_build,
+    bench_run_store,
+    bench_permission_check
+);
 criterion_main!(benches);
