@@ -16,6 +16,8 @@ use fluxion_core::{
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
 
+use fluxion_core::workflow::ReduceMode;
+
 use crate::{FluxionHost, remote};
 
 /// Load-balancing strategy for distributing jobs across remote workers.
@@ -403,6 +405,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
             let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
             let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
+            let fanin_input = apply_custom_reduce(host.clone(), job_id, wf, fanin_input).await;
             launch(
                 job_id,
                 wf,
@@ -643,6 +646,13 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 foreach_map,
                                                 &job_outputs,
                                             );
+                                            let fanin_input = apply_custom_reduce(
+                                                host.clone(),
+                                                downstream,
+                                                wf,
+                                                fanin_input,
+                                            )
+                                            .await;
                                             launch(
                                                 downstream,
                                                 wf,
@@ -666,6 +676,8 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
                         let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
                         let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        let fanin_input =
+                            apply_custom_reduce(host.clone(), dep, wf, fanin_input).await;
                         launch(
                             dep,
                             wf,
@@ -710,32 +722,118 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
     })
 }
 
-/// Build fan-in input for a job with `input_from`.  Returns `None` if the job
-/// has no `input_from`, or if outputs are not yet available (falls back to the
-/// YAML `input` field).
+/// Build fan-in input for a job with `input_from`, applying the `reduce` strategy.
+///
+/// | `reduce` value | behaviour |
+/// |---|---|
+/// | absent / `json_array` | JSON array of child outputs (existing default) |
+/// | `concat` | raw byte concatenation of child outputs |
+/// | `json_merge` | deep-merge all child outputs (objects); non-objects fall back to array |
+/// | `custom: path` | child outputs forwarded as JSON array; Custom Wasm is invoked by the caller |
+///
+/// Returns `None` when the job has no `input_from`.
 fn build_fanin_input(
     job_id: &str,
     wf: &Workflow,
     foreach_map: &HashMap<String, Vec<String>>,
     job_outputs: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<u8>> {
+    use fluxion_core::workflow::ReduceMode;
+
     let def = wf.jobs.get(job_id)?;
     let src = def.input_from.as_deref()?;
     let children = foreach_map.get(src)?;
 
-    // Collect outputs in order, falling back to null for missing outputs.
-    let values: Vec<serde_json::Value> = children
+    let child_bytes: Vec<&[u8]> = children
         .iter()
-        .map(|child_id| {
-            if let Some(bytes) = job_outputs.get(child_id) {
-                serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
-            }
-        })
+        .map(|id| job_outputs.get(id).map(|b| b.as_slice()).unwrap_or(b"null"))
         .collect();
 
-    serde_json::to_vec(&values).ok()
+    match &def.reduce {
+        None | Some(ReduceMode::JsonArray) => {
+            let values: Vec<serde_json::Value> = child_bytes
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+
+        Some(ReduceMode::Concat) => {
+            let mut out = Vec::new();
+            for b in &child_bytes {
+                // skip the sentinel "null" bytes (missing outputs)
+                if *b != b"null" {
+                    out.extend_from_slice(b);
+                }
+            }
+            Some(out)
+        }
+
+        Some(ReduceMode::JsonMerge) => {
+            let mut merged = serde_json::Map::new();
+            for b in &child_bytes {
+                if let Ok(serde_json::Value::Object(obj)) = serde_json::from_slice(b) {
+                    for (k, v) in obj {
+                        merged.insert(k, v);
+                    }
+                }
+            }
+            if merged.is_empty() {
+                // Fall back to JsonArray when no children produce objects.
+                let values: Vec<serde_json::Value> = child_bytes
+                    .iter()
+                    .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                    .collect();
+                serde_json::to_vec(&values).ok()
+            } else {
+                serde_json::to_vec(&serde_json::Value::Object(merged)).ok()
+            }
+        }
+
+        Some(ReduceMode::Custom(_)) => {
+            // For Custom reduce, pass child outputs as a JSON array to the reducer Wasm.
+            // The caller (launch) is responsible for running the custom component.
+            let values: Vec<serde_json::Value> = child_bytes
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+    }
+}
+
+/// Apply `ReduceMode::Custom`: run the reducer Wasm component against the
+/// already-assembled JSON array input and return the reducer's output.
+/// For all other `ReduceMode` variants, returns the input unchanged.
+async fn apply_custom_reduce(
+    host: Arc<FluxionHost>,
+    job_id: &str,
+    wf: &Workflow,
+    input: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let def = wf.jobs.get(job_id)?;
+    let reducer_path = match &def.reduce {
+        Some(ReduceMode::Custom(p)) => p.clone(),
+        _ => return input,
+    };
+    let bytes = input?;
+    let perms = def.permissions.clone();
+    let env = def.env.clone();
+    match tokio::task::spawn_blocking(move || {
+        host.run_component_measured(&reducer_path, bytes, &perms, &env)
+    })
+    .await
+    {
+        Ok(Ok((out, _))) => Some(out),
+        Ok(Err(e)) => {
+            tracing::warn!(job = %job_id, error = %e, "custom reducer failed; using null");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(job = %job_id, error = %e, "custom reducer task panicked");
+            None
+        }
+    }
 }
 
 /// Print foreach group progress when a child job finishes.
@@ -1593,5 +1691,91 @@ mod tests {
                 "local executor should not trigger remote-worker validation: {e}"
             );
         }
+    }
+
+    // ── build_fanin_input reduce mode tests ──────────────────────────────────
+
+    fn make_wf_with_reduce(reduce_yaml: &str) -> Workflow {
+        let yaml = format!(
+            r#"
+name: t
+jobs:
+  step:
+    component: s.wasm
+    foreach: "$.items"
+    input: '{{"items":[1,2,3]}}'
+  agg:
+    component: a.wasm
+    depends_on: [step]
+    input_from: step
+    {reduce_yaml}
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn make_foreach_map() -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            "step".to_string(),
+            vec![
+                "step.0".to_string(),
+                "step.1".to_string(),
+                "step.2".to_string(),
+            ],
+        );
+        m
+    }
+
+    fn make_outputs(items: &[(&str, &[u8])]) -> HashMap<String, Vec<u8>> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn json_array_is_default_reduce() {
+        let wf = make_wf_with_reduce("");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"1"), ("step.1", b"2"), ("step.2", b"3")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn concat_reduce_joins_raw_bytes() {
+        let wf = make_wf_with_reduce("reduce: concat");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"hello"), ("step.1", b" "), ("step.2", b"world")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn json_merge_reduce_deep_merges_objects() {
+        let wf = make_wf_with_reduce("reduce: json_merge");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[
+            ("step.0", br#"{"a":1}"#),
+            ("step.1", br#"{"b":2}"#),
+            ("step.2", br#"{"c":3}"#),
+        ]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+        assert_eq!(v["c"], 3);
+    }
+
+    #[test]
+    fn json_merge_falls_back_to_array_when_no_objects() {
+        let wf = make_wf_with_reduce("reduce: json_merge");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"1"), ("step.1", b"2"), ("step.2", b"3")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!([1, 2, 3]));
     }
 }
