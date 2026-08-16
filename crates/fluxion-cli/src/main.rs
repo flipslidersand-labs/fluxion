@@ -482,7 +482,10 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
         Err(e) => {
             let msg = format!("Cannot read '{path}': {e}");
             if json {
-                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg], "warnings": []}));
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"ok": false, "errors": [msg], "warnings": []})
+                );
             } else {
                 eprintln!("✗ {msg}");
             }
@@ -496,7 +499,10 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
         Err(e) => {
             let msg = format!("YAML parse error: {e}");
             if json {
-                eprintln!("{}", serde_json::json!({"ok": false, "errors": [msg], "warnings": []}));
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"ok": false, "errors": [msg], "warnings": []})
+                );
             } else {
                 eprintln!("✗ YAML syntax error: {e}");
             }
@@ -533,16 +539,27 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         // DAG summary
-        if report.errors.iter().any(|e| matches!(e, fluxion_core::workflow::ValidationError::CyclicDependency)) {
+        if report
+            .errors
+            .iter()
+            .any(|e| matches!(e, fluxion_core::workflow::ValidationError::CyclicDependency))
+        {
             eprintln!("✗ DAG: cyclic dependency detected ({job_count} jobs)");
         } else {
             println!("✓ DAG: no cycles ({job_count} jobs)");
         }
 
         // Component paths
-        let missing: Vec<_> = report.errors.iter().filter(|e| {
-            matches!(e, fluxion_core::workflow::ValidationError::ComponentNotFound { .. })
-        }).collect();
+        let missing: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    fluxion_core::workflow::ValidationError::ComponentNotFound { .. }
+                )
+            })
+            .collect();
         if missing.is_empty() && !skip_wasm_check {
             println!("✓ Components: all {job_count} paths exist");
         } else if !missing.is_empty() {
@@ -551,7 +568,11 @@ fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
 
         // Remaining structural errors
         for err in &report.errors {
-            if !matches!(err, fluxion_core::workflow::ValidationError::CyclicDependency | fluxion_core::workflow::ValidationError::ComponentNotFound { .. }) {
+            if !matches!(
+                err,
+                fluxion_core::workflow::ValidationError::CyclicDependency
+                    | fluxion_core::workflow::ValidationError::ComponentNotFound { .. }
+            ) {
                 eprintln!("✗ {err}");
             }
         }
