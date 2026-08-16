@@ -177,6 +177,178 @@ pub async fn run_remote(
     Ok((output, metrics))
 }
 
+/// Dispatch a Wasm job to a remote worker via async POST /jobs + polling GET /jobs/:id.
+///
+/// Returns once the worker reports `succeeded` or `failed`, or when the
+/// polling deadline is reached. Timeout = `perms.limits.timeout_secs + 30`.
+pub async fn run_remote_async(
+    worker_url: &str,
+    wasm_path: impl AsRef<Path>,
+    input: Vec<u8>,
+    perms: &PermissionSet,
+    env: &HashMap<String, String>,
+    tls: Option<&TlsConfig>,
+) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
+    let wasm_bytes =
+        std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
+
+    // CAS probe + upload (same as run_remote).
+    let sha256 = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&wasm_bytes)
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    };
+    let base_url = worker_url.trim_end_matches('/');
+
+    let mut builder =
+        reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 30));
+    if let Some(tls) = tls {
+        let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
+        let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
+        let identity_pem = [cert_pem, key_pem].concat();
+        let identity = reqwest::Identity::from_pem(&identity_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_pem = std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        builder = builder
+            .identity(identity)
+            .add_root_certificate(ca_cert)
+            .use_rustls_tls();
+    }
+    let client = builder
+        .build()
+        .map_err(|e| RemoteError::Execution(e.into()))?;
+
+    let cas_check_url = format!("{}/components/{}", base_url, sha256);
+    let worker_has_component = client
+        .head(&cas_check_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    let cas_upload_ok = if !worker_has_component {
+        client
+            .put(format!("{}/components/{}", base_url, sha256))
+            .body(wasm_bytes.clone())
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
+    let body = if cas_upload_ok {
+        serde_json::json!({
+            "component_sha256": sha256,
+            "input": B64.encode(&input),
+            "permissions": perms,
+            "env": env,
+        })
+    } else {
+        serde_json::json!({
+            "component": B64.encode(&wasm_bytes),
+            "input": B64.encode(&input),
+            "permissions": perms,
+            "env": env,
+        })
+    };
+
+    // Submit the job.
+    let submit_url = format!("{}/jobs", base_url);
+    let resp = client
+        .post(&submit_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| RemoteError::Unreachable(anyhow::anyhow!("worker {}: {}", worker_url, e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(RemoteError::Execution(anyhow::anyhow!(
+            "worker {} POST /jobs returned {}: {}",
+            worker_url,
+            status,
+            text
+        )));
+    }
+
+    let submit_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| RemoteError::Execution(e.into()))?;
+    let job_id = submit_json["job_id"]
+        .as_str()
+        .ok_or_else(|| {
+            RemoteError::Execution(anyhow::anyhow!("missing job_id in submit response"))
+        })?
+        .to_string();
+
+    // Poll GET /jobs/:id until done or deadline.
+    let poll_url = format!("{}/jobs/{}", base_url, job_id);
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(perms.limits.timeout_secs + 30);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RemoteError::Execution(anyhow::anyhow!(
+                "async job {} timed out after {}s",
+                job_id,
+                perms.limits.timeout_secs + 30
+            )));
+        }
+
+        let poll_resp =
+            client.get(&poll_url).send().await.map_err(|e| {
+                RemoteError::Unreachable(anyhow::anyhow!("poll {}: {}", poll_url, e))
+            })?;
+
+        if !poll_resp.status().is_success() {
+            let status = poll_resp.status();
+            let text = poll_resp.text().await.unwrap_or_default();
+            return Err(RemoteError::Execution(anyhow::anyhow!(
+                "GET /jobs/{} returned {}: {}",
+                job_id,
+                status,
+                text
+            )));
+        }
+
+        let status_json: serde_json::Value = poll_resp
+            .json()
+            .await
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+
+        match status_json["status"].as_str().unwrap_or("running") {
+            "succeeded" => {
+                let output = B64
+                    .decode(status_json["output"].as_str().unwrap_or(""))
+                    .map_err(|e| RemoteError::Execution(e.into()))?;
+                return Ok((output, JobMetrics::default()));
+            }
+            "failed" => {
+                let err = status_json["error"]
+                    .as_str()
+                    .unwrap_or("unknown error")
+                    .to_string();
+                return Err(RemoteError::Execution(anyhow::anyhow!(
+                    "async job {} failed: {}",
+                    job_id,
+                    err
+                )));
+            }
+            _ => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
 /// Extract W3C Trace Context headers from the current `tracing` span.
 ///
 /// Returns `Some((traceparent, tracestate))` when inside an active OTel span.

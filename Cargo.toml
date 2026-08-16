@@ -5,7 +5,7 @@ members = [
     "crates/fluxion-host",
     "crates/fluxion-worker",
 ]
-exclude = ["components/hello", "components/file-reader", "components/network-probe", "components/pipeline-stage", "components/spin", "components/alloc-bomb"]
+exclude = ["components/hello", "components/file-reader", "components/network-probe", "components/pipeline-stage", "components/spin", "components/alloc-bomb", "components/python-hello"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -46,3 +46,5 @@ hickory-resolver  = "0.24"
 notify            = "6"
 criterion         = { version = "0.5", features = ["html_reports"] }
 serde_json_path   = "0.7"
+uuid              = { version = "1", features = ["v4"] }
+dashmap           = "6"

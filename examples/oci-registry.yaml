@@ -1,0 +1,18 @@
+name: oci-registry-demo
+
+# Demonstrate OCI auto-pull: the `oci_ref` field lets fluxion fetch a Wasm
+# component from an OCI-compatible registry at runtime, bypassing the local
+# `component:` path.
+#
+# Quick start (local registry):
+#   docker run -d -p 5000:5000 registry:2
+#   fluxion registry push components/hello/target/wasm32-wasip2/debug/hello.wasm \
+#     localhost:5000/fluxion/hello:latest
+#   fluxion run examples/oci-registry.yaml
+
+jobs:
+  greet:
+    # `component:` is ignored when `oci_ref` is set.
+    component: placeholder.wasm
+    oci_ref: localhost:5000/fluxion/hello:latest
+    input: '"hello from OCI registry"'

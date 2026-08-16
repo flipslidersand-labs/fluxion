@@ -26,40 +26,37 @@ jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: build-test
 
       - name: Build
         run: cargo build --workspace -j2
 
       - name: Test
-        run: cargo test --workspace -j2
+        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
 
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: clippy
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
@@ -74,8 +71,15 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo (host + components)
         uses: actions/cache@v4
@@ -115,8 +119,14 @@ jobs:
       - name: Build host
         run: cargo build -p fluxion-host -j2
 
+      - name: Host unit tests
+        run: cargo test -p fluxion-host --lib -j2
+
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
+
+      - name: Distributed E2E tests
+        run: cargo test -p fluxion-cli --test e2e_distributed --features ci -- --test-threads=1
 
       - name: Upload logs on failure
         if: failure()
@@ -131,6 +141,8 @@ jobs:
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Format check
         run: cargo fmt --all -- --check
-

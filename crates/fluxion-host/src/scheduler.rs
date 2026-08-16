@@ -11,10 +11,12 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, TlsConfig, Workflow},
+    workflow::{ExecutorKind, PermissionSet, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
+
+use fluxion_core::workflow::ReduceMode;
 
 use crate::{FluxionHost, remote};
 
@@ -321,11 +323,32 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         workers,
     } = opts;
     // ── Expand foreach jobs ─────────────────────────────────────────────────
+    // Static expand: jobs with `foreach:` AND a static `input:` field are expanded now.
+    // Jobs with `foreach:` but NO `input:` remain as dynamic templates; expanded at runtime.
     let expanded = expand_foreach(wf, None)?;
-    let wf = &expanded.workflow;
-    let foreach_map = &expanded.foreach_map;
+    let mut wf = expanded.workflow;
+    let mut foreach_map = expanded.foreach_map;
 
-    let dag = Dag::build(wf)?;
+    // Track which jobs are dynamic foreach templates (have `foreach` but no `input`).
+    let dynamic_templates: std::collections::HashSet<String> = wf
+        .jobs
+        .iter()
+        .filter(|(_, def)| def.foreach.is_some() && def.input.is_none())
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let mut dag = Dag::build(&wf)?;
+
+    // Validate: executor:remote jobs require at least one worker configured.
+    for (job_id, job) in &wf.jobs {
+        if job.executor == ExecutorKind::Remote && job.worker.is_none() && workers.is_empty() {
+            anyhow::bail!(
+                "job '{}' uses executor:remote but no workers are configured",
+                job_id
+            );
+        }
+    }
+
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
 
     let mut statuses: HashMap<String, JobStatus> = wf
@@ -367,10 +390,10 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             print_running(&job_id, pad);
         }
         store.upsert_job(run_id, &job_id, &JobStatus::Running)?;
-        let job_workers = resolve_workers(&job_id, wf, &workers, &rr, &strategy).await;
+        let job_workers = resolve_workers(&job_id, &wf, &workers, &rr, &strategy).await;
         launch(
             &job_id,
-            wf,
+            &wf,
             host.clone(),
             tx.clone(),
             job_workers,
@@ -390,11 +413,12 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 print_running(job_id, pad);
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
-            let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
-            let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
+            let job_workers = resolve_workers(job_id, &wf, &workers, &rr, &strategy).await;
+            let fanin_input = build_fanin_input(job_id, &wf, &foreach_map, &job_outputs);
+            let fanin_input = apply_custom_reduce(host.clone(), job_id, &wf, fanin_input).await;
             launch(
                 job_id,
-                wf,
+                &wf,
                 host.clone(),
                 tx.clone(),
                 job_workers,
@@ -442,7 +466,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
                 // Print foreach group progress if applicable
                 if print_progress {
-                    print_foreach_progress(&event.job_id, foreach_map, &statuses, pad);
+                    print_foreach_progress(&event.job_id, &foreach_map, &statuses, pad);
                 }
             }
             JobStatus::Failed { elapsed, reason } => {
@@ -510,7 +534,17 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         }
 
         if overall_success {
-            for dep in dag.dependents.get(&event.job_id).into_iter().flatten() {
+            // Collect dependents into a Vec so we can mutate `dag`/`wf` inside the loop
+            // (needed for dynamic foreach expansion which inserts new nodes at runtime).
+            let ready_deps: Vec<String> = dag
+                .dependents
+                .get(&event.job_id)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+
+            for dep in &ready_deps {
                 if pre_succeeded.contains_key(dep) {
                     continue;
                 }
@@ -521,6 +555,125 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         JobStatus::Succeeded { .. } | JobStatus::Skipped | JobStatus::Cancelled
                     )
                 });
+                if all_done && dynamic_templates.contains(dep) {
+                    // ── Dynamic foreach expansion ────────────────────────────────────
+                    // The template job had no static input; expand now using the output
+                    // of the predecessor that just completed.
+                    let predecessor_output = job_outputs
+                        .get(&event.job_id)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(b"");
+                    let template_def = wf.jobs[dep].clone();
+                    match fluxion_core::expand::expand_foreach_dynamic(
+                        dep,
+                        &template_def,
+                        predecessor_output,
+                    ) {
+                        Ok(children) => {
+                            let child_ids: Vec<String> =
+                                children.iter().map(|(id, _)| id.clone()).collect();
+
+                            // Register children in wf and statuses.
+                            for (id, child_def) in &children {
+                                wf.jobs.insert(id.clone(), child_def.clone());
+                                statuses.insert(id.clone(), JobStatus::Pending);
+                            }
+
+                            // Mark template as immediately succeeded (it "ran" by expanding).
+                            let zero = std::time::Duration::ZERO;
+                            wf.jobs.shift_remove(dep);
+                            store.upsert_job(
+                                run_id,
+                                dep,
+                                &JobStatus::Succeeded { elapsed: zero },
+                            )?;
+                            statuses.insert(dep.clone(), JobStatus::Succeeded { elapsed: zero });
+
+                            // Update foreach_map with the actual children.
+                            foreach_map.insert(dep.clone(), child_ids.clone());
+
+                            // Insert children into the DAG.
+                            let child_deps: std::collections::HashMap<String, Vec<String>> =
+                                child_ids
+                                    .iter()
+                                    .map(|id| (id.clone(), template_def.depends_on.clone()))
+                                    .collect();
+                            dag.insert_nodes(&child_ids, &child_deps);
+
+                            // Update any fan-in jobs (input_from = dep) to wait for
+                            // the actual children instead of the template.
+                            let fanin_jobs: Vec<String> = wf
+                                .jobs
+                                .iter()
+                                .filter(|(_, d)| d.input_from.as_deref() == Some(dep.as_str()))
+                                .map(|(id, _)| id.clone())
+                                .collect();
+                            for fanin_id in &fanin_jobs {
+                                let fanin_def = wf.jobs.get_mut(fanin_id).unwrap();
+                                fanin_def.depends_on.retain(|d| d != dep);
+                                for child_id in &child_ids {
+                                    if !fanin_def.depends_on.contains(child_id) {
+                                        fanin_def.depends_on.push(child_id.clone());
+                                    }
+                                }
+                                dag.deps
+                                    .insert(fanin_id.clone(), fanin_def.depends_on.clone());
+                                if let Some(v) = dag.dependents.get_mut(dep.as_str()) {
+                                    v.retain(|d| d != fanin_id);
+                                }
+                                for child_id in &child_ids {
+                                    dag.dependents
+                                        .entry(child_id.clone())
+                                        .or_default()
+                                        .push(fanin_id.clone());
+                                }
+                                statuses.insert(fanin_id.clone(), JobStatus::Pending);
+                            }
+
+                            // Launch all expanded children immediately.
+                            for child_id in &child_ids {
+                                if print_progress {
+                                    print_running(child_id, pad);
+                                }
+                                store.upsert_job(run_id, child_id, &JobStatus::Running)?;
+                                statuses.insert(child_id.clone(), JobStatus::Running);
+                                let child_workers =
+                                    resolve_workers(child_id, &wf, &workers, &rr, &strategy).await;
+                                launch(
+                                    child_id,
+                                    &wf,
+                                    host.clone(),
+                                    tx.clone(),
+                                    child_workers,
+                                    sem.clone(),
+                                    None,
+                                );
+                                in_flight += 1;
+                            }
+                        }
+                        Err(e) => {
+                            let reason = format!("dynamic foreach expansion failed: {e}");
+                            store.upsert_job(
+                                run_id,
+                                dep,
+                                &JobStatus::Failed {
+                                    elapsed: std::time::Duration::ZERO,
+                                    reason: reason.clone(),
+                                },
+                            )?;
+                            statuses.insert(
+                                dep.clone(),
+                                JobStatus::Failed {
+                                    elapsed: std::time::Duration::ZERO,
+                                    reason,
+                                },
+                            );
+                            overall_success = false;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if all_done {
                     let job_def = &wf.jobs[dep];
 
@@ -623,18 +776,25 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 &JobStatus::Running,
                                             )?;
                                             let dw_workers = resolve_workers(
-                                                downstream, wf, &workers, &rr, &strategy,
+                                                downstream, &wf, &workers, &rr, &strategy,
                                             )
                                             .await;
                                             let fanin_input = build_fanin_input(
                                                 downstream,
-                                                wf,
-                                                foreach_map,
+                                                &wf,
+                                                &foreach_map,
                                                 &job_outputs,
                                             );
+                                            let fanin_input = apply_custom_reduce(
+                                                host.clone(),
+                                                downstream,
+                                                &wf,
+                                                fanin_input,
+                                            )
+                                            .await;
                                             launch(
                                                 downstream,
-                                                wf,
+                                                &wf,
                                                 host.clone(),
                                                 tx.clone(),
                                                 dw_workers,
@@ -653,11 +813,13 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                             print_running(dep, pad);
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
-                        let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
-                        let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        let dep_workers = resolve_workers(dep, &wf, &workers, &rr, &strategy).await;
+                        let fanin_input = build_fanin_input(dep, &wf, &foreach_map, &job_outputs);
+                        let fanin_input =
+                            apply_custom_reduce(host.clone(), dep, &wf, fanin_input).await;
                         launch(
                             dep,
-                            wf,
+                            &wf,
                             host.clone(),
                             tx.clone(),
                             dep_workers,
@@ -699,32 +861,118 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
     })
 }
 
-/// Build fan-in input for a job with `input_from`.  Returns `None` if the job
-/// has no `input_from`, or if outputs are not yet available (falls back to the
-/// YAML `input` field).
+/// Build fan-in input for a job with `input_from`, applying the `reduce` strategy.
+///
+/// | `reduce` value | behaviour |
+/// |---|---|
+/// | absent / `json_array` | JSON array of child outputs (existing default) |
+/// | `concat` | raw byte concatenation of child outputs |
+/// | `json_merge` | deep-merge all child outputs (objects); non-objects fall back to array |
+/// | `custom: path` | child outputs forwarded as JSON array; Custom Wasm is invoked by the caller |
+///
+/// Returns `None` when the job has no `input_from`.
 fn build_fanin_input(
     job_id: &str,
     wf: &Workflow,
     foreach_map: &HashMap<String, Vec<String>>,
     job_outputs: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<u8>> {
+    use fluxion_core::workflow::ReduceMode;
+
     let def = wf.jobs.get(job_id)?;
     let src = def.input_from.as_deref()?;
     let children = foreach_map.get(src)?;
 
-    // Collect outputs in order, falling back to null for missing outputs.
-    let values: Vec<serde_json::Value> = children
+    let child_bytes: Vec<&[u8]> = children
         .iter()
-        .map(|child_id| {
-            if let Some(bytes) = job_outputs.get(child_id) {
-                serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
-            }
-        })
+        .map(|id| job_outputs.get(id).map(|b| b.as_slice()).unwrap_or(b"null"))
         .collect();
 
-    serde_json::to_vec(&values).ok()
+    match &def.reduce {
+        None | Some(ReduceMode::JsonArray) => {
+            let values: Vec<serde_json::Value> = child_bytes
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+
+        Some(ReduceMode::Concat) => {
+            let mut out = Vec::new();
+            for b in &child_bytes {
+                // skip the sentinel "null" bytes (missing outputs)
+                if *b != b"null" {
+                    out.extend_from_slice(b);
+                }
+            }
+            Some(out)
+        }
+
+        Some(ReduceMode::JsonMerge) => {
+            let mut merged = serde_json::Map::new();
+            for b in &child_bytes {
+                if let Ok(serde_json::Value::Object(obj)) = serde_json::from_slice(b) {
+                    for (k, v) in obj {
+                        merged.insert(k, v);
+                    }
+                }
+            }
+            if merged.is_empty() {
+                // Fall back to JsonArray when no children produce objects.
+                let values: Vec<serde_json::Value> = child_bytes
+                    .iter()
+                    .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                    .collect();
+                serde_json::to_vec(&values).ok()
+            } else {
+                serde_json::to_vec(&serde_json::Value::Object(merged)).ok()
+            }
+        }
+
+        Some(ReduceMode::Custom(_)) => {
+            // For Custom reduce, pass child outputs as a JSON array to the reducer Wasm.
+            // The caller (launch) is responsible for running the custom component.
+            let values: Vec<serde_json::Value> = child_bytes
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+    }
+}
+
+/// Apply `ReduceMode::Custom`: run the reducer Wasm component against the
+/// already-assembled JSON array input and return the reducer's output.
+/// For all other `ReduceMode` variants, returns the input unchanged.
+async fn apply_custom_reduce(
+    host: Arc<FluxionHost>,
+    job_id: &str,
+    wf: &Workflow,
+    input: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let def = wf.jobs.get(job_id)?;
+    let reducer_path = match &def.reduce {
+        Some(ReduceMode::Custom(p)) => p.clone(),
+        _ => return input,
+    };
+    let bytes = input?;
+    let perms = def.permissions.clone();
+    let env = def.env.clone();
+    match tokio::task::spawn_blocking(move || {
+        host.run_component_measured(&reducer_path, bytes, &perms, &env)
+    })
+    .await
+    {
+        Ok(Ok((out, _))) => Some(out),
+        Ok(Err(e)) => {
+            tracing::warn!(job = %job_id, error = %e, "custom reducer failed; using null");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(job = %job_id, error = %e, "custom reducer task panicked");
+            None
+        }
+    }
 }
 
 /// Print foreach group progress when a child job finishes.
@@ -892,6 +1140,53 @@ async fn run_with_failover(
     unreachable!("resolve_workers never returns an empty list here")
 }
 
+/// Async variant of `run_with_failover` — uses POST /jobs + polling GET /jobs/:id.
+/// The timeout is embedded inside `run_remote_async` (perms.limits.timeout_secs + 30).
+async fn run_with_failover_async(
+    workers: &[WorkerInfo],
+    component: &str,
+    input: &[u8],
+    perms: &PermissionSet,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<(Vec<u8>, crate::JobMetrics)> {
+    let mut tried: Vec<String> = Vec::new();
+    for (i, worker) in workers.iter().enumerate() {
+        let last = i + 1 == workers.len();
+        match remote::run_remote_async(
+            &worker.url,
+            component,
+            input.to_vec(),
+            perms,
+            env,
+            worker.tls.as_ref(),
+        )
+        .await
+        {
+            Ok(r) => {
+                crate::metrics::WORKER_HEALTH
+                    .with_label_values(&[&worker.url])
+                    .set(1.0);
+                return Ok(r);
+            }
+            Err(e) => {
+                tried.push(format!("{}: {e}", worker.url));
+                if e.is_failover() && !last {
+                    crate::metrics::WORKER_HEALTH
+                        .with_label_values(&[&worker.url])
+                        .set(0.0);
+                    tracing::warn!(worker = %worker.url, error = %e, "async worker unreachable, failing over");
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "async job dispatch failed [{}]",
+                    tried.join("; ")
+                ));
+            }
+        }
+    }
+    unreachable!("resolve_workers never returns an empty list here")
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
@@ -904,7 +1199,10 @@ fn launch(
 ) {
     crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
+    let executor = wf.jobs[&job_id].executor.clone();
+    let async_dispatch = wf.jobs[&job_id].async_dispatch;
     let component = wf.jobs[&job_id].component.clone();
+    let oci_ref = wf.jobs[&job_id].oci_ref.clone();
     let input = input_override.unwrap_or_else(|| {
         wf.jobs[&job_id]
             .input
@@ -938,6 +1236,64 @@ fn launch(
                 perms
             };
 
+            // OCI auto-pull: if oci_ref is set, pull the component and write it to
+            // a temp file, then replace `component` for the rest of this invocation.
+            // The existing SHA-256 cache keys on wasm bytes, so the component is
+            // cached automatically after the first pull.
+            let (component, _oci_tmpfile) = if let Some(ref r) = oci_ref {
+                match crate::oci::pull(r).await {
+                    Ok(bytes) => {
+                        use std::io::Write as _;
+                        match tempfile::Builder::new()
+                            .suffix(".wasm")
+                            .tempfile()
+                            .and_then(|mut f| {
+                                f.write_all(&bytes)?;
+                                Ok(f)
+                            }) {
+                            Ok(f) => {
+                                let path = f.path().to_string_lossy().into_owned();
+                                (path, Some(f))
+                            }
+                            Err(e) => {
+                                let elapsed = start.elapsed();
+                                let _ = tx.send(JobEvent {
+                                    job_id: job_id.clone(),
+                                    status: JobStatus::Failed {
+                                        elapsed,
+                                        reason: format!("OCI tmp write failed: {e}"),
+                                    },
+                                    output: None,
+                                    compile_us: 0,
+                                    instantiate_us: 0,
+                                    execute_us: 0,
+                                });
+                                crate::metrics::ACTIVE_JOBS.dec();
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let elapsed = start.elapsed();
+                        let _ = tx.send(JobEvent {
+                            job_id: job_id.clone(),
+                            status: JobStatus::Failed {
+                                elapsed,
+                                reason: format!("OCI pull failed for '{}': {e}", r),
+                            },
+                            output: None,
+                            compile_us: 0,
+                            instantiate_us: 0,
+                            execute_us: 0,
+                        });
+                        crate::metrics::ACTIVE_JOBS.dec();
+                        return;
+                    }
+                }
+            } else {
+                (component, None)
+            };
+
             // Verify SHA-256 digest before loading the component (supply-chain protection).
             if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref())
             {
@@ -957,23 +1313,40 @@ fn launch(
                 return;
             }
 
-            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
-                let c = component.clone();
-                let p = perms.clone();
-                let e = env.clone();
-                let i = input.clone();
-                match tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
-                    tokio::task::spawn_blocking(move || host.run_component_measured(&c, i, &p, &e)),
-                )
-                .await
-                {
-                    Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
-                    Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
-                    Ok(Ok(r)) => r,
+            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = match executor {
+                ExecutorKind::Remote => {
+                    if async_dispatch {
+                        run_with_failover_async(&workers, &component, &input, &perms, &env).await
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_secs(timeout_secs),
+                            run_with_failover(&workers, &component, &input, &perms, &env),
+                        )
+                        .await
+                        {
+                            Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                            Ok(r) => r,
+                        }
+                    }
                 }
-            } else {
-                run_with_failover(&workers, &component, &input, &perms, &env).await
+                ExecutorKind::Local => {
+                    let c = component.clone();
+                    let p = perms.clone();
+                    let e = env.clone();
+                    let i = input.clone();
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            host.run_component_measured(&c, i, &p, &e)
+                        }),
+                    )
+                    .await
+                    {
+                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                        Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
+                        Ok(Ok(r)) => r,
+                    }
+                }
             };
 
             let elapsed = start.elapsed();
@@ -1387,5 +1760,161 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(&d1), "error should list {d1}: {msg}");
         assert!(msg.contains(&d2), "error should list {d2}: {msg}");
+    }
+
+    // ── ExecutorKind dispatch validation ─────────────────────────────────────
+
+    fn wf_with_executor(executor: &str, has_workers: bool) -> Workflow {
+        let workers_json = if has_workers {
+            r#"[{"url":"http://w1"}]"#.to_string()
+        } else {
+            "[]".to_string()
+        };
+        let s = format!(
+            r#"{{"name":"t","jobs":{{"j":{{"component":"x.wasm","executor":"{executor}"}}}},"workers":{workers_json}}}"#
+        );
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remote_executor_without_workers_is_rejected() {
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("remote", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        let err = execute(&wf, opts).await.expect_err("should fail");
+        assert!(
+            err.to_string().contains("executor:remote"),
+            "error should mention executor:remote: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_executor_without_workers_is_accepted_at_validation() {
+        // Just tests that execute() doesn't bail on executor:local with no workers.
+        // The job itself will fail (no wasm), but the validation passes.
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("local", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run2",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        // Should not fail with the "executor:remote without workers" error.
+        // It may fail for other reasons (e.g., missing wasm file), but that's OK.
+        let result = execute(&wf, opts).await;
+        if let Err(ref e) = result {
+            assert!(
+                !e.to_string().contains("executor:remote"),
+                "local executor should not trigger remote-worker validation: {e}"
+            );
+        }
+    }
+
+    // ── build_fanin_input reduce mode tests ──────────────────────────────────
+
+    fn make_wf_with_reduce(reduce_yaml: &str) -> Workflow {
+        let yaml = format!(
+            r#"
+name: t
+jobs:
+  step:
+    component: s.wasm
+    foreach: "$.items"
+    input: '{{"items":[1,2,3]}}'
+  agg:
+    component: a.wasm
+    depends_on: [step]
+    input_from: step
+    {reduce_yaml}
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn make_foreach_map() -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            "step".to_string(),
+            vec![
+                "step.0".to_string(),
+                "step.1".to_string(),
+                "step.2".to_string(),
+            ],
+        );
+        m
+    }
+
+    fn make_outputs(items: &[(&str, &[u8])]) -> HashMap<String, Vec<u8>> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn json_array_is_default_reduce() {
+        let wf = make_wf_with_reduce("");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"1"), ("step.1", b"2"), ("step.2", b"3")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn concat_reduce_joins_raw_bytes() {
+        let wf = make_wf_with_reduce("reduce: concat");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"hello"), ("step.1", b" "), ("step.2", b"world")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        assert_eq!(result, b"hello world");
+    }
+
+    #[test]
+    fn json_merge_reduce_deep_merges_objects() {
+        let wf = make_wf_with_reduce("reduce: json_merge");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[
+            ("step.0", br#"{"a":1}"#),
+            ("step.1", br#"{"b":2}"#),
+            ("step.2", br#"{"c":3}"#),
+        ]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+        assert_eq!(v["c"], 3);
+    }
+
+    #[test]
+    fn json_merge_falls_back_to_array_when_no_objects() {
+        let wf = make_wf_with_reduce("reduce: json_merge");
+        let foreach_map = make_foreach_map();
+        let outputs = make_outputs(&[("step.0", b"1"), ("step.1", b"2"), ("step.2", b"3")]);
+        let result = build_fanin_input("agg", &wf, &foreach_map, &outputs).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!([1, 2, 3]));
     }
 }
