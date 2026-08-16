@@ -90,9 +90,13 @@ fn cache_base_dir() -> PathBuf {
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
+    // Use a unique temp file in the same directory to avoid concurrent writers
+    // corrupting each other's in-progress writes when two threads cache the
+    // same component simultaneously.
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut tmp, data)?;
+    tmp.persist(path)?;
     Ok(())
 }
 
