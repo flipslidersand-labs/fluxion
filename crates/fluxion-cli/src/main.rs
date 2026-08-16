@@ -159,6 +159,9 @@ enum WorkerCommands {
         /// Expose Prometheus /metrics on this port
         #[arg(long)]
         metrics_port: Option<u16>,
+        /// Enable async job endpoints (POST /jobs, GET /jobs/:id) in addition to POST /run
+        #[arg(long)]
+        async_jobs: bool,
         /// Path to the PEM-encoded server TLS certificate (enables TLS/mTLS)
         #[arg(long, requires = "tls_key", requires = "ca_cert")]
         tls_cert: Option<PathBuf>,
@@ -335,6 +338,7 @@ async fn run(command: Commands) -> Result<()> {
             WorkerCommands::Serve {
                 port,
                 metrics_port,
+                async_jobs,
                 tls_cert,
                 tls_key,
                 ca_cert,
@@ -345,7 +349,7 @@ async fn run(command: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                fluxion_worker::serve(port, metrics_port, tls).await?;
+                fluxion_worker::serve(port, metrics_port, async_jobs, tls).await?;
             }
             WorkerCommands::Register { url } => {
                 let store = RunStore::open()?;
