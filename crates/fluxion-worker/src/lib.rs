@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use dashmap::DashMap;
 use fluxion_core::workflow::PermissionSet;
 use fluxion_host::FluxionHost;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 /// Global counter of jobs currently executing on this worker.
 /// Reported in the `/health` response so the host-side scheduler can
@@ -69,6 +71,132 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+// ── Async job store ───────────────────────────────────────────────────────────
+
+/// In-memory record for an async job.
+#[derive(Clone, Serialize)]
+pub struct JobEntry {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+type JobStore = Arc<DashMap<String, JobEntry>>;
+
+/// Shared state threaded through all axum handlers.
+#[derive(Clone)]
+pub struct WorkerState {
+    host: Arc<FluxionHost>,
+    jobs: JobStore,
+}
+
+// ── POST /jobs ────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct SubmitResponse {
+    job_id: String,
+}
+
+async fn handle_submit_job(
+    State(state): State<WorkerState>,
+    Json(req): Json<RunRequest>,
+) -> Result<(StatusCode, Json<SubmitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let job_id = Uuid::new_v4().to_string();
+
+    state.jobs.insert(
+        job_id.clone(),
+        JobEntry {
+            status: "running".into(),
+            output: None,
+            error: None,
+        },
+    );
+
+    let state2 = state.clone();
+    let jid = job_id.clone();
+    tokio::spawn(async move {
+        let result = run_request_inner(&state2.host, req).await;
+        let entry = match result {
+            Ok(output_b64) => JobEntry {
+                status: "succeeded".into(),
+                output: Some(output_b64),
+                error: None,
+            },
+            Err(msg) => JobEntry {
+                status: "failed".into(),
+                output: None,
+                error: Some(msg),
+            },
+        };
+        state2.jobs.insert(jid, entry);
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(SubmitResponse { job_id })))
+}
+
+// ── GET /jobs/:id ─────────────────────────────────────────────────────────────
+
+async fn handle_get_job(
+    State(state): State<WorkerState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<JobEntry>, (StatusCode, Json<ErrorResponse>)> {
+    match state.jobs.get(&id) {
+        Some(entry) => Ok(Json(entry.clone())),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("job {id} not found"),
+            }),
+        )),
+    }
+}
+
+// ── Shared run logic (used by both sync POST /run and async POST /jobs) ───────
+
+async fn run_request_inner(host: &Arc<FluxionHost>, req: RunRequest) -> Result<String, String> {
+    let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
+        let p = cas_path(sha256);
+        if p.exists() {
+            CAS_HITS.fetch_add(1, Ordering::Relaxed);
+            std::fs::read(&p).map_err(|e| e.to_string())?
+        } else {
+            CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            match &req.component {
+                Some(b64) => B64.decode(b64).map_err(|e| e.to_string())?,
+                None => return Err(format!("component {sha256} not in CAS")),
+            }
+        }
+    } else {
+        CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+        let b64 = req.component.as_deref().unwrap_or("");
+        B64.decode(b64).map_err(|e| e.to_string())?
+    };
+
+    let input = B64.decode(&req.input).map_err(|e| e.to_string())?;
+
+    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    tmp.write_all(&component_bytes).map_err(|e| e.to_string())?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    let perms = req.permissions;
+    let env = req.env;
+    let host = Arc::clone(host);
+
+    ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
+    let res = tokio::task::spawn_blocking(move || {
+        host.run_component_measured(&tmp_path, input, &perms, &env)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
+    ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
+
+    let (output, _metrics) = res?;
+    Ok(B64.encode(&output))
+}
+
 /// mTLS configuration for the worker server.
 pub struct WorkerTls {
     /// Path to the PEM-encoded server certificate.
@@ -82,9 +210,10 @@ pub struct WorkerTls {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 async fn handle_run(
-    State(host): State<Arc<FluxionHost>>,
+    State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let host = &state.host;
     // Resolve component bytes: try CAS first, fall back to inline bytes.
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
         let p = cas_path(sha256);
@@ -166,6 +295,7 @@ async fn handle_run(
 
     let perms = req.permissions;
     let env = req.env;
+    let host = Arc::clone(host);
 
     ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
     let result = tokio::task::spawn_blocking(move || {
@@ -262,7 +392,10 @@ async fn handle_cas_put(
 // ── Server ────────────────────────────────────────────────────────────────────
 
 pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>) -> Result<()> {
-    let host = Arc::new(FluxionHost::new()?);
+    let state = WorkerState {
+        host: Arc::new(FluxionHost::new()?),
+        jobs: Arc::new(DashMap::new()),
+    };
 
     if let Some(mp) = metrics_port {
         tokio::spawn(fluxion_host::metrics::serve(mp));
@@ -270,10 +403,12 @@ pub async fn serve(port: u16, metrics_port: Option<u16>, tls: Option<WorkerTls>)
 
     let app = Router::new()
         .route("/run", post(handle_run))
+        .route("/jobs", post(handle_submit_job))
+        .route("/jobs/:id", get(handle_get_job))
         .route("/health", get(handle_health))
         .route("/components/{sha256}", head(handle_cas_head))
         .route("/components/{sha256}", put(handle_cas_put))
-        .with_state(host);
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
 
