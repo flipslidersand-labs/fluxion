@@ -1070,6 +1070,7 @@ dependencies = [
  "opentelemetry",
  "prometheus",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

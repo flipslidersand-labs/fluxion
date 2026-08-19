@@ -44,6 +44,11 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    /// Construct a `RunStore` from an already-open connection (useful in tests).
+    pub fn from_conn(conn: Connection) -> Self {
+        Self { conn }
+    }
+
     pub fn open() -> Result<Self> {
         let db_path = Self::db_path();
         if let Some(parent) = db_path.parent() {

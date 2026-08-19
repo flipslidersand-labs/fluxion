@@ -18,7 +18,8 @@ pub struct ApiState {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/runs", get(list_runs))
-        .route("/api/runs/{id}/jobs", get(list_run_jobs))
+        // Use singular /api/run/:id/jobs to avoid matchit prefix collision with /api/runs.
+        .route("/api/run/:id/jobs", get(list_run_jobs))
         .route("/api/schedules", get(list_schedules))
         .route("/api/workers", get(list_workers))
         .route("/metrics", get(metrics))
