@@ -456,6 +456,22 @@ fn validate_existing_component_passes() {
         .success();
 }
 
+// ── #98 — fluxion serve ───────────────────────────────────────────────────────
+
+#[test]
+fn serve_help_exits_ok() {
+    fluxion().args(["serve", "--help"]).assert().success();
+}
+
+#[test]
+fn serve_help_contains_port_flag() {
+    fluxion()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--port"));
+}
+
 // ── #86 — fluxion watch ───────────────────────────────────────────────────────
 
 #[test]
