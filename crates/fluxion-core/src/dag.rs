@@ -47,6 +47,40 @@ impl Dag {
             .map(|(id, _)| id.clone())
             .collect()
     }
+
+    /// Insert new nodes into the DAG without a full rebuild.
+    ///
+    /// `new_jobs` maps new job IDs to their dependency lists. All dependency IDs must
+    /// already exist in the DAG (this is asserted) — cycles are not checked (the caller
+    /// is responsible for correctness, typically by only inserting children of a dynamic
+    /// foreach expansion where the deps are the parent's deps).
+    ///
+    /// The topological ordering is extended: new nodes are appended after the latest
+    /// dependency in the existing order, which is correct for leaf-only insertions.
+    pub fn insert_nodes(&mut self, new_jobs: &HashMap<String, Vec<String>>) {
+        for (job_id, deps) in new_jobs {
+            self.deps.insert(job_id.clone(), deps.clone());
+            self.dependents.insert(job_id.clone(), vec![]);
+            for dep in deps {
+                self.dependents
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(job_id.clone());
+            }
+            self.topo_order.push(job_id.clone());
+        }
+    }
+
+    /// Remove a node and all references to it from the DAG.
+    /// Used when replacing a dynamic foreach placeholder with its expanded children.
+    pub fn remove_node(&mut self, job_id: &str) {
+        self.deps.remove(job_id);
+        self.dependents.remove(job_id);
+        self.topo_order.retain(|id| id != job_id);
+        for waiters in self.dependents.values_mut() {
+            waiters.retain(|id| id != job_id);
+        }
+    }
 }
 
 /// Kahn's algorithm: topological sort. Errors on cycle.

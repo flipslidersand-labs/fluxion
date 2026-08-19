@@ -1,0 +1,24 @@
+name: dynamic-fanout
+# Demonstrates dynamic foreach expansion:
+# The 'process' job has foreach but no static input — it is expanded at runtime
+# using the output of the 'fetch' job as the array source.
+#
+# Expected flow:
+#   1. fetch runs and emits {"items": ["a", "b", "c"]}
+#   2. process is expanded into process.0, process.1, process.2
+#   3. All three run in parallel
+#   4. aggregate collects their outputs via input_from: process
+jobs:
+  fetch:
+    component: ./components/hello/target/wasm32-wasip1/debug/hello.wasm
+    input: '{"items": ["a", "b", "c"]}'
+
+  process:
+    component: ./components/hello/target/wasm32-wasip1/debug/hello.wasm
+    foreach: "$.items"
+    depends_on: [fetch]
+
+  aggregate:
+    component: ./components/hello/target/wasm32-wasip1/debug/hello.wasm
+    depends_on: [process]
+    input_from: process
