@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fluxion Dashboard</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f8f9fa; color: #212529; }
+    h1 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    th { background: #343a40; color: #fff; text-align: left; padding: .6rem 1rem; font-size: .85rem; }
+    td { padding: .6rem 1rem; border-bottom: 1px solid #dee2e6; font-size: .9rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f1f3f5; }
+    .badge { display: inline-block; padding: .2rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 600; }
+    .badge-running   { background: #d0ebff; color: #1864ab; }
+    .badge-succeeded { background: #d3f9d8; color: #1b5e20; }
+    .badge-failed    { background: #ffe3e3; color: #c62828; }
+    .badge-pending   { background: #f1f3f5; color: #495057; }
+    a { color: #1971c2; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Fluxion Dashboard</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Run ID</th>
+        <th>Workflow</th>
+        <th>Status</th>
+        <th>Started At</th>
+      </tr>
+    </thead>
+    <tbody
+      hx-get="/ui/runs"
+      hx-trigger="load, every 5s"
+      hx-swap="innerHTML">
+      <tr><td colspan="4">Loading…</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

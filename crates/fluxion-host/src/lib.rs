@@ -3,6 +3,7 @@ pub mod cache;
 pub mod metrics;
 pub mod remote;
 pub mod scheduler;
+pub mod ui;
 pub mod worker_registry;
 
 use anyhow::{Context, Result};
