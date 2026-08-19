@@ -11,7 +11,7 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, TlsConfig, Workflow},
+    workflow::{PermissionSet, ReduceMode, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
@@ -391,7 +391,8 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
             }
             store.upsert_job(run_id, job_id, &JobStatus::Running)?;
             let job_workers = resolve_workers(job_id, wf, &workers, &rr, &strategy).await;
-            let fanin_input = build_fanin_input(job_id, wf, foreach_map, &job_outputs);
+            let fanin_input =
+                build_fanin_input(job_id, wf, foreach_map, &job_outputs, host.clone()).await;
             launch(
                 job_id,
                 wf,
@@ -631,7 +632,9 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 wf,
                                                 foreach_map,
                                                 &job_outputs,
-                                            );
+                                                host.clone(),
+                                            )
+                                            .await;
                                             launch(
                                                 downstream,
                                                 wf,
@@ -654,7 +657,9 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Running)?;
                         let dep_workers = resolve_workers(dep, wf, &workers, &rr, &strategy).await;
-                        let fanin_input = build_fanin_input(dep, wf, foreach_map, &job_outputs);
+                        let fanin_input =
+                            build_fanin_input(dep, wf, foreach_map, &job_outputs, host.clone())
+                                .await;
                         launch(
                             dep,
                             wf,
@@ -702,29 +707,60 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 /// Build fan-in input for a job with `input_from`.  Returns `None` if the job
 /// has no `input_from`, or if outputs are not yet available (falls back to the
 /// YAML `input` field).
-fn build_fanin_input(
+///
+/// Aggregation mode is controlled by the job's `reduce` field:
+/// - `None` / `JsonArray`: wrap each child output as a JSON array element (default)
+/// - `Concat`: concatenate raw bytes from all children
+/// - `JsonMerge`: deep-merge child JSON objects (last-write-wins on key conflict)
+/// - `Custom(path)`: invoke a Wasm component with the JSON array of child outputs
+async fn build_fanin_input(
     job_id: &str,
     wf: &Workflow,
     foreach_map: &HashMap<String, Vec<String>>,
     job_outputs: &HashMap<String, Vec<u8>>,
+    host: Arc<FluxionHost>,
 ) -> Option<Vec<u8>> {
     let def = wf.jobs.get(job_id)?;
     let src = def.input_from.as_deref()?;
     let children = foreach_map.get(src)?;
 
-    // Collect outputs in order, falling back to null for missing outputs.
-    let values: Vec<serde_json::Value> = children
+    let raw_outputs: Vec<Vec<u8>> = children
         .iter()
-        .map(|child_id| {
-            if let Some(bytes) = job_outputs.get(child_id) {
-                serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
-            }
-        })
+        .map(|child_id| job_outputs.get(child_id).cloned().unwrap_or_default())
         .collect();
 
-    serde_json::to_vec(&values).ok()
+    match def.reduce.as_ref() {
+        None | Some(ReduceMode::JsonArray) => {
+            let values: Vec<serde_json::Value> = raw_outputs
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            serde_json::to_vec(&values).ok()
+        }
+        Some(ReduceMode::Concat) => Some(raw_outputs.into_iter().flatten().collect()),
+        Some(ReduceMode::JsonMerge) => {
+            let mut merged = serde_json::Map::new();
+            for bytes in &raw_outputs {
+                if let Ok(serde_json::Value::Object(obj)) = serde_json::from_slice(bytes) {
+                    merged.extend(obj);
+                }
+            }
+            serde_json::to_vec(&serde_json::Value::Object(merged)).ok()
+        }
+        Some(ReduceMode::Custom(component_path)) => {
+            let values: Vec<serde_json::Value> = raw_outputs
+                .iter()
+                .map(|b| serde_json::from_slice(b).unwrap_or(serde_json::Value::Null))
+                .collect();
+            let input = serde_json::to_vec(&values).ok()?;
+            let path = component_path.clone();
+            let perms = PermissionSet::default();
+            tokio::task::spawn_blocking(move || host.run_component(&path, input, &perms).ok())
+                .await
+                .ok()
+                .flatten()
+        }
+    }
 }
 
 /// Print foreach group progress when a child job finishes.
@@ -1387,5 +1423,85 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(&d1), "error should list {d1}: {msg}");
         assert!(msg.contains(&d2), "error should list {d2}: {msg}");
+    }
+
+    // ── build_fanin_input reduce mode tests ──────────────────────────────────
+
+    fn fanin_wf(reduce_json: Option<&str>) -> Workflow {
+        let reduce_field = match reduce_json {
+            Some(r) => format!(r#","reduce":{r}"#),
+            None => String::new(),
+        };
+        let s = format!(
+            r#"{{"name":"fanin-test","jobs":{{"process":{{"component":"process.wasm","foreach":"$.items"}},"aggregate":{{"component":"agg.wasm","input_from":"process"{reduce_field}}}}}}}"#
+        );
+        serde_json::from_str(&s).unwrap()
+    }
+
+    fn fanin_map() -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            "process".to_string(),
+            vec!["process[0]".to_string(), "process[1]".to_string()],
+        );
+        m
+    }
+
+    fn fanin_outputs(a: &[u8], b: &[u8]) -> HashMap<String, Vec<u8>> {
+        let mut m = HashMap::new();
+        m.insert("process[0]".to_string(), a.to_vec());
+        m.insert("process[1]".to_string(), b.to_vec());
+        m
+    }
+
+    #[tokio::test]
+    async fn fanin_json_array_wraps_outputs() {
+        let wf = fanin_wf(Some(r#""json_array""#));
+        let foreach_map = fanin_map();
+        let outputs = fanin_outputs(b"1", b"2");
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let result = build_fanin_input("aggregate", &wf, &foreach_map, &outputs, host)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!([1, 2]));
+    }
+
+    #[tokio::test]
+    async fn fanin_default_behaves_like_json_array() {
+        let wf = fanin_wf(None);
+        let foreach_map = fanin_map();
+        let outputs = fanin_outputs(b"\"x\"", b"\"y\"");
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let result = build_fanin_input("aggregate", &wf, &foreach_map, &outputs, host)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!(["x", "y"]));
+    }
+
+    #[tokio::test]
+    async fn fanin_concat_joins_raw_bytes() {
+        let wf = fanin_wf(Some(r#""concat""#));
+        let foreach_map = fanin_map();
+        let outputs = fanin_outputs(b"hello", b" world");
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let result = build_fanin_input("aggregate", &wf, &foreach_map, &outputs, host)
+            .await
+            .unwrap();
+        assert_eq!(result, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn fanin_json_merge_merges_objects() {
+        let wf = fanin_wf(Some(r#""json_merge""#));
+        let foreach_map = fanin_map();
+        let outputs = fanin_outputs(br#"{"a":1,"b":2}"#, br#"{"b":99,"c":3}"#);
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let result = build_fanin_input("aggregate", &wf, &foreach_map, &outputs, host)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v, serde_json::json!({"a": 1, "b": 99, "c": 3}));
     }
 }
