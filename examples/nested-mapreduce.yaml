@@ -1,0 +1,25 @@
+name: nested-mapreduce
+# 2-level nested foreach (Map/Reduce pattern):
+#   source → process-group (level-1 dynamic foreach per group)
+#           → extract-items (level-2 dynamic foreach per item, fan-in from all groups)
+#           → aggregate     (final fan-in reduce)
+jobs:
+  source:
+    component: ./components/hello/hello.wasm
+    input: '{"groups": ["alpha", "beta", "gamma"]}'
+
+  process-group:
+    component: ./components/hello/hello.wasm
+    foreach: "$.groups"
+    depends_on: [source]
+
+  extract-items:
+    component: ./components/hello/hello.wasm
+    foreach: "$[*]"
+    depends_on: [process-group]
+    input_from: process-group
+
+  aggregate:
+    component: ./components/hello/hello.wasm
+    depends_on: [extract-items]
+    input_from: extract-items
