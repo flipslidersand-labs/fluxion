@@ -1,0 +1,5 @@
+name: oci-registry-example
+jobs:
+  greet:
+    oci_ref: localhost:5000/fluxion/hello:latest
+    input: '{"name":"World"}'
