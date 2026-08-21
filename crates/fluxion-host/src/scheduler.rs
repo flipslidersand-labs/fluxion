@@ -892,20 +892,33 @@ async fn run_with_failover(
     input: &[u8],
     perms: &PermissionSet,
     env: &HashMap<String, String>,
+    async_dispatch: bool,
 ) -> anyhow::Result<(Vec<u8>, crate::JobMetrics)> {
     let mut tried: Vec<String> = Vec::new();
     for (i, worker) in workers.iter().enumerate() {
         let last = i + 1 == workers.len();
-        match remote::run_remote(
-            &worker.url,
-            component,
-            input.to_vec(),
-            perms,
-            env,
-            worker.tls.as_ref(),
-        )
-        .await
-        {
+        let result = if async_dispatch {
+            remote::run_remote_async(
+                &worker.url,
+                component,
+                input.to_vec(),
+                perms,
+                env,
+                worker.tls.as_ref(),
+            )
+            .await
+        } else {
+            remote::run_remote(
+                &worker.url,
+                component,
+                input.to_vec(),
+                perms,
+                env,
+                worker.tls.as_ref(),
+            )
+            .await
+        };
+        match result {
             Ok(r) => {
                 crate::metrics::WORKER_HEALTH
                     .with_label_values(&[&worker.url])
@@ -955,6 +968,7 @@ fn launch(
     let env = wf.jobs[&job_id].env.clone();
     let output_size_limit = wf.jobs[&job_id].output_size_limit_mb.unwrap_or(64) * 1024 * 1024;
     let component_sha256 = wf.jobs[&job_id].component_sha256.clone();
+    let async_dispatch = wf.jobs[&job_id].async_dispatch;
     let timeout_secs = perms.limits.timeout_secs;
 
     let span = info_span!("fluxion.job", job.id = %job_id, component = %component);
@@ -1012,7 +1026,7 @@ fn launch(
                     Ok(Ok(r)) => r,
                 }
             } else {
-                run_with_failover(&workers, &component, &input, &perms, &env).await
+                run_with_failover(&workers, &component, &input, &perms, &env, async_dispatch).await
             };
 
             let elapsed = start.elapsed();
@@ -1401,6 +1415,7 @@ mod tests {
             b"in",
             &PermissionSet::default(),
             &HashMap::new(),
+            false,
         )
         .await
         .expect("should fail over to the healthy worker");
@@ -1420,6 +1435,7 @@ mod tests {
             b"in",
             &PermissionSet::default(),
             &HashMap::new(),
+            false,
         )
         .await
         .expect_err("all workers down → error");

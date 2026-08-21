@@ -79,6 +79,7 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     component_sha256: def.component_sha256.clone(),
                     reduce: None,
                     executor: def.executor.clone(),
+                    async_dispatch: def.async_dispatch,
                 };
                 new_jobs.insert(child_id.clone(), child);
                 child_ids.push(child_id);
@@ -197,6 +198,7 @@ pub fn expand_foreach_dynamic(
             component_sha256: def.component_sha256.clone(),
             reduce: None,
             executor: def.executor.clone(),
+            async_dispatch: def.async_dispatch,
         };
         children.insert(child_id.clone(), child);
         child_ids.push(child_id);
@@ -332,6 +334,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         assert!(is_dynamic_foreach(&def));
         let static_def = JobDefinition {
@@ -359,6 +362,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         let dep_output = br#"{"items":["x","y","z"]}"#;
         let (child_ids, children) = expand_foreach_dynamic("process", &def, dep_output, 1).unwrap();
@@ -392,6 +396,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         let (ids, children) = expand_foreach_dynamic("job", &def, b"", 1).unwrap();
         assert!(ids.is_empty());
@@ -422,6 +427,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
         // Dynamic foreach — must NOT be expanded, stays as-is
@@ -443,6 +449,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
         let wf = Workflow {
@@ -490,6 +497,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
         jobs.insert(
@@ -510,6 +518,7 @@ mod tests {
                 component_sha256: None,
                 reduce: None,
                 executor: Default::default(),
+                async_dispatch: false,
             },
         );
 
@@ -556,6 +565,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         let dep_output = br#"["a","b"]"#;
         let (_, children) = expand_foreach_dynamic("job", &def, dep_output, 1).unwrap();
@@ -584,6 +594,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         let dep_output = br#"["x"]"#;
         let result = expand_foreach_dynamic("deep", &def, dep_output, MAX_FOREACH_DEPTH + 1);
@@ -608,6 +619,7 @@ mod tests {
             component_sha256: None,
             reduce: None,
             executor: Default::default(),
+            async_dispatch: false,
         };
         let dep_output = br#"["x"]"#;
         let result = expand_foreach_dynamic("deep", &def, dep_output, MAX_FOREACH_DEPTH);
