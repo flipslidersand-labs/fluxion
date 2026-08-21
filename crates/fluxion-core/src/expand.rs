@@ -77,7 +77,6 @@ pub fn expand_foreach(wf: &Workflow, input_override: Option<&str>) -> Result<Exp
                     output_size_limit_mb: def.output_size_limit_mb,
                     fail_fast: false,
                     component_sha256: def.component_sha256.clone(),
-                    oci_ref: def.oci_ref.clone(),
                     reduce: None,
                     executor: def.executor.clone(),
                 };
@@ -197,6 +196,7 @@ pub fn expand_foreach_dynamic(
             fail_fast: def.fail_fast,
             component_sha256: def.component_sha256.clone(),
             reduce: None,
+            executor: def.executor.clone(),
         };
         children.insert(child_id.clone(), child);
         child_ids.push(child_id);
@@ -483,7 +483,6 @@ mod tests {
                 output_size_limit_mb: None,
                 fail_fast: false,
                 component_sha256: None,
-                oci_ref: None,
                 reduce: None,
                 executor: Default::default(),
             },
@@ -504,7 +503,6 @@ mod tests {
                 output_size_limit_mb: None,
                 fail_fast: false,
                 component_sha256: None,
-                oci_ref: None,
                 reduce: None,
                 executor: Default::default(),
             },
