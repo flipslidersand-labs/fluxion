@@ -99,3 +99,76 @@ impl JobResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn make_run_result(succeeded: usize, total: usize, elapsed_ms: u64) -> RunResult {
+        RunResult {
+            run_id: "run-001".into(),
+            workflow_name: "my-wf".into(),
+            jobs: vec![],
+            total_elapsed_ms: elapsed_ms,
+            succeeded,
+            total,
+            success: succeeded == total,
+        }
+    }
+
+    #[test]
+    fn summary_includes_run_id_and_counts() {
+        let r = make_run_result(3, 4, 2500);
+        let s = r.summary();
+        assert!(s.contains("run-001"));
+        assert!(s.contains("3/4"));
+        assert!(s.contains("2.50s"));
+    }
+
+    #[test]
+    fn from_succeeded_sets_status_and_elapsed() {
+        let j = JobResult::from_succeeded("step-a".into(), Duration::from_millis(123), false);
+        assert_eq!(j.status, "succeeded");
+        assert_eq!(j.elapsed_ms, 123);
+        assert!(!j.skipped);
+        assert!(j.reason.is_none());
+        assert_eq!(j.compile_us, 0);
+    }
+
+    #[test]
+    fn from_succeeded_with_metrics_sets_timing_fields() {
+        let j = JobResult::from_succeeded_with_metrics(
+            "step-b".into(),
+            Duration::from_millis(500),
+            100,
+            200,
+            300,
+        );
+        assert_eq!(j.status, "succeeded");
+        assert!(!j.skipped);
+        assert_eq!(j.compile_us, 100);
+        assert_eq!(j.instantiate_us, 200);
+        assert_eq!(j.execute_us, 300);
+    }
+
+    #[test]
+    fn from_skipped_sets_skipped_true_and_zero_elapsed() {
+        let j = JobResult::from_skipped("step-c".into());
+        assert_eq!(j.status, "skipped");
+        assert!(j.skipped);
+        assert_eq!(j.elapsed_ms, 0);
+        assert!(j.reason.is_none());
+    }
+
+    #[test]
+    fn from_failed_sets_reason_and_status() {
+        let j =
+            JobResult::from_failed("step-d".into(), Duration::from_millis(50), "timeout".into());
+        assert_eq!(j.status, "failed");
+        assert!(!j.skipped);
+        assert_eq!(j.reason.as_deref(), Some("timeout"));
+        assert_eq!(j.elapsed_ms, 50);
+    }
+}
