@@ -36,7 +36,7 @@ async fn wait_for_server(port: u16) {
 
 async fn spawn_worker(port: u16) {
     tokio::spawn(async move {
-        fluxion_worker::serve(port, None, None)
+        fluxion_worker::serve(port, None, None, true)
             .await
             .expect("worker serve");
     });
