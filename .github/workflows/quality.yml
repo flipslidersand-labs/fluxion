@@ -14,5 +14,3 @@ jobs:
       clippy-args: "-p fluxion-core -p fluxion-cli -p fluxion-worker --all-targets"
       system-deps: "build-essential libssl-dev pkg-config"
       run-coverage: false
-      run-fmt: false
-      run-clippy: false
