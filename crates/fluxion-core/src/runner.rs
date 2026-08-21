@@ -164,11 +164,8 @@ mod tests {
 
     #[test]
     fn from_failed_sets_reason_and_status() {
-        let j = JobResult::from_failed(
-            "step-d".into(),
-            Duration::from_millis(50),
-            "timeout".into(),
-        );
+        let j =
+            JobResult::from_failed("step-d".into(), Duration::from_millis(50), "timeout".into());
         assert_eq!(j.status, "failed");
         assert!(!j.skipped);
         assert_eq!(j.reason.as_deref(), Some("timeout"));
