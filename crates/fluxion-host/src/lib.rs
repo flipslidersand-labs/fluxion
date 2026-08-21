@@ -122,8 +122,12 @@ impl FluxionHost {
         Ok(Self {
             engine,
             disk_cache: ComponentCache::new(),
-            mem_cache: Mutex::new(LruCache::new(NonZeroUsize::new(MEM_CACHE_CAP).unwrap())),
-            pre_cache: Mutex::new(LruCache::new(NonZeroUsize::new(PRE_CACHE_CAP).unwrap())),
+            mem_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(MEM_CACHE_CAP).expect("MEM_CACHE_CAP is non-zero"),
+            )),
+            pre_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(PRE_CACHE_CAP).expect("PRE_CACHE_CAP is non-zero"),
+            )),
             ticker_shutdown,
             oci_client: None,
         })
@@ -212,7 +216,12 @@ impl FluxionHost {
 
         let t0 = Instant::now();
         let component: Arc<Component> = {
-            if let Some(c) = self.mem_cache.lock().unwrap().get(&key) {
+            if let Some(c) = self
+                .mem_cache
+                .lock()
+                .expect("mem_cache lock poisoned")
+                .get(&key)
+            {
                 Arc::clone(c)
             } else {
                 let c = Arc::new(
@@ -229,7 +238,7 @@ impl FluxionHost {
                 );
                 self.mem_cache
                     .lock()
-                    .unwrap()
+                    .expect("mem_cache lock poisoned")
                     .put(key.clone(), Arc::clone(&c));
                 c
             }
@@ -238,13 +247,21 @@ impl FluxionHost {
 
         let t1 = Instant::now();
         let pre: Arc<TaskComponentPre<HostState>> = {
-            if let Some(p) = self.pre_cache.lock().unwrap().get(&key) {
+            if let Some(p) = self
+                .pre_cache
+                .lock()
+                .expect("pre_cache lock poisoned")
+                .get(&key)
+            {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
                 wasmtime_wasi::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
-                self.pre_cache.lock().unwrap().put(key, Arc::clone(&p));
+                self.pre_cache
+                    .lock()
+                    .expect("pre_cache lock poisoned")
+                    .put(key, Arc::clone(&p));
                 p
             }
         };
@@ -351,7 +368,12 @@ impl FluxionHost {
         // ── compile phase (L1 LRU mem → L2 disk → full compile) ─────────────
         let t0 = Instant::now();
         let component: Arc<Component> = {
-            if let Some(c) = self.mem_cache.lock().unwrap().get(&key) {
+            if let Some(c) = self
+                .mem_cache
+                .lock()
+                .expect("mem_cache lock poisoned")
+                .get(&key)
+            {
                 Arc::clone(c)
             } else {
                 let c = Arc::new(match self.disk_cache.load(&self.engine, &wasm_bytes) {
@@ -360,7 +382,7 @@ impl FluxionHost {
                 });
                 self.mem_cache
                     .lock()
-                    .unwrap()
+                    .expect("mem_cache lock poisoned")
                     .put(key.clone(), Arc::clone(&c));
                 c
             }
@@ -370,13 +392,21 @@ impl FluxionHost {
         // ── instantiate phase (L0 LRU pre_cache → build once per component) ──
         let t1 = Instant::now();
         let pre: Arc<TaskComponentPre<HostState>> = {
-            if let Some(p) = self.pre_cache.lock().unwrap().get(&key) {
+            if let Some(p) = self
+                .pre_cache
+                .lock()
+                .expect("pre_cache lock poisoned")
+                .get(&key)
+            {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
                 wasmtime_wasi::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
-                self.pre_cache.lock().unwrap().put(key, Arc::clone(&p));
+                self.pre_cache
+                    .lock()
+                    .expect("pre_cache lock poisoned")
+                    .put(key, Arc::clone(&p));
                 p
             }
         };
@@ -505,7 +535,7 @@ async fn resolve_entry(s: &str) -> Vec<String> {
 
     // Check TTL cache.
     {
-        let cache = DNS_CACHE.lock().unwrap();
+        let cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
         #[allow(clippy::collapsible_if)]
         if let Some((ips, ts)) = cache.get(s)
             && ts.elapsed() < DNS_CACHE_TTL
@@ -540,7 +570,7 @@ async fn resolve_entry(s: &str) -> Vec<String> {
 
             DNS_CACHE
                 .lock()
-                .unwrap()
+                .expect("DNS_CACHE lock poisoned")
                 .insert(s.to_string(), (ips, Instant::now()));
             result
         }
@@ -1056,7 +1086,7 @@ mod tests {
 
         // Backdate the cache entry to simulate TTL expiry.
         {
-            let mut cache = DNS_CACHE.lock().unwrap();
+            let mut cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
             if let Some(entry) = cache.get_mut(&key) {
                 entry.1 = Instant::now() - DNS_CACHE_TTL - Duration::from_millis(1);
             }
@@ -1071,7 +1101,7 @@ mod tests {
 
         // Verify the cache timestamp was refreshed.
         {
-            let cache = DNS_CACHE.lock().unwrap();
+            let cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
             let age = cache
                 .get(&key)
                 .map(|(_, ts)| ts.elapsed())
