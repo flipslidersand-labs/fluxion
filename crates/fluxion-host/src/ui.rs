@@ -13,7 +13,7 @@ pub fn router() -> Router<ApiState> {
     Router::new()
         .route("/", get(index))
         .route("/ui/runs", get(ui_runs))
-        .route("/ui/runs/{id}", get(ui_run_jobs))
+        .route("/ui/runs/:id", get(ui_run_jobs))
         .route("/ui/schedules", get(ui_schedules))
         .route("/ui/workers", get(ui_workers))
 }
@@ -205,6 +205,164 @@ fn html_fragment(body: String) -> Response {
         )
         .body(axum::body::Body::from(body))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use fluxion_core::store::RunStore;
+    use http_body_util::BodyExt;
+    use rusqlite::Connection;
+    use tower::ServiceExt;
+
+    use super::{escape, format_ts, polling_wrap, status_badge};
+    use crate::api::{ApiState, router};
+
+    fn test_state() -> ApiState {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS runs \
+             (id TEXT PRIMARY KEY, workflow_name TEXT NOT NULL, workflow_path TEXT NOT NULL, \
+              started_at INTEGER NOT NULL, completed_at INTEGER, status TEXT NOT NULL); \
+             CREATE TABLE IF NOT EXISTS job_states \
+             (run_id TEXT NOT NULL, job_id TEXT NOT NULL, status TEXT NOT NULL, \
+              elapsed_ms INTEGER, reason TEXT, PRIMARY KEY (run_id, job_id)); \
+             CREATE TABLE IF NOT EXISTS schedules \
+             (id TEXT PRIMARY KEY, workflow_path TEXT NOT NULL, cron_expr TEXT NOT NULL, \
+              created_at INTEGER NOT NULL, last_run_at INTEGER, next_run_at INTEGER NOT NULL); \
+             CREATE TABLE IF NOT EXISTS workers \
+             (url TEXT PRIMARY KEY, registered_at INTEGER NOT NULL, last_health TEXT);",
+        )
+        .unwrap();
+        ApiState {
+            store: Arc::new(Mutex::new(RunStore::from_conn(conn))),
+        }
+    }
+
+    async fn response_body(body: Body) -> String {
+        let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    // ── helper unit tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_replaces_html_special_chars() {
+        assert_eq!(escape("<script>"), "&lt;script&gt;");
+        assert_eq!(escape("a&b"), "a&amp;b");
+        assert_eq!(escape("\"quoted\""), "&quot;quoted&quot;");
+    }
+
+    #[test]
+    fn format_ts_formats_seconds_correctly() {
+        // 1 day + 2h + 3m + 4s = 93784s
+        assert_eq!(format_ts(93784), "1d 02:03:04 UTC");
+        assert_eq!(format_ts(0), "0d 00:00:00 UTC");
+    }
+
+    #[test]
+    fn status_badge_uses_correct_css_class() {
+        assert!(status_badge("running").contains("badge-running"));
+        assert!(status_badge("succeeded").contains("badge-succeeded"));
+        assert!(status_badge("failed").contains("badge-failed"));
+        assert!(status_badge("pending").contains("badge-pending"));
+    }
+
+    #[test]
+    fn polling_wrap_contains_url_and_interval() {
+        let html = polling_wrap("/ui/runs", "5s", "<p>inner</p>");
+        assert!(html.contains("hx-get=\"/ui/runs\""));
+        assert!(html.contains("every 5s"));
+        assert!(html.contains("<p>inner</p>"));
+    }
+
+    // ── route tests ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn index_returns_html() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn ui_runs_returns_html_table() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body(resp.into_body()).await;
+        assert!(body.contains("<table>"));
+        assert!(body.contains("No runs yet."));
+    }
+
+    #[tokio::test]
+    async fn ui_schedules_returns_html_table() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/schedules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body(resp.into_body()).await;
+        assert!(body.contains("<table>"));
+        assert!(body.contains("No schedules registered."));
+    }
+
+    #[tokio::test]
+    async fn ui_workers_returns_html_table() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body(resp.into_body()).await;
+        assert!(body.contains("<table>"));
+        assert!(body.contains("No workers registered."));
+    }
+
+    #[tokio::test]
+    async fn ui_run_jobs_returns_html_for_unknown_run() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/runs/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body(resp.into_body()).await;
+        assert!(body.contains("No jobs recorded."));
+    }
 }
 
 struct UiError(anyhow::Error);

@@ -35,10 +35,12 @@ ci = []
 ui-metrics = []
 
 [dev-dependencies]
-criterion = { workspace = true }
-wasmtime  = { workspace = true }
-indexmap  = { version = "2", features = ["serde"] }
-tempfile  = "3"
-reqwest   = { workspace = true }
-tokio     = { workspace = true }
-rusqlite  = { workspace = true }
+criterion        = { workspace = true }
+wasmtime         = { workspace = true }
+indexmap         = { version = "2", features = ["serde"] }
+tempfile         = "3"
+reqwest          = { workspace = true }
+tokio            = { workspace = true }
+rusqlite         = { workspace = true }
+tower            = { version = "0.4", features = ["util"] }
+http-body-util   = "0.1"
