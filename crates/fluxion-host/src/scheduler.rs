@@ -570,6 +570,7 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                         }
                         store.upsert_job(run_id, dep, &JobStatus::Skipped)?;
                         statuses.insert(dep.clone(), JobStatus::Skipped);
+                        job_results.push(JobResult::from_skipped(dep.to_string()));
                         // BFS cascade: propagate Skipped to all downstream jobs.
                         let mut cascade_queue: std::collections::VecDeque<String> =
                             std::collections::VecDeque::new();
@@ -613,6 +614,8 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                                 &JobStatus::Skipped,
                                             )?;
                                             statuses.insert(downstream.clone(), JobStatus::Skipped);
+                                            job_results
+                                                .push(JobResult::from_skipped(downstream.clone()));
                                             cascade_queue.push_back(downstream.clone());
                                         } else {
                                             if print_progress {

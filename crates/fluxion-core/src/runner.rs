@@ -1,10 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Result;
 use serde::Serialize;
-
-use crate::registry::RegistryStore;
-use crate::workflow::JobDefinition;
 
 #[derive(Debug, Serialize)]
 pub struct RunResult {
@@ -101,98 +97,5 @@ impl JobResult {
             instantiate_us: 0,
             execute_us: 0,
         }
-    }
-}
-
-/// Resolve the wasm component path for a job.
-///
-/// Priority:
-/// 1. `job.component` if non-empty (local path, backward-compatible)
-/// 2. `job.oci_ref` looked up via `RegistryStore::resolve()` (registry-backed)
-///
-/// Returns `Err` when neither is available or the OCI ref is not in the registry.
-pub fn resolve_component_path(job: &JobDefinition, store: &RegistryStore) -> Result<String> {
-    if !job.component.is_empty() {
-        return Ok(job.component.clone());
-    }
-    if let Some(oci_ref) = &job.oci_ref {
-        if let Some(entry) = store.resolve(oci_ref)? {
-            return Ok(entry.wasm_path);
-        }
-        anyhow::bail!(
-            "OCI ref '{}' is not in the local registry — run `fluxion registry pull` first",
-            oci_ref.to_string_repr()
-        );
-    }
-    anyhow::bail!("job has neither `component` nor `oci_ref`")
-}
-
-#[cfg(test)]
-mod tests {
-    use rusqlite::Connection;
-
-    use super::*;
-    use crate::registry::{OciRef, RegistryStore};
-    use crate::workflow::JobDefinition;
-
-    fn store() -> RegistryStore {
-        RegistryStore::from_conn(Connection::open_in_memory().unwrap()).unwrap()
-    }
-
-    fn job(component: &str, oci_ref: Option<OciRef>) -> JobDefinition {
-        JobDefinition {
-            component: component.to_string(),
-            depends_on: vec![],
-            input: None,
-            permissions: Default::default(),
-            worker: None,
-            env: Default::default(),
-            when: None,
-            foreach: None,
-            input_from: None,
-            max_parallel: None,
-            output_size_limit_mb: None,
-            fail_fast: false,
-            component_sha256: None,
-            reduce: None,
-            oci_ref,
-        }
-    }
-
-    #[test]
-    fn resolve_prefers_component_path() {
-        let s = store();
-        let j = job(
-            "/local/x.wasm",
-            Some(OciRef::parse("ghcr.io/org/x:v1").unwrap()),
-        );
-        assert_eq!(resolve_component_path(&j, &s).unwrap(), "/local/x.wasm");
-    }
-
-    #[test]
-    fn resolve_falls_back_to_registry() {
-        let s = store();
-        let oci = OciRef::parse("ghcr.io/org/hello:v1").unwrap();
-        s.register(&oci, "/cached/hello.wasm").unwrap();
-
-        let j = job("", Some(oci));
-        assert_eq!(
-            resolve_component_path(&j, &s).unwrap(),
-            "/cached/hello.wasm"
-        );
-    }
-
-    #[test]
-    fn resolve_errors_when_oci_not_in_registry() {
-        let s = store();
-        let j = job("", Some(OciRef::parse("ghcr.io/org/missing:v1").unwrap()));
-        assert!(resolve_component_path(&j, &s).is_err());
-    }
-
-    #[test]
-    fn resolve_errors_when_neither_set() {
-        let s = store();
-        let j = job("", None);
-        assert!(resolve_component_path(&j, &s).is_err());
     }
 }
