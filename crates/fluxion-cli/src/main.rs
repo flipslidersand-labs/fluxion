@@ -1,3 +1,4 @@
+mod build;
 mod mcp;
 mod telemetry;
 mod watch;
@@ -128,12 +129,38 @@ enum Commands {
         #[arg(long, default_value = "8080")]
         port: u16,
     },
+    /// Build a language-specific Wasm component
+    Build {
+        #[command(subcommand)]
+        action: BuildCommands,
+    },
     /// Start the MCP server (stdio transport)
     McpServe,
     /// Manage workflow schedules (cron-based recurring execution)
     Schedule {
         #[command(subcommand)]
         action: ScheduleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuildCommands {
+    /// Build a Python script into a Wasm component using componentize-py
+    Python {
+        /// Path to the Python script to build
+        script: PathBuf,
+        /// Output .wasm path (defaults to <script>.wasm)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the WIT directory or file (defaults to ./wit)
+        #[arg(long, default_value = "wit")]
+        wit_path: PathBuf,
+        /// WIT world to target
+        #[arg(long, default_value = "task-component")]
+        world: String,
+        /// Generate a Python stub file instead of building (scaffolding)
+        #[arg(long)]
+        init: bool,
     },
 }
 
@@ -403,6 +430,24 @@ async fn run(command: Commands) -> Result<()> {
             println!("Starting fluxion API server on http://localhost:{port}");
             fluxion_host::api::start(port).await?;
         }
+
+        Commands::Build { action } => match action {
+            BuildCommands::Python {
+                script,
+                output,
+                wit_path,
+                world,
+                init,
+            } => {
+                if init {
+                    let stub_path = script.with_extension("py");
+                    build::generate_python_stub(&stub_path)?;
+                } else {
+                    let out = output.unwrap_or_else(|| build::default_output(&script));
+                    build::build_python(&script, &out, &wit_path, &world)?;
+                }
+            }
+        },
 
         Commands::McpServe => {
             mcp::serve().await?;

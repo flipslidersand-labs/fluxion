@@ -1,0 +1,5 @@
+name: python-hello
+jobs:
+  greet:
+    component: hello.wasm
+    input: '{"message":"world"}'
