@@ -1078,6 +1078,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-opentelemetry",
  "wasmtime",

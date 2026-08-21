@@ -42,3 +42,4 @@ tempfile  = "3"
 reqwest   = { workspace = true }
 tokio     = { workspace = true }
 rusqlite  = { workspace = true }
+tower = { version = "0.5.3", features = ["util"] }

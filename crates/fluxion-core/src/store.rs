@@ -45,7 +45,9 @@ pub struct RunStore {
 
 impl RunStore {
     /// Construct a `RunStore` from an already-open connection (useful in tests).
+    /// The schema is initialised automatically.
     pub fn from_conn(conn: Connection) -> Self {
+        conn.execute_batch(SCHEMA).expect("schema init");
         Self { conn }
     }
 
