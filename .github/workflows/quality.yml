@@ -2,15 +2,28 @@ name: Quality
 
 on:
   push:
-    branches: [main, "feat/**", "fix/**"]
+    branches: [main, "feat/**", "fix/**", "hotfix/**", "refactor/**"]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   pull_request:
-  workflow_dispatch:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
+    if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
     with:
       test-args: "-p fluxion-core -p fluxion-cli -p fluxion-worker"
       clippy-args: "-p fluxion-core -p fluxion-cli -p fluxion-worker --all-targets"
       system-deps: "build-essential libssl-dev pkg-config"
+      run-fmt: false
       run-coverage: false
+      runner: ubuntu-latest
