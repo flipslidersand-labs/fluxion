@@ -164,6 +164,51 @@ fn run_watcher(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluxion_core::runner::JobResult;
+    use std::time::Duration;
+
+    #[test]
+    fn fmt_time_returns_hhmmss_format() {
+        let t = fmt_time();
+        assert_eq!(t.len(), 8, "expected HH:MM:SS (8 chars), got: {t}");
+        assert_eq!(&t[2..3], ":");
+        assert_eq!(&t[5..6], ":");
+        assert!(t.chars().all(|c| c.is_ascii_digit() || c == ':'));
+    }
+
+    #[test]
+    fn print_result_no_previous_does_not_panic() {
+        let jobs = vec![
+            JobResult::from_succeeded("fetch".into(), Duration::from_millis(10), false),
+            JobResult::from_failed("process".into(), Duration::from_millis(5), "err".into()),
+            JobResult::from_skipped("cleanup".into()),
+        ];
+        print_result(&jobs, &None);
+    }
+
+    #[test]
+    fn print_result_with_status_change_does_not_panic() {
+        let prev = vec![JobResult::from_succeeded(
+            "fetch".into(),
+            Duration::from_millis(10),
+            false,
+        )];
+        let curr = vec![
+            JobResult::from_failed("fetch".into(), Duration::from_millis(12), "timeout".into()),
+            JobResult::from_skipped("process".into()),
+        ];
+        print_result(&curr, &Some(prev));
+    }
+
+    #[test]
+    fn print_result_empty_current_does_not_panic() {
+        print_result(&[], &None);
+    }
+}
+
 /// Format current time as HH:MM:SS
 fn fmt_time() -> String {
     let now = std::time::SystemTime::now()
