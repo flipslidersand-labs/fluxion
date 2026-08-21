@@ -25,3 +25,26 @@ pub async fn health_check_all(store: &RunStore) -> Result<Vec<String>> {
 
     Ok(healthy)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluxion_core::store::RunStore;
+
+    fn in_memory_store() -> RunStore {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workers \
+             (url TEXT PRIMARY KEY, registered_at INTEGER NOT NULL, last_health TEXT);",
+        )
+        .unwrap();
+        RunStore::from_conn(conn)
+    }
+
+    #[tokio::test]
+    async fn empty_store_returns_empty_vec() {
+        let store = in_memory_store();
+        let result = health_check_all(&store).await.unwrap();
+        assert!(result.is_empty());
+    }
+}
