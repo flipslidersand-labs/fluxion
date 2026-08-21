@@ -60,7 +60,9 @@ mod tests {
     fn gather_contains_expected_metric_names() {
         // Touch each metric so it appears in the registry output.
         // HistogramVec requires at least one observation to produce samples.
-        JOB_DURATION.with_label_values(&["_init_check"]).observe(0.0);
+        JOB_DURATION
+            .with_label_values(&["_init_check"])
+            .observe(0.0);
         let output = gather();
         assert!(output.contains("fluxion_jobs_total"));
         assert!(output.contains("fluxion_job_duration_seconds"));
