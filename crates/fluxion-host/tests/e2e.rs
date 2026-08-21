@@ -302,3 +302,53 @@ async fn memory_limits_oom_enforcement() {
         oom.reason
     );
 }
+
+/// map-reduce-demo: fetch → dynamic foreach transform (3 items) → json_array aggregate.
+/// Verifies the full Map/Reduce pipeline executes and each stage produces output.
+#[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
+async fn map_reduce_dynamic_foreach() {
+    let host = Arc::new(FluxionHost::new().unwrap());
+    let wf_path = workspace_root().join("examples/map-reduce/workflow.yaml");
+    let mut wf = Workflow::from_file(&wf_path).expect("load map-reduce yaml");
+
+    // Patch all components to the pre-built hello.wasm.
+    let hello = wasm("hello");
+    for job in wf.jobs.values_mut() {
+        job.component = hello.clone();
+    }
+
+    let result = scheduler::run_silent(&wf, &wf_path, host)
+        .await
+        .expect("run_silent");
+
+    assert!(
+        result.success,
+        "map-reduce workflow should succeed; jobs={:?}",
+        result.jobs
+    );
+
+    // fetch + 3 dynamic transform children + aggregate = at least 5 jobs
+    assert!(
+        result.jobs.len() >= 5,
+        "expected ≥5 job results (fetch + 3×transform + aggregate), got {}",
+        result.jobs.len()
+    );
+
+    // All jobs must have succeeded (not failed/skipped).
+    for j in &result.jobs {
+        assert_eq!(
+            j.status, "succeeded",
+            "job {} should have succeeded, got {:?}",
+            j.job_id, j.status
+        );
+    }
+
+    // The aggregate job must be present and succeeded.
+    let agg = result
+        .jobs
+        .iter()
+        .find(|j| j.job_id == "aggregate")
+        .expect("aggregate job in results");
+    assert_eq!(agg.status, "succeeded", "aggregate job must succeed");
+}

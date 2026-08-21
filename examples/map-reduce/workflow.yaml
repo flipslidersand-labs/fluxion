@@ -1,0 +1,28 @@
+name: map-reduce-demo
+# Map/Reduce pattern: fetch → parallel transform (foreach) → aggregate (reduce)
+#
+# Execution flow:
+#   1. fetch   — runs once, emits {"items": ["a", "b", "c"]}
+#   2. transform — dynamically expanded into transform.0 / transform.1 / transform.2
+#                  each receives one item as input (dynamic foreach from fetch output)
+#   3. aggregate — receives all transform outputs as a JSON array (reduce: json_array)
+#
+# The `foreach: "$.items"` on `transform` tells Fluxion to fan out at runtime;
+# `input_from: transform` on `aggregate` collects every child output.
+
+jobs:
+  fetch:
+    component: ../../components/hello/target/wasm32-wasip1/debug/hello.wasm
+    input: '{"items": ["alpha", "beta", "gamma"]}'
+
+  transform:
+    component: ../../components/hello/target/wasm32-wasip1/debug/hello.wasm
+    foreach: "$.items"
+    depends_on: [fetch]
+
+  aggregate:
+    component: ../../components/hello/target/wasm32-wasip1/debug/hello.wasm
+    depends_on: [transform]
+    input_from: transform
+    reduce:
+      mode: json_array
