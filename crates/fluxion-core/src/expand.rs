@@ -199,6 +199,8 @@ pub fn expand_foreach_dynamic(
             component_sha256: def.component_sha256.clone(),
             reduce: None,
             executor: def.executor.clone(),
+            async_dispatch: def.async_dispatch,
+            oci_ref: def.oci_ref.clone(),
         };
         children.insert(child_id.clone(), child);
         child_ids.push(child_id);

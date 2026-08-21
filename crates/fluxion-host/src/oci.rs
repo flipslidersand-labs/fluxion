@@ -186,6 +186,27 @@ impl OciClient {
         Ok(bytes)
     }
 
+    /// List all tags for a repository (`GET /v2/<repo>/tags/list`).
+    pub async fn list_tags(&self, repository: &str) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct TagsList {
+            tags: Option<Vec<String>>,
+        }
+        let url = format!("{}/v2/{}/tags/list", self.base_url, repository);
+        let resp = self
+            .add_auth(self.client.get(&url))
+            .send()
+            .await
+            .context("GET tags/list")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("GET {url} → {status}: {body}");
+        }
+        let tl: TagsList = resp.json().await.context("parse tags/list JSON")?;
+        Ok(tl.tags.unwrap_or_default())
+    }
+
     /// Push a Wasm component to the registry.
     ///
     /// Steps:
@@ -380,6 +401,47 @@ fn sha256_digest(bytes: &[u8]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Pull a Wasm component from an OCI reference string of the form
+/// `registry/repo:tag` or `registry/repo@sha256:…`.
+pub async fn pull(oci_ref: &str) -> Result<Vec<u8>> {
+    let (registry, repo, reference) = parse_oci_ref(oci_ref)?;
+    let client = OciClient::new(format!("https://{registry}"), None)?;
+    client.pull(&repo, &reference).await
+}
+
+/// Push Wasm bytes to an OCI reference string (`registry/repo:tag`).
+/// Returns the pushed manifest digest.
+pub async fn push(oci_ref: &str, wasm_bytes: &[u8]) -> Result<String> {
+    let (registry, repo, reference) = parse_oci_ref(oci_ref)?;
+    let client = OciClient::new(format!("https://{registry}"), None)?;
+    client.push(&repo, &reference, wasm_bytes).await
+}
+
+/// List all tags for `repo` on `registry` (unauthenticated).
+pub async fn list_tags(registry: &str, repo: &str) -> Result<Vec<String>> {
+    let client = OciClient::new(format!("https://{registry}"), None)?;
+    client.list_tags(repo).await
+}
+
+/// Parse `registry/repo:tag` or `registry/repo@sha256:…` into components.
+fn parse_oci_ref(oci_ref: &str) -> Result<(String, String, String)> {
+    let (registry, rest) = oci_ref.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("invalid OCI ref (expected registry/repo:tag): {oci_ref}")
+    })?;
+
+    if let Some(at) = rest.find('@') {
+        let repo = rest[..at].to_string();
+        let reference = rest[at + 1..].to_string();
+        Ok((registry.to_string(), repo, reference))
+    } else if let Some(colon) = rest.rfind(':') {
+        let repo = rest[..colon].to_string();
+        let tag = rest[colon + 1..].to_string();
+        Ok((registry.to_string(), repo, tag))
+    } else {
+        Ok((registry.to_string(), rest.to_string(), "latest".to_string()))
+    }
+}
+
 // ── Unit tests (no network) ───────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -441,5 +503,6 @@ mod tests {
         let json = serde_json::to_string(&manifest).expect("serialize");
         let parsed: OciManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.schema_version, 2);
-        assert_eq!(parsed.layers[0].media_type, WASM_LAYER_TYPE);    }
+        assert_eq!(parsed.layers[0].media_type, WASM_LAYER_TYPE);
+    }
 }
