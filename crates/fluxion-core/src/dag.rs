@@ -107,7 +107,9 @@ fn kahn_sort(deps: &HashMap<String, Vec<String>>) -> Result<Vec<String>> {
     while let Some(job) = queue.pop_front() {
         order.push(job.to_string());
         for &waiter in notify.get(job).into_iter().flatten() {
-            let deg = indegree.get_mut(waiter).unwrap();
+            let deg = indegree
+                .get_mut(waiter)
+                .expect("waiter must be in indegree map");
             *deg -= 1;
             if *deg == 0 {
                 queue.push_back(waiter);
