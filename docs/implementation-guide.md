@@ -165,3 +165,70 @@ Phase 5 完了後に着手。
 2. **Phase 3（Sandbox）を Phase 2 の直後に**: セキュリティは後付けにしない。設計段階で組み込む
 3. **Phase 4（永続化）の前に Phase 3**: 権限制御が動いてから状態を保存する方が整合性が取れる
 4. **Phase 6（MCP）を最後に**: 処理系として完成してから利用者（AI）を追加する
+
+---
+
+## Python コンポーネント実装ガイド
+
+### 概要
+
+`componentize-py` を使うと Python スクリプトを Wasm Component Model コンポーネントとしてビルドできます。  
+Fluxion の WIT インターフェース（`wit/task.wit`）を Python から実装することで、Rust 以外の言語で Fluxion ジョブを記述できます。
+
+### 環境要件
+
+| ツール | バージョン |
+|--------|-----------|
+| Python | 3.10+ |
+| componentize-py | 0.13+ |
+
+```bash
+pip install componentize-py
+```
+
+### WIT インターフェース仕様
+
+`wit/task.wit` で定義されているインターフェース:
+
+```wit
+interface processor {
+    record task-input {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+    record task-output {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+    process: func(input: task-input) -> result<task-output, string>;
+}
+```
+
+Python 側では `task_component.imports` から `TaskInput` / `TaskOutput` をインポートして `process()` 関数を実装します。
+
+### ビルドフロー
+
+```
+hello.py + wit/task.wit
+        ↓ componentize-py componentize
+     hello.wasm (Wasm Component)
+        ↓ fluxion component run / fluxion run
+       実行結果
+```
+
+`fluxion build python` コマンドがこのフローをラップしています:
+
+```bash
+fluxion build python hello.py -o hello.wasm
+```
+
+### エラー処理
+
+`process()` が例外を送出した場合、Fluxion はジョブを `failed` として記録します。  
+`result<task-output, string>` の `err` バリアントを返したい場合は Python 側で例外を raise してください。
+
+### 制限事項
+
+- `componentize-py` が対応している Python 標準ライブラリのみ利用可能（`socket`・`subprocess` 等は不可）
+- pandas / numpy 等の C 拡張ライブラリは現時点では非対応
+- `task-output.content` はバイト列（`list<u8>`）のため、文字列は `encode("utf-8")` が必要

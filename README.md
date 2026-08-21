@@ -244,6 +244,86 @@ jobs:
     input: '{"name":"World"}'
 ```
 
+## Python Components
+
+Fluxion supports Python components via [`componentize-py`](https://github.com/bytecodealliance/componentize-py).
+
+### Prerequisites
+
+- Python 3.10+
+- `componentize-py` 0.13+
+
+```bash
+pip install componentize-py
+```
+
+### WIT Interface
+
+Python components implement the `fluxion:task/processor` interface defined in `wit/task.wit`:
+
+| Type | Fields |
+|------|--------|
+| `task-input` | `content: list<u8>` — raw bytes payload<br>`metadata: list<tuple<string, string>>` — key/value pairs |
+| `task-output` | `content: list<u8>` — result bytes<br>`metadata: list<tuple<string, string>>` — key/value pairs |
+
+Your script must export a `process(input: TaskInput) -> TaskOutput` function.
+
+### Quickstart
+
+```bash
+# 1. Generate a stub
+fluxion build python my_component.py --init
+
+# 2. Edit my_component.py, then build
+fluxion build python my_component.py -o my_component.wasm
+
+# 3. Run standalone
+fluxion component run my_component.wasm --input 'hello world'
+
+# 4. Or use in a workflow YAML
+```
+
+```yaml
+name: python-demo
+jobs:
+  greet:
+    component: my_component.wasm
+    input: 'hello world'
+```
+
+### Example: `components/python-hello`
+
+```python
+# hello.py
+from task_component.imports import TaskInput, TaskOutput
+
+def process(input: TaskInput) -> TaskOutput:
+    text = bytes(input.content).decode("utf-8")
+    result = f"Hello from Python: {text}"
+    return TaskOutput(
+        content=list(result.encode("utf-8")),
+        metadata=[("lang", "python")],
+    )
+```
+
+Build and run:
+
+```bash
+cd components/python-hello
+fluxion build python hello.py -o hello.wasm
+fluxion run workflow.yaml
+# → Hello from Python: {"message":"world"}
+```
+
+### Custom WIT path / world
+
+```bash
+fluxion build python hello.py \
+  --wit-path wit/ \
+  --world task-component \
+  -o hello.wasm
+```
+
 ## Status
 
 | Phase   | Description                                | Status  |
