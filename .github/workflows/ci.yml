@@ -112,14 +112,16 @@ jobs:
           if ! command -v cargo-component &>/dev/null; then
             cargo install cargo-component --locked -j2
           fi
+      - name: Install componentize-py
+        run: pip install componentize-py
       - name: Build Wasm components
         run: |
           for comp in alloc-bomb file-reader hello pipeline-stage spin; do
             (cd components/$comp && cargo component build -j2)
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
-      - name: Build host
-        run: cargo build -p fluxion-host -j2
+      - name: Build host and CLI
+        run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
       - name: Upload logs on failure

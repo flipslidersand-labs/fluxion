@@ -357,3 +357,42 @@ async fn map_reduce_static_foreach() {
         .expect("aggregate job in results");
     assert_eq!(agg.status, "succeeded", "aggregate job must succeed");
 }
+
+/// python-hello: verify `fluxion build python` succeeds via componentize-py.
+/// This test confirms the CLI build pipeline works end-to-end in CI.
+/// Running the resulting component via FluxionHost is a separate concern:
+/// componentize-py components require an internal `init` call before WIT exports
+/// are callable, which the host does not currently perform.
+/// Requires componentize-py to be installed; skipped in non-ci builds.
+#[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires componentize-py")]
+async fn python_hello_build() {
+    let root = workspace_root();
+    let script = root.join("components/python-hello/task.py");
+    let out = root.join("components/python-hello/hello.wasm");
+    let wit = root.join("wit");
+
+    // Build: fluxion build python task.py -o hello.wasm --wit-path wit
+    let build_out = std::process::Command::new(root.join("target/debug/fluxion"))
+        .args(["build", "python"])
+        .arg(&script)
+        .arg("-o")
+        .arg(&out)
+        .arg("--wit-path")
+        .arg(&wit)
+        .output()
+        .expect("fluxion build python failed to launch");
+
+    assert!(
+        build_out.status.success(),
+        "fluxion build python exited with {}\nstdout: {}\nstderr: {}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr)
+    );
+
+    assert!(out.exists(), "hello.wasm was not created");
+
+    let wasm_bytes = std::fs::read(&out).expect("read hello.wasm");
+    assert!(wasm_bytes.len() > 1024, "hello.wasm is suspiciously small");
+}
