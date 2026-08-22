@@ -369,19 +369,22 @@ async fn python_hello_build_and_run() {
     let wit = root.join("wit");
 
     // Build: fluxion build python task.py -o hello.wasm --wit-path wit
-    let status = std::process::Command::new(root.join("target/debug/fluxion"))
+    let build_out = std::process::Command::new(root.join("target/debug/fluxion"))
         .args(["build", "python"])
         .arg(&script)
         .arg("-o")
         .arg(&out)
         .arg("--wit-path")
         .arg(&wit)
-        .status()
+        .output()
         .expect("fluxion build python failed to launch");
 
     assert!(
-        status.success(),
-        "fluxion build python exited with non-zero status"
+        build_out.status.success(),
+        "fluxion build python exited with {}\nstdout: {}\nstderr: {}",
+        build_out.status,
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr)
     );
     assert!(out.exists(), "hello.wasm was not created");
 
