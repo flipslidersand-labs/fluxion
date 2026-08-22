@@ -25,9 +25,7 @@ pub fn build_python(script: &Path, out: &Path, wit_path: &Path) -> Result<()> {
     let abs_wit = if wit_path.is_absolute() {
         wit_path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(wit_path)
+        std::env::current_dir().unwrap_or_default().join(wit_path)
     };
 
     let status = Command::new("componentize-py")
