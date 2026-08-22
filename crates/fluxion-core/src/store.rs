@@ -446,6 +446,21 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn serialize_status(s: &JobStatus) -> (&'static str, Option<u64>, Option<String>) {
+    match s {
+        JobStatus::Succeeded { elapsed } => ("succeeded", Some(elapsed.as_millis() as u64), None),
+        JobStatus::Failed { elapsed, reason } => (
+            "failed",
+            Some(elapsed.as_millis() as u64),
+            Some(reason.clone()),
+        ),
+        JobStatus::Cancelled => ("cancelled", None, None),
+        JobStatus::Running => ("running", None, None),
+        JobStatus::Skipped => ("skipped", None, None),
+        _ => ("pending", None, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,20 +597,5 @@ mod tests {
         let store = open_tmp();
         let won = store.claim_schedule("nonexistent", 0, 100).unwrap();
         assert!(!won, "claim on unknown id must return false");
-    }
-}
-
-fn serialize_status(s: &JobStatus) -> (&'static str, Option<u64>, Option<String>) {
-    match s {
-        JobStatus::Succeeded { elapsed } => ("succeeded", Some(elapsed.as_millis() as u64), None),
-        JobStatus::Failed { elapsed, reason } => (
-            "failed",
-            Some(elapsed.as_millis() as u64),
-            Some(reason.clone()),
-        ),
-        JobStatus::Cancelled => ("cancelled", None, None),
-        JobStatus::Running => ("running", None, None),
-        JobStatus::Skipped => ("skipped", None, None),
-        _ => ("pending", None, None),
     }
 }

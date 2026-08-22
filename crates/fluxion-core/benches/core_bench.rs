@@ -136,15 +136,17 @@ fn bench_permission_check(c: &mut Criterion) {
     });
 
     // allow-list with 5 entries — checks whether addr is in the list
-    let mut allow5 = PermissionSet::default();
-    allow5.network = NetworkPermission {
-        allow: vec![
-            "127.0.0.1:8080".to_string(),
-            "10.0.0.1:443".to_string(),
-            "api.example.com:443".to_string(),
-            "db.internal:5432".to_string(),
-            "cache.internal:6379".to_string(),
-        ],
+    let allow5 = PermissionSet {
+        network: NetworkPermission {
+            allow: vec![
+                "127.0.0.1:8080".to_string(),
+                "10.0.0.1:443".to_string(),
+                "api.example.com:443".to_string(),
+                "db.internal:5432".to_string(),
+                "cache.internal:6379".to_string(),
+            ],
+        },
+        ..Default::default()
     };
     group.bench_function("network_allows_hit", |b| {
         b.iter(|| allow5.network.allows("db.internal:5432"))
