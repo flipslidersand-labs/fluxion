@@ -136,6 +136,15 @@ pub struct JobDefinition {
     /// `remote` dispatches the job to an HTTP worker via fluxion-worker.
     #[serde(default)]
     pub executor: ExecutorKind,
+    /// When `true` and `executor: remote`, uses POST /jobs (fire-and-poll)
+    /// instead of the synchronous POST /run.
+    #[serde(default)]
+    pub async_dispatch: bool,
+    /// OCI reference (`registry/repo:tag` or `registry/repo@sha256:…`).
+    /// When set, the component is pulled from the OCI registry at runtime
+    /// and the `component` field is ignored.
+    #[serde(default)]
+    pub oci_ref: Option<String>,
 }
 
 // ── ExecutorKind ──────────────────────────────────────────────────────────────

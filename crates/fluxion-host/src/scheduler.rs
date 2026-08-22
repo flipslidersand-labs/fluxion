@@ -11,7 +11,7 @@ use fluxion_core::{
     runner::{JobResult, RunResult},
     state::JobStatus,
     store::RunStore,
-    workflow::{PermissionSet, ReduceMode, TlsConfig, Workflow},
+    workflow::{ExecutorKind, PermissionSet, ReduceMode, TlsConfig, Workflow},
 };
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{Instrument, info_span};
@@ -326,6 +326,17 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
     let foreach_map = &expanded.foreach_map;
 
     let dag = Dag::build(wf)?;
+
+    // Validate: executor:remote jobs require at least one worker configured.
+    for (job_id, job) in &wf.jobs {
+        if job.executor == ExecutorKind::Remote && job.worker.is_none() && workers.is_empty() {
+            anyhow::bail!(
+                "job '{}' uses executor:remote but no workers are configured",
+                job_id
+            );
+        }
+    }
+
     let pad = wf.jobs.keys().map(|k| k.len()).max().unwrap_or(0);
 
     let mut statuses: HashMap<String, JobStatus> = wf
@@ -931,6 +942,53 @@ async fn run_with_failover(
     unreachable!("resolve_workers never returns an empty list here")
 }
 
+/// Async variant of `run_with_failover` — uses POST /jobs + polling GET /jobs/:id.
+/// The timeout is embedded inside `run_remote_async` (perms.limits.timeout_secs + 30).
+async fn run_with_failover_async(
+    workers: &[WorkerInfo],
+    component: &str,
+    input: &[u8],
+    perms: &PermissionSet,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<(Vec<u8>, crate::JobMetrics)> {
+    let mut tried: Vec<String> = Vec::new();
+    for (i, worker) in workers.iter().enumerate() {
+        let last = i + 1 == workers.len();
+        match remote::run_remote_async(
+            &worker.url,
+            component,
+            input.to_vec(),
+            perms,
+            env,
+            worker.tls.as_ref(),
+        )
+        .await
+        {
+            Ok(r) => {
+                crate::metrics::WORKER_HEALTH
+                    .with_label_values(&[&worker.url])
+                    .set(1.0);
+                return Ok(r);
+            }
+            Err(e) => {
+                tried.push(format!("{}: {e}", worker.url));
+                if e.is_failover() && !last {
+                    crate::metrics::WORKER_HEALTH
+                        .with_label_values(&[&worker.url])
+                        .set(0.0);
+                    tracing::warn!(worker = %worker.url, error = %e, "async worker unreachable, failing over");
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "async job dispatch failed [{}]",
+                    tried.join("; ")
+                ));
+            }
+        }
+    }
+    unreachable!("resolve_workers never returns an empty list here")
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
@@ -943,7 +1001,10 @@ fn launch(
 ) {
     crate::metrics::ACTIVE_JOBS.inc();
     let job_id = job_id.to_string();
+    let executor = wf.jobs[&job_id].executor.clone();
+    let async_dispatch = wf.jobs[&job_id].async_dispatch;
     let component = wf.jobs[&job_id].component.clone();
+    let oci_ref = wf.jobs[&job_id].oci_ref.clone();
     let input = input_override.unwrap_or_else(|| {
         wf.jobs[&job_id]
             .input
@@ -977,6 +1038,64 @@ fn launch(
                 perms
             };
 
+            // OCI auto-pull: if oci_ref is set, pull the component and write it to
+            // a temp file, then replace `component` for the rest of this invocation.
+            // The existing SHA-256 cache keys on wasm bytes, so the component is
+            // cached automatically after the first pull.
+            let (component, _oci_tmpfile) = if let Some(ref r) = oci_ref {
+                match crate::oci::pull(r).await {
+                    Ok(bytes) => {
+                        use std::io::Write as _;
+                        match tempfile::Builder::new()
+                            .suffix(".wasm")
+                            .tempfile()
+                            .and_then(|mut f| {
+                                f.write_all(&bytes)?;
+                                Ok(f)
+                            }) {
+                            Ok(f) => {
+                                let path = f.path().to_string_lossy().into_owned();
+                                (path, Some(f))
+                            }
+                            Err(e) => {
+                                let elapsed = start.elapsed();
+                                let _ = tx.send(JobEvent {
+                                    job_id: job_id.clone(),
+                                    status: JobStatus::Failed {
+                                        elapsed,
+                                        reason: format!("OCI tmp write failed: {e}"),
+                                    },
+                                    output: None,
+                                    compile_us: 0,
+                                    instantiate_us: 0,
+                                    execute_us: 0,
+                                });
+                                crate::metrics::ACTIVE_JOBS.dec();
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let elapsed = start.elapsed();
+                        let _ = tx.send(JobEvent {
+                            job_id: job_id.clone(),
+                            status: JobStatus::Failed {
+                                elapsed,
+                                reason: format!("OCI pull failed for '{}': {e}", r),
+                            },
+                            output: None,
+                            compile_us: 0,
+                            instantiate_us: 0,
+                            execute_us: 0,
+                        });
+                        crate::metrics::ACTIVE_JOBS.dec();
+                        return;
+                    }
+                }
+            } else {
+                (component, None)
+            };
+
             // Verify SHA-256 digest before loading the component (supply-chain protection).
             if let Err(e) = crate::verify_component_digest(&component, component_sha256.as_deref())
             {
@@ -996,23 +1115,40 @@ fn launch(
                 return;
             }
 
-            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = if workers.is_empty() {
-                let c = component.clone();
-                let p = perms.clone();
-                let e = env.clone();
-                let i = input.clone();
-                match tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
-                    tokio::task::spawn_blocking(move || host.run_component_measured(&c, i, &p, &e)),
-                )
-                .await
-                {
-                    Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
-                    Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
-                    Ok(Ok(r)) => r,
+            let run_result: anyhow::Result<(Vec<u8>, crate::JobMetrics)> = match executor {
+                ExecutorKind::Remote => {
+                    if async_dispatch {
+                        run_with_failover_async(&workers, &component, &input, &perms, &env).await
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_secs(timeout_secs),
+                            run_with_failover(&workers, &component, &input, &perms, &env),
+                        )
+                        .await
+                        {
+                            Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                            Ok(r) => r,
+                        }
+                    }
                 }
-            } else {
-                run_with_failover(&workers, &component, &input, &perms, &env).await
+                ExecutorKind::Local => {
+                    let c = component.clone();
+                    let p = perms.clone();
+                    let e = env.clone();
+                    let i = input.clone();
+                    match tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            host.run_component_measured(&c, i, &p, &e)
+                        }),
+                    )
+                    .await
+                    {
+                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
+                        Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
+                        Ok(Ok(r)) => r,
+                    }
+                }
             };
 
             let elapsed = start.elapsed();
@@ -1441,6 +1577,20 @@ mod tests {
         serde_json::from_str(&s).unwrap()
     }
 
+    // ── ExecutorKind dispatch validation ─────────────────────────────────────
+
+    fn wf_with_executor(executor: &str, has_workers: bool) -> Workflow {
+        let workers_json = if has_workers {
+            r#"[{"url":"http://w1"}]"#.to_string()
+        } else {
+            "[]".to_string()
+        };
+        let s = format!(
+            r#"{{"name":"t","jobs":{{"j":{{"component":"x.wasm","executor":"{executor}"}}}},"workers":{workers_json}}}"#
+        );
+        serde_json::from_str(&s).unwrap()
+    }
+
     fn fanin_map() -> HashMap<String, Vec<String>> {
         let mut m = HashMap::new();
         m.insert(
@@ -1506,5 +1656,57 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(v, serde_json::json!({"a": 1, "b": 99, "c": 3}));
+    }
+
+    #[tokio::test]
+    async fn remote_executor_without_workers_is_rejected() {
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("remote", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        let err = execute(&wf, opts).await.expect_err("should fail");
+        assert!(
+            err.to_string().contains("executor:remote"),
+            "error should mention executor:remote: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_executor_without_workers_is_accepted_at_validation() {
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let wf = wf_with_executor("local", false);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id: "test-run2",
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+        let result = execute(&wf, opts).await;
+        if let Err(ref e) = result {
+            assert!(
+                !e.to_string().contains("executor:remote"),
+                "local executor should not trigger remote-worker validation: {e}"
+            );
+        }
     }
 }

@@ -118,6 +118,7 @@ async fn vehicle_pipeline_validate_retry() {
 /// resource-limits-demo: spin-forever is killed by epoch timeout after 2s;
 /// fast-sum (short run) is expected to have been in-flight or succeeded.
 #[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn resource_limits_spin_timeout() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let (wf, wf_path) = load_wf("resource-limits-demo.yaml", "spin");
@@ -147,6 +148,7 @@ async fn resource_limits_spin_timeout() {
 
 /// three-stage: simple sequential pipeline — all 3 hello jobs succeed in order.
 #[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn three_stage_sequential() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let wf_path = workspace_root().join("examples").join("three-stage.yaml");
@@ -172,6 +174,7 @@ async fn three_stage_sequential() {
 /// sandbox-demo: read-allowed succeeds (FS cap grants /tmp),
 /// read-denied fails (no filesystem permission granted).
 #[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn sandbox_fs_cap() {
     let test_file = format!("/tmp/fluxion-e2e-{}.txt", std::process::id());
     std::fs::write(&test_file, "hello from e2e test").unwrap();
@@ -217,6 +220,7 @@ async fn sandbox_fs_cap() {
 /// Tokio's spawn_blocking + h.block_on interaction with sync WASI sockets causes
 /// timeouts in headless CI; it is covered by local integration runs.
 #[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn sandbox_network_cap() {
     // Run only the deny job — it should be blocked by the empty allowlist before
     // any real I/O occurs, so it completes instantly without network access.
@@ -259,6 +263,7 @@ async fn sandbox_network_cap() {
 /// memory-limits-demo: ok-job (alloc 1MB within 16MB limit) succeeds,
 /// then oom-job (alloc 10MB within 1MB limit) is rejected by StoreLimits.
 #[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 async fn memory_limits_oom_enforcement() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let (wf, wf_path) = load_wf("memory-limits-demo.yaml", "alloc-bomb");

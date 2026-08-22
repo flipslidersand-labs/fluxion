@@ -1,4 +1,5 @@
 mod mcp;
+mod registry;
 mod telemetry;
 mod watch;
 
@@ -135,6 +136,37 @@ enum Commands {
         #[command(subcommand)]
         action: ScheduleCommands,
     },
+    /// OCI registry operations — pull, push, and list Wasm components
+    Registry {
+        #[command(subcommand)]
+        action: RegistryCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Pull a Wasm component from an OCI registry
+    Pull {
+        /// OCI reference (e.g. ghcr.io/org/repo:latest)
+        oci_ref: String,
+        /// Save to this path (default: derived from ref)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Push a Wasm component to an OCI registry
+    Push {
+        /// Path to the .wasm file
+        path: PathBuf,
+        /// OCI reference (e.g. localhost:5000/myapp:v1)
+        oci_ref: String,
+    },
+    /// List tags for a repository
+    List {
+        /// Registry hostname (e.g. localhost:5000)
+        registry: String,
+        /// Repository name (e.g. myorg/myapp)
+        repo: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +209,9 @@ enum WorkerCommands {
         /// Path to the PEM-encoded CA certificate used to verify clients (mTLS)
         #[arg(long, requires = "tls_cert", requires = "tls_key")]
         ca_cert: Option<PathBuf>,
+        /// Enable POST /jobs and GET /jobs/:id async endpoints
+        #[arg(long)]
+        async_jobs: bool,
     },
     /// Register a worker URL in the local registry
     Register {
@@ -347,6 +382,7 @@ async fn run(command: Commands) -> Result<()> {
                 tls_cert,
                 tls_key,
                 ca_cert,
+                async_jobs,
             } => {
                 let tls = match (tls_cert, tls_key, ca_cert) {
                     (Some(cert), Some(key), Some(ca)) => {
@@ -354,7 +390,7 @@ async fn run(command: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                fluxion_worker::serve(port, metrics_port, tls).await?;
+                fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
             }
             WorkerCommands::Register { url } => {
                 let store = RunStore::open()?;
@@ -420,6 +456,18 @@ async fn run(command: Commands) -> Result<()> {
             }
             ScheduleCommands::Daemon => {
                 cmd_schedule_daemon().await?;
+            }
+        },
+
+        Commands::Registry { action } => match action {
+            RegistryCommands::Pull { oci_ref, output } => {
+                registry::pull(&oci_ref, output).await?;
+            }
+            RegistryCommands::Push { path, oci_ref } => {
+                registry::push(&path, &oci_ref).await?;
+            }
+            RegistryCommands::List { registry, repo } => {
+                registry::list(&registry, &repo).await?;
             }
         },
     }
