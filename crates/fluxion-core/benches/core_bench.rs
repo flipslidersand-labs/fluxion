@@ -120,7 +120,7 @@ fn bench_run_store(c: &mut Criterion) {
     // Restore HOME (best-effort; benches run in isolation anyway)
     // SAFETY: single-threaded context.
     unsafe {
-        let _ = std::env::remove_var("HOME");
+        std::env::remove_var("HOME");
     }
 }
 
