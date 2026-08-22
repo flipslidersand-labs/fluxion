@@ -179,6 +179,45 @@ fluxion run examples/memory-limits-demo.yaml
 # oom-job  FAILED   0.00s   (OOM: component exceeded memory_mb=1 limit)
 ```
 
+### map-reduce-demo — static foreach + reduce
+
+`transform` is expanded into one child per item (static fan-out);
+`aggregate` collects all outputs via `input_from` + `reduce`:
+
+```bash
+fluxion run examples/map-reduce/workflow.yaml
+# transform.0  succeeded   0.01s
+# transform.1  succeeded   0.01s
+# transform.2  succeeded   0.01s
+# aggregate    succeeded   0.01s
+```
+
+YAML structure:
+
+```yaml
+name: map-reduce-demo
+jobs:
+  transform:
+    component: hello.wasm
+    input: '["alpha", "beta", "gamma"]'
+    foreach: "$[*]"             # fan-out: one child job per item
+
+  aggregate:
+    component: hello.wasm
+    depends_on: [transform]
+    input_from: transform       # collect all transform outputs
+    reduce: json_array          # wrap outputs as a JSON array
+```
+
+**`reduce` modes:**
+
+| Mode | Behaviour |
+|------|-----------|
+| `json_array` *(default)* | Wraps each child output as a JSON array element |
+| `concat` | Concatenates raw bytes |
+| `json_merge` | Deep-merges JSON objects |
+| `{ component: path/to/reducer.wasm }` | Pipes all outputs through a custom Wasm reducer |
+
 ## MCP Integration
 
 Fluxion exposes an MCP server for use with Claude Code or any MCP-compatible AI editor.
