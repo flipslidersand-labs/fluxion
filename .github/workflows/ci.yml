@@ -77,7 +77,7 @@ jobs:
 
   e2e:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
-    runs-on: ${{ vars.ARC_RUNNER || vars.GATE_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       RUST_LOG: fluxion_host=debug,fluxion_core=debug
