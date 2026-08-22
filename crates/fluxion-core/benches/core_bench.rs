@@ -22,6 +22,9 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         fail_fast: false,
         component_sha256: None,
         reduce: None,
+        executor: Default::default(),
+        async_dispatch: false,
+        oci_ref: None,
     }
 }
 
