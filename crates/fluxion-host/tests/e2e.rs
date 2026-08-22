@@ -357,3 +357,46 @@ async fn map_reduce_static_foreach() {
         .expect("aggregate job in results");
     assert_eq!(agg.status, "succeeded", "aggregate job must succeed");
 }
+
+/// python-hello: build task.py via `fluxion build python`, then run the resulting Wasm.
+/// Requires componentize-py to be installed; skipped in non-ci builds.
+#[tokio::test]
+#[cfg_attr(not(feature = "ci"), ignore = "requires componentize-py")]
+async fn python_hello_build_and_run() {
+    let root = workspace_root();
+    let script = root.join("components/python-hello/task.py");
+    let out = root.join("components/python-hello/hello.wasm");
+    let wit = root.join("wit");
+
+    // Build: fluxion build python task.py -o hello.wasm --wit-path wit
+    let status = std::process::Command::new(
+        root.join("target/debug/fluxion"),
+    )
+    .args(["build", "python"])
+    .arg(&script)
+    .arg("-o")
+    .arg(&out)
+    .arg("--wit-path")
+    .arg(&wit)
+    .status()
+    .expect("fluxion build python failed to launch");
+
+    assert!(
+        status.success(),
+        "fluxion build python exited with non-zero status"
+    );
+    assert!(out.exists(), "hello.wasm was not created");
+
+    // Run the built component directly via FluxionHost.
+    let host = Arc::new(FluxionHost::new().unwrap());
+    let perms = fluxion_core::workflow::PermissionSet::default();
+    let output = host
+        .run_component(&out, b"fluxion".to_vec(), &perms)
+        .expect("run_component failed");
+
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("hello from python"),
+        "expected 'hello from python' in output, got: {text}"
+    );
+}

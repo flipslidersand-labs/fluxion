@@ -112,6 +112,8 @@ jobs:
           if ! command -v cargo-component &>/dev/null; then
             cargo install cargo-component --locked -j2
           fi
+      - name: Install componentize-py
+        run: pip install componentize-py
       - name: Build Wasm components
         run: |
           for comp in alloc-bomb file-reader hello pipeline-stage spin; do
