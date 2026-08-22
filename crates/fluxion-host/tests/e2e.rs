@@ -369,17 +369,15 @@ async fn python_hello_build_and_run() {
     let wit = root.join("wit");
 
     // Build: fluxion build python task.py -o hello.wasm --wit-path wit
-    let status = std::process::Command::new(
-        root.join("target/debug/fluxion"),
-    )
-    .args(["build", "python"])
-    .arg(&script)
-    .arg("-o")
-    .arg(&out)
-    .arg("--wit-path")
-    .arg(&wit)
-    .status()
-    .expect("fluxion build python failed to launch");
+    let status = std::process::Command::new(root.join("target/debug/fluxion"))
+        .args(["build", "python"])
+        .arg(&script)
+        .arg("-o")
+        .arg(&out)
+        .arg("--wit-path")
+        .arg(&wit)
+        .status()
+        .expect("fluxion build python failed to launch");
 
     assert!(
         status.success(),

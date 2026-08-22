@@ -120,8 +120,8 @@ jobs:
             (cd components/$comp && cargo component build -j2)
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
-      - name: Build host
-        run: cargo build -p fluxion-host -j2
+      - name: Build host and CLI
+        run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
         run: cargo test -p fluxion-host --test e2e --features ci -j2
       - name: Upload logs on failure
