@@ -6,24 +6,42 @@ use std::process::Command;
 
 /// Build a Python script into a Wasm component using `componentize-py`.
 ///
-/// Equivalent to:
-/// ```
-/// componentize-py componentize --wit-path <wit_path> --world task-component <script> -o <out>
-/// ```
+/// componentize-py 0.25+ expects `<APP_NAME>` (module stem, not a file path)
+/// and resolves the script relative to `current_dir`.
 ///
 /// Returns an error with an actionable message if `componentize-py` is not on PATH.
 pub fn build_python(script: &Path, out: &Path, wit_path: &Path) -> Result<()> {
+    let app_name = script
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("script path has no filename"))?
+        .to_string_lossy()
+        .into_owned();
+
+    let script_dir = script
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("script path has no parent directory"))?;
+
+    // Resolve wit_path to absolute so it stays valid after current_dir change.
+    let abs_wit = if wit_path.is_absolute() {
+        wit_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(wit_path)
+    };
+
     let status = Command::new("componentize-py")
         .args([
             "componentize",
             "--wit-path",
-            &wit_path.to_string_lossy(),
+            &abs_wit.to_string_lossy(),
             "--world",
             "task-component",
-            &script.to_string_lossy(),
+            &app_name,
             "-o",
             &out.to_string_lossy(),
         ])
+        .current_dir(script_dir)
         .status()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
