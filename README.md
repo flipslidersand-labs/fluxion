@@ -258,6 +258,98 @@ cargo test --package fluxion-host --test e2e -- --ignored
 # memory-limits OOM enforcement            (<1s)
 ```
 
+## Python Components
+
+Fluxion supports Python components built with [componentize-py](https://github.com/bytecodealliance/componentize-py).
+
+### Prerequisites
+
+- Python 3.10+
+- `componentize-py` 0.13+: `pip install componentize-py`
+
+### WIT Interface
+
+Python components implement the `processor` interface defined in `wit/task.wit`:
+
+| Type        | Field      | Python type              |
+| ----------- | ---------- | ------------------------ |
+| `TaskInput` | `content`  | `bytes`                  |
+| `TaskInput` | `metadata` | `list[tuple[str, str]]`  |
+| `TaskOutput`| `content`  | `bytes`                  |
+| `TaskOutput`| `metadata` | `list[tuple[str, str]]`  |
+
+### Quickstart
+
+**1. Generate a stub** (`task.py`) from the WIT interface:
+
+```bash
+fluxion build python task.py --stub
+```
+
+This creates `task.py` with dataclass definitions and a default `process` implementation:
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class TaskInput:
+    content: bytes = b""
+    metadata: list[tuple[str, str]] = field(default_factory=list)
+
+@dataclass
+class TaskOutput:
+    content: bytes = b""
+    metadata: list[tuple[str, str]] = field(default_factory=list)
+
+def process(input: TaskInput) -> TaskOutput:
+    """Default implementation — override with your logic."""
+    return TaskOutput()
+```
+
+**2. Implement your logic** in `task.py`:
+
+```python
+def process(input: TaskInput) -> TaskOutput:
+    message = input.content.decode("utf-8", errors="replace")
+    result = f"hello from Python: {message}".encode()
+    return TaskOutput(content=result)
+```
+
+**3. Build the Wasm component**:
+
+```bash
+fluxion build python task.py -o task.wasm
+```
+
+**4. Run it directly**:
+
+```bash
+fluxion component run task.wasm --input "world"
+# → hello from Python: world
+```
+
+**5. Use it in a workflow**:
+
+```yaml
+name: python-pipeline
+jobs:
+  greet:
+    component: "task.wasm"
+    input: "world"
+```
+
+```bash
+fluxion run workflow.yaml
+```
+
+### Version Constraints
+
+| Dependency        | Minimum | Notes                                    |
+| ----------------- | ------- | ---------------------------------------- |
+| Python            | 3.10    | Dataclass field typing requires 3.10+    |
+| componentize-py   | 0.13    | WIT world `task-component` support       |
+| cargo-component   | 0.13    | Required for Rust components only        |
+
 ## Benchmarks
 
 Criterion benchmarks covering the full scheduler hot-path (wasmtime compile + execute):
