@@ -142,6 +142,29 @@ enum Commands {
         #[command(subcommand)]
         action: RegistryCommands,
     },
+    /// Build a Wasm component from source
+    Build {
+        #[command(subcommand)]
+        action: BuildCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuildCommands {
+    /// Compile a Python script into a Wasm component using componentize-py
+    Python {
+        /// Path to the Python script (e.g. task.py)
+        script: PathBuf,
+        /// Output .wasm path
+        #[arg(short, long, default_value = "component.wasm")]
+        out: PathBuf,
+        /// Path to the WIT directory (default: ./wit)
+        #[arg(long)]
+        wit_path: Option<PathBuf>,
+        /// Generate a task.py stub from wit/task.wit instead of building
+        #[arg(long)]
+        stub: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -472,6 +495,23 @@ async fn run(command: Commands) -> Result<()> {
             }
             RegistryCommands::Rm { id } => {
                 registry::rm(&id)?;
+            }
+        },
+
+        Commands::Build { action } => match action {
+            BuildCommands::Python {
+                script,
+                out,
+                wit_path,
+                stub,
+            } => {
+                let wit = build::resolve_wit_path(wit_path);
+                if stub {
+                    let stub_out = script.with_extension("py");
+                    build::generate_stub(&wit.join("task.wit"), &stub_out)?;
+                } else {
+                    build::build_python(&script, &out, &wit)?;
+                }
             }
         },
     }
