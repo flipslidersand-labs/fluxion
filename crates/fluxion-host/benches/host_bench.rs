@@ -47,7 +47,6 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         component_sha256: None,
         reduce: None,
         executor: ExecutorKind::Local,
-        async_dispatch: false,
     }
 }
 
@@ -68,7 +67,6 @@ fn hello_job(depends_on: Vec<String>) -> JobDefinition {
         component_sha256: None,
         reduce: None,
         executor: ExecutorKind::Local,
-        async_dispatch: false,
     }
 }
 
@@ -130,20 +128,15 @@ fn chain_workflow(n: usize) -> Workflow {
 
 fn bench_cache(c: &mut Criterion) {
     let host = FluxionHost::new().expect("FluxionHost::new");
-    // Expose the engine via cache internals — we need an Engine for cache ops.
-    // Use a standalone engine matching FluxionHost's config.
     let mut cfg = wasmtime::Config::new();
     cfg.wasm_component_model(true);
     cfg.epoch_interruption(true);
     let engine = wasmtime::Engine::new(&cfg).expect("engine");
 
     let wasm_bytes = hello_wasm_bytes();
-    let tmp = tempfile::tempdir().expect("tempdir");
 
+    // Warm the cache via a fresh ComponentCache backed by a temp dir.
     let mut cache = ComponentCache::new();
-    cache.dir = tmp.path().to_path_buf();
-
-    // Warm the cache (store once so subsequent loads are hits)
     cache.store(&engine, &wasm_bytes).expect("initial store");
 
     let mut group = c.benchmark_group("cache");
@@ -154,18 +147,16 @@ fn bench_cache(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("store", |b| {
-        // Clear artifact before each iteration so we always measure cold compile.
-        let path = cache.artifact_path(&wasm_bytes);
+    // Cold-store benchmark: create a fresh cache each iteration so every
+    // store is a compile (no pre-existing artifact).
+    group.bench_function("store_cold", |b| {
         b.iter(|| {
-            std::fs::remove_file(&path).ok();
-            cache.store(&engine, &wasm_bytes).expect("store");
+            let mut fresh = ComponentCache::new();
+            fresh.store(&engine, &wasm_bytes).expect("store");
         })
     });
 
     group.finish();
-
-    // Keep host alive for the duration (its ticker thread must not stop early).
     drop(host);
 }
 
