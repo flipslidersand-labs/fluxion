@@ -6,8 +6,8 @@ use std::process::Command;
 
 /// Build a Python script into a Wasm component using `componentize-py`.
 ///
-/// componentize-py 0.25+ expects `<APP_NAME>` (module stem, not a file path)
-/// and resolves the script relative to `current_dir`.
+/// componentize-py 0.25+ uses top-level flags before the subcommand:
+///   componentize-py -d <wit_path> -w <world> componentize <app_name> -o <out>
 ///
 /// Returns an error with an actionable message if `componentize-py` is not on PATH.
 pub fn build_python(script: &Path, out: &Path, wit_path: &Path) -> Result<()> {
@@ -28,13 +28,14 @@ pub fn build_python(script: &Path, out: &Path, wit_path: &Path) -> Result<()> {
         std::env::current_dir().unwrap_or_default().join(wit_path)
     };
 
+    // -d / --wit-path and -w / --world are global flags that must come before the subcommand.
     let status = Command::new("componentize-py")
         .args([
-            "componentize",
-            "--wit-path",
+            "-d",
             &abs_wit.to_string_lossy(),
-            "--world",
+            "-w",
             "task-component",
+            "componentize",
             &app_name,
             "-o",
             &out.to_string_lossy(),
