@@ -303,11 +303,11 @@ async fn memory_limits_oom_enforcement() {
     );
 }
 
-/// map-reduce-demo: fetch → dynamic foreach transform (3 items) → json_array aggregate.
+/// map-reduce-demo: static foreach transform (3 items) → json_array aggregate.
 /// Verifies the full Map/Reduce pipeline executes and each stage produces output.
 #[tokio::test]
 #[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
-async fn map_reduce_dynamic_foreach() {
+async fn map_reduce_static_foreach() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let wf_path = workspace_root().join("examples/map-reduce/workflow.yaml");
     let mut wf = Workflow::from_file(&wf_path).expect("load map-reduce yaml");
@@ -328,10 +328,10 @@ async fn map_reduce_dynamic_foreach() {
         result.jobs
     );
 
-    // fetch + 3 dynamic transform children + aggregate = at least 5 jobs
+    // 3 static transform children + aggregate = at least 4 jobs
     assert!(
-        result.jobs.len() >= 5,
-        "expected ≥5 job results (fetch + 3×transform + aggregate), got {}",
+        result.jobs.len() >= 4,
+        "expected ≥4 job results (3×transform + aggregate), got {}",
         result.jobs.len()
     );
 

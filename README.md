@@ -179,14 +179,13 @@ fluxion run examples/memory-limits-demo.yaml
 # oom-job  FAILED   0.00s   (OOM: component exceeded memory_mb=1 limit)
 ```
 
-### map-reduce-demo — dynamic foreach + reduce
+### map-reduce-demo — static foreach + reduce
 
-`fetch` emits a list; `transform` is expanded into one child per item (dynamic fan-out);
+`transform` is expanded into one child per item (static fan-out);
 `aggregate` collects all outputs via `input_from` + `reduce`:
 
 ```bash
 fluxion run examples/map-reduce/workflow.yaml
-# fetch        succeeded   0.01s
 # transform.0  succeeded   0.01s
 # transform.1  succeeded   0.01s
 # transform.2  succeeded   0.01s
@@ -198,21 +197,16 @@ YAML structure:
 ```yaml
 name: map-reduce-demo
 jobs:
-  fetch:
-    component: hello.wasm
-    input: '{"items": ["alpha", "beta", "gamma"]}'
-
   transform:
     component: hello.wasm
-    foreach: "$.items"          # fan-out: one child job per item
-    depends_on: [fetch]
+    input: '["alpha", "beta", "gamma"]'
+    foreach: "$[*]"             # fan-out: one child job per item
 
   aggregate:
     component: hello.wasm
     depends_on: [transform]
     input_from: transform       # collect all transform outputs
-    reduce:
-      mode: json_array          # wrap outputs as a JSON array
+    reduce: json_array          # wrap outputs as a JSON array
 ```
 
 **`reduce` modes:**
