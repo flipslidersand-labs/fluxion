@@ -433,7 +433,7 @@ async fn fetch_token(client: &Client, www_auth: &str, scope_repo: &str) -> Resul
         .ok_or_else(|| anyhow!("no token in auth response: {json}"))
 }
 
-fn parse_bearer_param<'a>(header: &'a str, key: &str) -> Option<String> {
+fn parse_bearer_param(header: &str, key: &str) -> Option<String> {
     let needle = format!("{}=\"", key);
     let start = header.find(needle.as_str())? + needle.len();
     let end = header[start..].find('"')? + start;
