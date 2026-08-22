@@ -159,6 +159,67 @@ Phase 5 完了後に着手。
 
 ---
 
+## Python コンポーネント開発
+
+Fluxion は Rust 以外に Python でコンポーネントを実装できます。`componentize-py` が Python スクリプトを Wasm コンポーネントに変換します。
+
+### セットアップ
+
+```bash
+pip install componentize-py  # 0.13+
+```
+
+### WIT インターフェース
+
+すべての Python コンポーネントは `wit/task.wit` の `processor` インターフェースを実装します。
+
+```wit
+interface processor {
+    record task-input {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+    record task-output {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+    process: func(input: task-input) -> result<task-output, string>;
+}
+```
+
+### スタブ生成とビルド
+
+```bash
+# 1. task.py スタブを生成
+fluxion build python task.py --stub
+
+# 2. ロジックを実装して Wasm にビルド
+fluxion build python task.py -o task.wasm
+
+# 3. 動作確認
+fluxion component run task.wasm --input "world"
+```
+
+### ワークフローでの利用
+
+```yaml
+name: python-pipeline
+jobs:
+  process:
+    component: "task.wasm"
+    input: "hello"
+    executor: local   # または remote
+```
+
+### 注意点
+
+- Python 3.10+ 必須（dataclass の型アノテーション構文）
+- `content` フィールドは `bytes` 型。文字列は `encode()`/`decode()` で変換
+- `metadata` は `list[tuple[str, str]]` — タグ・ヘッダーの受け渡しに使用
+- `process` が例外を送出すると `result::error(string)` としてホストに伝播
+
+---
+
 ## 実装順序の根拠
 
 1. **Phase 1 を最初に**: WIT + Wasmtime の学習コストが最大。ここを乗り越えれば残りは Rust の一般的な実装
