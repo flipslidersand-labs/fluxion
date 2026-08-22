@@ -219,6 +219,33 @@ cargo test --package fluxion-host --test e2e -- --ignored
 # memory-limits OOM enforcement            (<1s)
 ```
 
+## Benchmarks
+
+Criterion benchmarks covering the full scheduler hot-path (wasmtime compile + execute):
+
+```bash
+# Quick start (builds hello.wasm if needed)
+./scripts/bench.sh
+
+# Run a specific group
+./scripts/bench.sh workflow_run
+
+# Bencher output format (used in CI)
+./scripts/bench.sh -- --output-format bencher
+```
+
+Benchmark groups:
+
+| Group | What it measures |
+|-------|-----------------|
+| `cache` | ComponentCache load hit vs cold compile |
+| `dag_build` | DAG topological sort for 50 / 200 jobs |
+| `run_component` | Single `hello.wasm` execution (warm cache) |
+| `workflow_run/sequential/{1,3,5}` | Full scheduler run — N-job chain |
+| `workflow_run/parallel/{1,3,5}` | Full scheduler run — N independent jobs |
+
+CI automatically posts benchmark results as PR comments via `bench.yml`.
+
 ## OCI Registry
 
 Push and pull Wasm components to/from OCI-compatible registries:

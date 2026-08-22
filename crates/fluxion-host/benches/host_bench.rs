@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fluxion_core::dag::Dag;
-use fluxion_core::workflow::{JobDefinition, Workflow};
-use fluxion_host::FluxionHost;
+use fluxion_core::workflow::{ExecutorKind, JobDefinition, Workflow};
 use fluxion_host::cache::ComponentCache;
+use fluxion_host::{FluxionHost, scheduler};
 use indexmap::IndexMap;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -21,6 +21,13 @@ fn hello_wasm_bytes() -> Vec<u8> {
     let path = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
     std::fs::read(&path)
         .expect("hello.wasm not built — run `cargo component build` in components/hello")
+}
+
+fn hello_wasm_path() -> String {
+    workspace_root()
+        .join("components/hello/target/wasm32-wasip1/debug/hello.wasm")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
@@ -39,6 +46,64 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         fail_fast: false,
         component_sha256: None,
         reduce: None,
+        executor: ExecutorKind::Local,
+        async_dispatch: false,
+    }
+}
+
+fn hello_job(depends_on: Vec<String>) -> JobDefinition {
+    JobDefinition {
+        component: hello_wasm_path(),
+        depends_on,
+        input: Some(r#""bench""#.to_string()),
+        permissions: Default::default(),
+        worker: None,
+        env: Default::default(),
+        when: None,
+        foreach: None,
+        input_from: None,
+        max_parallel: None,
+        output_size_limit_mb: None,
+        fail_fast: false,
+        component_sha256: None,
+        reduce: None,
+        executor: ExecutorKind::Local,
+        async_dispatch: false,
+    }
+}
+
+/// Build a sequential chain of N hello jobs: job_0 → job_1 → … → job_{n-1}
+fn sequential_workflow(n: usize) -> Workflow {
+    let mut jobs = IndexMap::new();
+    for i in 0..n {
+        let dep = if i > 0 {
+            vec![format!("job_{}", i - 1)]
+        } else {
+            vec![]
+        };
+        jobs.insert(format!("job_{}", i), hello_job(dep));
+    }
+    Workflow {
+        name: format!("seq-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
+    }
+}
+
+/// Build N independent hello jobs (all run in parallel).
+fn parallel_workflow(n: usize) -> Workflow {
+    let mut jobs = IndexMap::new();
+    for i in 0..n {
+        jobs.insert(format!("job_{}", i), hello_job(vec![]));
+    }
+    Workflow {
+        name: format!("par-{n}"),
+        jobs,
+        workers: vec![],
+        max_parallel: None,
+        workers_srv: None,
     }
 }
 
@@ -150,5 +215,68 @@ fn bench_run_component(c: &mut Criterion) {
     let _ = wasm_bytes;
 }
 
-criterion_group!(benches, bench_cache, bench_dag_build, bench_run_component);
+// ── scheduler end-to-end: run full workflow (warm cache) ─────────────────────
+
+fn bench_workflow_run(c: &mut Criterion) {
+    // hello.wasm must be pre-built; skip gracefully if absent.
+    let wasm = workspace_root().join("components/hello/target/wasm32-wasip1/debug/hello.wasm");
+    if !wasm.exists() {
+        eprintln!(
+            "SKIP bench_workflow_run: hello.wasm not found (run `cargo component build` in components/hello)"
+        );
+        return;
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    // Warm the component cache so measurement reflects post-JIT latency.
+    let host = Arc::new(FluxionHost::new().expect("FluxionHost::new"));
+    let perms = fluxion_core::workflow::PermissionSet::default();
+    host.run_component(&wasm, b"warmup".to_vec(), &perms)
+        .expect("warmup run");
+
+    let wf_path = workspace_root().join("examples/three-stage.yaml");
+
+    let mut group = c.benchmark_group("workflow_run");
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(15));
+
+    for n in [1usize, 3, 5] {
+        // Sequential: job_0 → job_1 → … → job_{n-1}
+        let seq_wf = sequential_workflow(n);
+        let seq_path = wf_path.clone();
+        let h = Arc::clone(&host);
+        group.bench_with_input(BenchmarkId::new("sequential", n), &n, |b, _| {
+            b.iter(|| {
+                rt.block_on(scheduler::run_silent(&seq_wf, &seq_path, Arc::clone(&h)))
+                    .expect("sequential run");
+            });
+        });
+
+        // Parallel: N independent jobs (no deps)
+        let par_wf = parallel_workflow(n);
+        let par_path = wf_path.clone();
+        let h = Arc::clone(&host);
+        group.bench_with_input(BenchmarkId::new("parallel", n), &n, |b, _| {
+            b.iter(|| {
+                rt.block_on(scheduler::run_silent(&par_wf, &par_path, Arc::clone(&h)))
+                    .expect("parallel run");
+            });
+        });
+    }
+
+    group.finish();
+    drop(host);
+}
+
+criterion_group!(
+    benches,
+    bench_cache,
+    bench_dag_build,
+    bench_run_component,
+    bench_workflow_run
+);
 criterion_main!(benches);
