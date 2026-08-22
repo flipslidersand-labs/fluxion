@@ -514,6 +514,23 @@ async fn run(command: Commands) -> Result<()> {
                 }
             }
         },
+
+        Commands::Build { action } => match action {
+            BuildCommands::Python {
+                script,
+                out,
+                wit_path,
+                stub,
+            } => {
+                let wit = build::resolve_wit_path(wit_path);
+                if stub {
+                    let stub_out = script.with_extension("py");
+                    build::generate_stub(&wit.join("task.wit"), &stub_out)?;
+                } else {
+                    build::build_python(&script, &out, &wit)?;
+                }
+            }
+        },
     }
 
     Ok(())
