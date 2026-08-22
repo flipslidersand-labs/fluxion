@@ -145,9 +145,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum RegistryCommands {
-    /// Pull a Wasm component from an OCI registry
+    /// Pull a Wasm component from an OCI registry and save locally
     Pull {
-        /// OCI reference (e.g. ghcr.io/org/repo:latest)
+        /// OCI reference (e.g. localhost:5000/myapp:v1)
         oci_ref: String,
         /// Save to this path (default: derived from ref)
         #[arg(long, short)]
@@ -160,12 +160,12 @@ enum RegistryCommands {
         /// OCI reference (e.g. localhost:5000/myapp:v1)
         oci_ref: String,
     },
-    /// List tags for a repository
-    List {
-        /// Registry hostname (e.g. localhost:5000)
-        registry: String,
-        /// Repository name (e.g. myorg/myapp)
-        repo: String,
+    /// List locally registered components
+    List,
+    /// Remove a locally registered component by ID
+    Rm {
+        /// Entry ID (from `fluxion registry list`)
+        id: String,
     },
 }
 
@@ -466,8 +466,11 @@ async fn run(command: Commands) -> Result<()> {
             RegistryCommands::Push { path, oci_ref } => {
                 registry::push(&path, &oci_ref).await?;
             }
-            RegistryCommands::List { registry, repo } => {
-                registry::list(&registry, &repo).await?;
+            RegistryCommands::List => {
+                registry::local_list()?;
+            }
+            RegistryCommands::Rm { id } => {
+                registry::rm(&id)?;
             }
         },
     }
