@@ -24,5 +24,4 @@ jobs:
     component: ../../components/hello/target/wasm32-wasip1/debug/hello.wasm
     depends_on: [transform]
     input_from: transform
-    reduce:
-      mode: json_array
+    reduce: json_array
