@@ -46,6 +46,8 @@ fn dummy_job(depends_on: Vec<String>) -> JobDefinition {
         fail_fast: false,
         component_sha256: None,
         reduce: None,
+        async_dispatch: false,
+        oci_ref: None,
         executor: ExecutorKind::Local,
     }
 }
@@ -66,6 +68,8 @@ fn hello_job(depends_on: Vec<String>) -> JobDefinition {
         fail_fast: false,
         component_sha256: None,
         reduce: None,
+        async_dispatch: false,
+        oci_ref: None,
         executor: ExecutorKind::Local,
     }
 }
@@ -136,7 +140,7 @@ fn bench_cache(c: &mut Criterion) {
     let wasm_bytes = hello_wasm_bytes();
 
     // Warm the cache via a fresh ComponentCache backed by a temp dir.
-    let mut cache = ComponentCache::new();
+    let cache = ComponentCache::new();
     cache.store(&engine, &wasm_bytes).expect("initial store");
 
     let mut group = c.benchmark_group("cache");
@@ -151,7 +155,7 @@ fn bench_cache(c: &mut Criterion) {
     // store is a compile (no pre-existing artifact).
     group.bench_function("store_cold", |b| {
         b.iter(|| {
-            let mut fresh = ComponentCache::new();
+            let fresh = ComponentCache::new();
             fresh.store(&engine, &wasm_bytes).expect("store");
         })
     });

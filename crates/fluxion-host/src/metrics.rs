@@ -52,6 +52,16 @@ pub fn gather() -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
+/// Serve `/metrics` on the given port (blocking; run in a spawned task).
+pub async fn serve(port: u16) -> anyhow::Result<()> {
+    use axum::{Router, routing::get};
+    let app = Router::new().route("/metrics", get(|| async { gather() }));
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!("Prometheus metrics on :{port}/metrics");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,14 +112,4 @@ mod tests {
         assert!(output.contains("fluxion_worker_health"));
         assert!(output.contains("localhost:8080"));
     }
-}
-
-/// Serve `/metrics` on the given port (blocking; run in a spawned task).
-pub async fn serve(port: u16) -> anyhow::Result<()> {
-    use axum::{Router, routing::get};
-    let app = Router::new().route("/metrics", get(|| async { gather() }));
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!("Prometheus metrics on :{port}/metrics");
-    axum::serve(listener, app).await?;
-    Ok(())
 }

@@ -1025,7 +1025,7 @@ mod tests {
     async fn resolve_ipv6_entries_pass_through() {
         let cases = vec!["[::1]:8080".to_string(), "::1".to_string()];
         for input in &cases {
-            let resolved = resolve_network_allow(&[input.clone()]).await;
+            let resolved = resolve_network_allow(std::slice::from_ref(input)).await;
             assert_eq!(
                 resolved,
                 vec![input.clone()],

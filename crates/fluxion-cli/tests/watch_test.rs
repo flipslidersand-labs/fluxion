@@ -146,7 +146,6 @@ fn watch_file_change_triggers_rerun() {
 
     // Touch the file to trigger a change event
     let mut file = std::fs::OpenOptions::new()
-        .write(true)
         .append(true)
         .open(&path)
         .expect("open for append");
@@ -171,5 +170,6 @@ fn watch_file_change_triggers_rerun() {
     }
 
     let _ = child.kill();
+    let _ = child.wait();
     assert!(found, "expected re-run message in watch stdout within 3 s");
 }

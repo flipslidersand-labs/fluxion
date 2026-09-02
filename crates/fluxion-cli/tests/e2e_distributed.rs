@@ -36,10 +36,10 @@ fn hello_wasm() -> String {
 fn wait_for_worker(port: u16, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{port}/health")) {
-            if resp.status().is_success() {
-                return;
-            }
+        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{port}/health"))
+            && resp.status().is_success()
+        {
+            return;
         }
         assert!(
             std::time::Instant::now() < deadline,
