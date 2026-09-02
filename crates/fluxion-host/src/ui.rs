@@ -207,6 +207,20 @@ fn html_fragment(body: String) -> Response {
         .unwrap()
 }
 
+struct UiError(anyhow::Error);
+
+impl IntoResponse for UiError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for UiError {
+    fn from(e: E) -> Self {
+        Self(e.into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -367,19 +381,5 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_body(resp.into_body()).await;
         assert!(body.contains("No jobs recorded."));
-    }
-}
-
-struct UiError(anyhow::Error);
-
-impl IntoResponse for UiError {
-    fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
-    }
-}
-
-impl<E: Into<anyhow::Error>> From<E> for UiError {
-    fn from(e: E) -> Self {
-        Self(e.into())
     }
 }

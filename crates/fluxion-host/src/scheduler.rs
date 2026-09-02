@@ -1466,30 +1466,26 @@ mod tests {
                     let mut tmp = [0u8; 8192];
                     let mut header_end = None;
                     let mut content_len = None;
-                    loop {
-                        let n = match sock.read(&mut tmp).await {
-                            Ok(n) => n,
-                            Err(_) => break,
-                        };
+                    while let Ok(n) = sock.read(&mut tmp).await {
                         if n == 0 {
                             break;
                         }
                         buf.extend_from_slice(&tmp[..n]);
-                        if header_end.is_none() {
-                            if let Some(p) = find(&buf, b"\r\n\r\n") {
-                                header_end = Some(p + 4);
-                                let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
-                                for line in head.lines() {
-                                    if let Some(v) = line.strip_prefix("content-length:") {
-                                        content_len = v.trim().parse::<usize>().ok();
-                                    }
+                        if header_end.is_none()
+                            && let Some(p) = find(&buf, b"\r\n\r\n")
+                        {
+                            header_end = Some(p + 4);
+                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                            for line in head.lines() {
+                                if let Some(v) = line.strip_prefix("content-length:") {
+                                    content_len = v.trim().parse::<usize>().ok();
                                 }
                             }
                         }
-                        if let (Some(he), Some(cl)) = (header_end, content_len) {
-                            if buf.len() >= he + cl {
-                                break;
-                            }
+                        if let (Some(he), Some(cl)) = (header_end, content_len)
+                            && buf.len() >= he + cl
+                        {
+                            break;
                         }
                     }
                     let body = format!(
