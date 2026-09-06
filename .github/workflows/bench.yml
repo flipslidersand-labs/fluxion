@@ -43,7 +43,10 @@ jobs:
         run: cargo bench -p fluxion-host --no-run
 
       - name: Run benchmarks
+        # #770: `| tee` は cargo bench 自体の終了コードをマスクするため、
+        # pipefail 無しだと失敗しても green のまま bench-output.txt が空になり得る。
         run: |
+          set -o pipefail
           cargo bench -p fluxion-host -- \
             --output-format bencher \
             | tee bench-output.txt
