@@ -1,6 +1,7 @@
 # Fluxion
 
 [![CI](https://github.com/flipslidersand/fluxion/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand/fluxion/actions/workflows/ci.yml)
+![coverage floor](https://img.shields.io/badge/coverage%20floor-60%25-blue)
 
 Safe Wasm-based job execution engine with capability-controlled sandboxing and DAG scheduling.
 
