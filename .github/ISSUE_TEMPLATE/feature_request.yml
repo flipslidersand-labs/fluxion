@@ -1,0 +1,53 @@
+name: Feature Request
+description: 新機能・機能追加の提案
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 目的・背景
+      description: なぜこの機能が必要か。解決したい課題は何か
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: スコープ
+      description: やること・やらないことを明記する
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: design-phase
+    attributes:
+      label: 設計フェーズ（実装着手前に完了させる）
+      description: >-
+        fix:feat 比率の改善（dev-infrastructure#775）のための構造化。
+        全項目にチェックが入ったら Issue に `design-complete` ラベルを付ける。
+        着手前に埋まっていない項目は、着手前に埋めること
+      options:
+        - label: インターフェース定義済み（API / 関数シグネチャ）
+          required: true
+        - label: エッジケース列挙済み
+          required: true
+        - label: テストケース概要記載済み
+          required: true
+        - label: 影響範囲確認済み（既存機能・他モジュールへの影響）
+          required: true
+
+  - type: textarea
+    id: ac
+    attributes:
+      label: Acceptance Criteria
+      description: 完了の定義。チェックボックス形式で
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 補足
+    validations:
+      required: false
