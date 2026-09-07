@@ -1316,6 +1316,7 @@ fn print_result(event: &JobEvent, pad: usize) {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    use fluxion_core::workflow::ResourceLimits;
     use std::io::Write as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1462,6 +1463,17 @@ mod tests {
                 tokio::spawn(async move {
                     // Drain the request (up to Content-Length) so the client's
                     // write completes before we reply.
+                    //
+                    // #220: run_remote() issues a `HEAD /components/{sha256}`
+                    // CAS check before the actual `/run` POST. A HEAD (and any
+                    // other request with no body) has no `Content-Length`
+                    // header, so `content_len` stays `None` forever and the
+                    // old logic kept calling `sock.read()` waiting for a body
+                    // that would never arrive — while the client was itself
+                    // waiting for our response on the same connection. Real
+                    // deadlock (both sides blocked), not merely slow. Once
+                    // headers are parsed, treat "no Content-Length" as "no
+                    // body" and stop draining immediately.
                     let mut buf = Vec::new();
                     let mut tmp = [0u8; 8192];
                     let mut header_end = None;
@@ -1480,6 +1492,9 @@ mod tests {
                                 if let Some(v) = line.strip_prefix("content-length:") {
                                     content_len = v.trim().parse::<usize>().ok();
                                 }
+                            }
+                            if content_len.is_none() {
+                                break;
                             }
                         }
                         if let (Some(he), Some(cl)) = (header_end, content_len)
@@ -1519,6 +1534,29 @@ mod tests {
             .collect()
     }
 
+    /// #220: `PermissionSet::default()` の `timeout_secs` (60s) をそのまま
+    /// フェイルオーバーテストに使うと、`remote::run_remote` が
+    /// `timeout_secs + 10` (=70s) をタイムアウトとして使うため、down worker
+    /// 1件あたり最大70秒待つことになる。テストでは down worker への到達不能を
+    /// 高速に検出させるため短いタイムアウトを使う。
+    ///
+    /// ただし調査の結果、この reqwest 側タイムアウトを縮めても環境によっては
+    /// （少なくともこの開発サンドボックスでは）依然として60秒超ハングする
+    /// ことを確認した — 恐らく OS/ネットワーク層で closed port への
+    /// connect() 自体が async タイムアウトの外側でブロックしている
+    /// （sandbox 特有のネットワーク制限の可能性がある）。原因の完全特定は
+    /// 未了のため、テスト側にも `tokio::time::timeout` を被せて「原因不明の
+    /// まま無期限にハングする」から「10秒で明確に失敗する」に変える。
+    fn fast_timeout_perms() -> PermissionSet {
+        PermissionSet {
+            limits: ResourceLimits {
+                timeout_secs: 2,
+                ..ResourceLimits::default()
+            },
+            ..PermissionSet::default()
+        }
+    }
+
     #[tokio::test]
     async fn fails_over_to_healthy_worker() {
         // First worker is unreachable; the job must succeed on the second.
@@ -1527,14 +1565,18 @@ mod tests {
         let f = tmp_wasm();
         let path = f.path().to_string_lossy().into_owned();
         let workers = plain_workers(&[down, up]);
-        let (out, _) = run_with_failover(
-            &workers,
-            &path,
-            b"in",
-            &PermissionSet::default(),
-            &HashMap::new(),
+        let (out, _) = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with_failover(
+                &workers,
+                &path,
+                b"in",
+                &fast_timeout_perms(),
+                &HashMap::new(),
+            ),
         )
         .await
+        .expect("run_with_failover should not hang past 10s (#220)")
         .expect("should fail over to the healthy worker");
         assert_eq!(out, b"ok-output");
     }
@@ -1546,14 +1588,18 @@ mod tests {
         let f = tmp_wasm();
         let path = f.path().to_string_lossy().into_owned();
         let workers = plain_workers(&[d1.clone(), d2.clone()]);
-        let err = run_with_failover(
-            &workers,
-            &path,
-            b"in",
-            &PermissionSet::default(),
-            &HashMap::new(),
+        let err = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with_failover(
+                &workers,
+                &path,
+                b"in",
+                &fast_timeout_perms(),
+                &HashMap::new(),
+            ),
         )
         .await
+        .expect("run_with_failover should not hang past 10s (#220)")
         .expect_err("all workers down → error");
         let msg = err.to_string();
         assert!(msg.contains(&d1), "error should list {d1}: {msg}");

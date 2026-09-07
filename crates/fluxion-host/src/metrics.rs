@@ -68,11 +68,21 @@ mod tests {
 
     #[test]
     fn gather_contains_expected_metric_names() {
-        // Touch each metric so it appears in the registry output.
-        // HistogramVec requires at least one observation to produce samples.
+        // #220: touch every *Vec metric explicitly (ACTIVE_JOBS is a bare
+        // Gauge, not a Vec, so it always emits a sample once registered).
+        // prometheus emits no sample lines for a CounterVec/GaugeVec/
+        // HistogramVec until at least one label combination has been
+        // recorded, so relying on some other test in this binary to have
+        // touched them first made this test order-dependent (it failed
+        // whenever run alone, and sometimes even in the full suite
+        // depending on scheduling).
         JOB_DURATION
             .with_label_values(&["_init_check"])
             .observe(0.0);
+        JOBS_TOTAL
+            .with_label_values(&["_init_check", "_init_check"])
+            .inc_by(0.0);
+        WORKER_HEALTH.with_label_values(&["_init_check"]).set(0.0);
         let output = gather();
         assert!(output.contains("fluxion_jobs_total"));
         assert!(output.contains("fluxion_job_duration_seconds"));
