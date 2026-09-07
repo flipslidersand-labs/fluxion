@@ -24,9 +24,12 @@ jobs:
     name: Criterion benchmarks
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
     # #770: リポジトリの default_workflow_permissions が read のため、
-    # Store benchmark results (gh-pages への push) には contents: write が要る。
+    # Store benchmark results (gh-pages への push) には contents: write、
+    # Comment benchmark results on PR (PR へのコメント投稿) には
+    # pull-requests: write が要る。
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
