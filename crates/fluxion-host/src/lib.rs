@@ -543,7 +543,12 @@ async fn resolve_entry(s: &str) -> Vec<String> {
             return ips
                 .iter()
                 .map(|ip| match port {
-                    Some(p) => format!("{ip}:{p}"),
+                    // SocketAddr's Display brackets IPv6 correctly (`[::1]:12345`);
+                    // formatting `IpAddr` + `:port` directly produces the
+                    // ambiguous/invalid `::1:12345` for IPv6 hosts (#220 —
+                    // observed on GitHub Actions runners where "localhost"
+                    // resolves to `::1` before `127.0.0.1`).
+                    Some(p) => SocketAddr::new(*ip, p).to_string(),
                     None => ip.to_string(),
                 })
                 .collect();
@@ -563,7 +568,12 @@ async fn resolve_entry(s: &str) -> Vec<String> {
             let result: Vec<String> = ips
                 .iter()
                 .map(|ip| match port {
-                    Some(p) => format!("{ip}:{p}"),
+                    // SocketAddr's Display brackets IPv6 correctly (`[::1]:12345`);
+                    // formatting `IpAddr` + `:port` directly produces the
+                    // ambiguous/invalid `::1:12345` for IPv6 hosts (#220 —
+                    // observed on GitHub Actions runners where "localhost"
+                    // resolves to `::1` before `127.0.0.1`).
+                    Some(p) => SocketAddr::new(*ip, p).to_string(),
                     None => ip.to_string(),
                 })
                 .collect();
