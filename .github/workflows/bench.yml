@@ -23,6 +23,13 @@ jobs:
   bench:
     name: Criterion benchmarks
     runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    # #770: リポジトリの default_workflow_permissions が read のため、
+    # Store benchmark results (gh-pages への push) には contents: write、
+    # Comment benchmark results on PR (PR へのコメント投稿) には
+    # pull-requests: write が要る。
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +50,10 @@ jobs:
         run: cargo bench -p fluxion-host --no-run
 
       - name: Run benchmarks
+        # #770: `| tee` は cargo bench 自体の終了コードをマスクするため、
+        # pipefail 無しだと失敗しても green のまま bench-output.txt が空になり得る。
         run: |
+          set -o pipefail
           cargo bench -p fluxion-host -- \
             --output-format bencher \
             | tee bench-output.txt

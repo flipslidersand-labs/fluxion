@@ -8,6 +8,13 @@ on:
 
 jobs:
   quality:
+    # qa-workflows#8: rust-test.yml が PR coverage comment 機能のため
+    # pull-requests: write を要求するようになった。呼び出し元が明示的に
+    # 許可しないと startup_failure になる（default_workflow_permissions が
+    # read のため）。
+    permissions:
+      contents: read
+      pull-requests: write
     uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
     with:
       rust-version: "stable"
