@@ -15,10 +15,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # #220: Test + coverage が原因不明のまま6時間ハングし GitHub Actions の
-    # デフォルト上限で強制キャンセルされた実績があるため、暫定的に上限を
-    # 設定してログを確実に取得できるようにする（原因調査は #220 側）。
-    timeout-minutes: 15
     uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
     with:
       rust-version: "stable"
