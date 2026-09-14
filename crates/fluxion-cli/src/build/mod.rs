@@ -78,3 +78,53 @@ pub fn generate_stub(wit_path: &Path, output: &Path) -> Result<()> {
     println!("Generated stub → {}", output.display());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_wit_path_defaults_to_wit_dir() {
+        assert_eq!(resolve_wit_path(None), PathBuf::from("./wit"));
+    }
+
+    #[test]
+    fn resolve_wit_path_returns_provided_value() {
+        let custom = PathBuf::from("/some/custom/wit");
+        assert_eq!(resolve_wit_path(Some(custom.clone())), custom);
+    }
+
+    #[test]
+    fn build_python_errors_when_script_has_no_filename() {
+        let err = build_python(
+            Path::new("/"),
+            Path::new("/tmp/out.wasm"),
+            Path::new("./wit"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no filename"));
+    }
+
+    #[test]
+    fn generate_stub_writes_output_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wit_path = tmp.path().join("task.wit");
+        std::fs::write(&wit_path, "record task-input {}\nrecord task-output {}\n").unwrap();
+        let output = tmp.path().join("stub.py");
+
+        generate_stub(&wit_path, &output).unwrap();
+
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert!(contents.contains("class TaskInput"));
+        assert!(contents.contains("class TaskOutput"));
+    }
+
+    #[test]
+    fn generate_stub_errors_on_missing_wit_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.wit");
+        let output = tmp.path().join("stub.py");
+        let err = generate_stub(&missing, &output).unwrap_err();
+        assert!(err.to_string().contains("failed to generate stub"));
+    }
+}

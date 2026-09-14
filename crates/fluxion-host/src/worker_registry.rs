@@ -47,4 +47,53 @@ mod tests {
         let result = health_check_all(&store).await.unwrap();
         assert!(result.is_empty());
     }
+
+    async fn spawn_health_ok_worker() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn closed_port_url() -> String {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn healthy_worker_is_marked_reachable_and_updated() {
+        let store = in_memory_store();
+        let url = spawn_health_ok_worker().await;
+        store.register_worker(&url).unwrap();
+
+        let healthy = health_check_all(&store).await.unwrap();
+        assert_eq!(healthy, vec![url.clone()]);
+
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("healthy"));
+    }
+
+    #[tokio::test]
+    async fn unreachable_worker_is_excluded_and_marked() {
+        let store = in_memory_store();
+        let url = closed_port_url().await;
+        store.register_worker(&url).unwrap();
+
+        let healthy = health_check_all(&store).await.unwrap();
+        assert!(healthy.is_empty());
+
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("unreachable"));
+    }
 }

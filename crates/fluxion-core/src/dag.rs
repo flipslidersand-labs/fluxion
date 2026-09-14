@@ -154,4 +154,55 @@ mod tests {
         let deps = make_deps(&[("a", &["b"]), ("b", &["a"])]);
         assert!(kahn_sort(&deps).is_err());
     }
+
+    fn make_dag(pairs: &[(&str, &[&str])]) -> Dag {
+        let deps = make_deps(pairs);
+        let mut dependents: HashMap<String, Vec<String>> =
+            deps.keys().map(|k| (k.clone(), vec![])).collect();
+        for (job_id, job_deps) in &deps {
+            for dep in job_deps {
+                dependents
+                    .entry(dep.clone())
+                    .or_default()
+                    .push(job_id.clone());
+            }
+        }
+        let topo_order = kahn_sort(&deps).unwrap();
+        Dag {
+            topo_order,
+            deps,
+            dependents,
+        }
+    }
+
+    #[test]
+    fn roots_returns_jobs_with_no_deps() {
+        let dag = make_dag(&[("a", &[]), ("b", &[]), ("c", &["a", "b"])]);
+        let mut roots = dag.roots();
+        roots.sort();
+        assert_eq!(roots, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn insert_nodes_extends_deps_and_dependents() {
+        let mut dag = make_dag(&[("a", &[])]);
+        let new_jobs = make_deps(&[("b", &["a"])]);
+        dag.insert_nodes(&new_jobs);
+
+        assert_eq!(dag.deps.get("b").unwrap(), &vec!["a".to_string()]);
+        assert_eq!(dag.dependents.get("a").unwrap(), &vec!["b".to_string()]);
+        assert!(dag.topo_order.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn remove_node_clears_all_references() {
+        let mut dag = make_dag(&[("a", &[]), ("b", &["a"]), ("c", &["a"])]);
+        dag.remove_node("b");
+
+        assert!(!dag.deps.contains_key("b"));
+        assert!(!dag.dependents.contains_key("b"));
+        assert!(!dag.topo_order.contains(&"b".to_string()));
+        assert!(!dag.dependents.get("a").unwrap().contains(&"b".to_string()));
+        assert!(dag.dependents.get("a").unwrap().contains(&"c".to_string()));
+    }
 }
