@@ -164,6 +164,9 @@ enum BuildCommands {
         /// Generate a task.py stub from wit/task.wit instead of building
         #[arg(long)]
         stub: bool,
+        /// With --stub: overwrite the script file even if it already has content
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -504,11 +507,12 @@ async fn run(command: Commands) -> Result<()> {
                 out,
                 wit_path,
                 stub,
+                force,
             } => {
                 let wit = build::resolve_wit_path(wit_path);
                 if stub {
                     let stub_out = script.with_extension("py");
-                    build::generate_stub(&wit.join("task.wit"), &stub_out)?;
+                    build::generate_stub(&wit.join("task.wit"), &stub_out, force)?;
                 } else {
                     build::build_python(&script, &out, &wit)?;
                 }
