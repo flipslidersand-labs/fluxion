@@ -91,3 +91,63 @@ jobs:
     assert!(result.success, "workflow must succeed: {result:?}");
     assert_eq!(result.succeeded, 1);
 }
+
+/// #233: `FluxionHost::run_from_oci` must not block the tokio worker thread
+/// while compiling/instantiating/executing the pulled component — that CPU-bound
+/// work has to run on `spawn_blocking`, the same pattern every other execution
+/// path in this crate uses. On a single-worker runtime, a concurrent sleep task
+/// can only complete on schedule if the worker was actually freed up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "requires local OCI registry on localhost:5000 and pre-built hello.wasm"]
+async fn run_from_oci_does_not_starve_worker_thread() {
+    if !registry_available() {
+        eprintln!("SKIP: no OCI registry on localhost:5000");
+        return;
+    }
+
+    let path = hello_wasm_path();
+    assert!(path.exists(), "hello.wasm not found at {}", path.display());
+    let wasm_bytes = std::fs::read(&path).unwrap();
+
+    // Use the OciClient directly (not the `oci::push`/`pull` free functions,
+    // which hardcode `https://`) so this test can talk to the plain-HTTP local
+    // registry the same way the rest of this file's `registry_available` check
+    // expects.
+    let client = fluxion_host::oci::OciClient::new("http://localhost:5000", None).unwrap();
+    client
+        .push("fluxion/hello", "starvation-test", &wasm_bytes)
+        .await
+        .expect("push should succeed");
+
+    let host = std::sync::Arc::new(
+        fluxion_host::FluxionHost::new()
+            .unwrap()
+            .with_oci_client(client),
+    );
+    let perms = fluxion_core::workflow::PermissionSet::default();
+    let env = std::collections::HashMap::new();
+
+    let sleep_task = tokio::spawn(async {
+        let start = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        start.elapsed()
+    });
+
+    let run_result = host
+        .clone()
+        .run_from_oci(
+            "fluxion/hello",
+            "starvation-test",
+            b"fluxion".to_vec(),
+            &perms,
+            &env,
+        )
+        .await;
+    run_result.expect("run_from_oci should succeed");
+
+    let sleep_elapsed = sleep_task.await.unwrap();
+    assert!(
+        sleep_elapsed < std::time::Duration::from_millis(200),
+        "sleep task was starved by run_from_oci blocking the worker thread: {sleep_elapsed:?}"
+    );
+}
