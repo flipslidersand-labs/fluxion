@@ -420,6 +420,7 @@ async fn run(command: Commands) -> Result<()> {
                 fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
             }
             WorkerCommands::Register { url } => {
+                validate_worker_url(&url)?;
                 let store = RunStore::open()?;
                 store.register_worker(&url)?;
                 println!("Registered: {url}");
@@ -1004,6 +1005,21 @@ fn component_item_kind(item: &wasmtime::component::types::ComponentItem) -> &'st
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Validate a worker URL before registering it. Rejects anything that isn't a
+/// well-formed http(s) URL, so a typo surfaces immediately instead of as an
+/// opaque connection error deep in the scheduler/worker dispatch path.
+fn validate_worker_url(url: &str) -> Result<()> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow::anyhow!("'{url}' is not a valid URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        anyhow::bail!(
+            "'{url}' has unsupported scheme '{}' — expected http or https",
+            parsed.scheme()
+        );
+    }
+    Ok(())
+}
+
 fn fmt_unix(secs: u64) -> String {
     chrono::DateTime::<Utc>::from_timestamp(secs as i64, 0)
         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -1176,7 +1192,7 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::fmt_unix;
+    use super::{fmt_unix, validate_worker_url};
 
     #[test]
     fn fmt_unix_includes_date_and_time() {
@@ -1188,5 +1204,29 @@ mod helper_tests {
     #[test]
     fn fmt_unix_epoch_zero() {
         assert_eq!(fmt_unix(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn validate_worker_url_accepts_http_and_https() {
+        assert!(validate_worker_url("http://worker-1:7777").is_ok());
+        assert!(validate_worker_url("https://worker-1:7777").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_malformed_url() {
+        let err = validate_worker_url("not a url").unwrap_err();
+        assert!(err.to_string().contains("not a valid URL"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_unsupported_scheme() {
+        let err = validate_worker_url("ftp://worker-1:7777").unwrap_err();
+        assert!(err.to_string().contains("unsupported scheme"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_missing_scheme() {
+        let err = validate_worker_url("worker-1:7777").unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 }
