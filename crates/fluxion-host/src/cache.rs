@@ -259,6 +259,36 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_digest_strips_sha256_prefix() {
+        let key = CacheKey::Digest("sha256:deadbeef".to_string());
+        assert_eq!(key.as_str_key(b"unused"), "deadbeef");
+    }
+
+    #[test]
+    fn cache_key_digest_without_prefix_is_unchanged() {
+        let key = CacheKey::Digest("deadbeef".to_string());
+        assert_eq!(key.as_str_key(b"unused"), "deadbeef");
+    }
+
+    #[test]
+    fn cache_key_path_hashes_wasm_bytes() {
+        let key = CacheKey::Path(PathBuf::from("/tmp/x.wasm"));
+        let bytes = b"some wasm bytes";
+        assert_eq!(key.as_str_key(bytes), wasm_key(bytes));
+    }
+
+    #[test]
+    fn load_by_key_miss_returns_none() {
+        let engine = test_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = ComponentCache::new();
+        cache.dir = tmp.path().to_path_buf();
+
+        let key = CacheKey::Digest("sha256:doesnotexist".to_string());
+        assert!(cache.load_by_key(&engine, &key, b"bytes").is_none());
+    }
+
+    #[test]
     fn artifact_path_contains_hash() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cache = ComponentCache::new();

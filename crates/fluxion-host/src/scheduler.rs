@@ -1751,4 +1751,88 @@ mod tests {
             );
         }
     }
+
+    // ── downstream_inclusive ────────────────────────────────────────────────
+
+    fn dag_from(edges: &[(&str, &[&str])]) -> Dag {
+        // edges: (job_id, deps)
+        let jobs_json: HashMap<&str, serde_json::Value> = edges
+            .iter()
+            .map(|(id, deps)| {
+                (
+                    *id,
+                    serde_json::json!({"component": "x.wasm", "depends_on": deps}),
+                )
+            })
+            .collect();
+        let s = serde_json::json!({"name": "t", "jobs": jobs_json}).to_string();
+        let wf: Workflow = serde_json::from_str(&s).unwrap();
+        Dag::build(&wf).unwrap()
+    }
+
+    #[test]
+    fn downstream_inclusive_includes_start_and_all_descendants() {
+        // a -> b -> c, a -> d
+        let dag = dag_from(&[("a", &[]), ("b", &["a"]), ("c", &["b"]), ("d", &["a"])]);
+        let result = downstream_inclusive(&dag, "a");
+        assert_eq!(
+            result,
+            std::collections::HashSet::from(["a", "b", "c", "d"])
+        );
+    }
+
+    #[test]
+    fn downstream_inclusive_leaf_returns_only_itself() {
+        let dag = dag_from(&[("a", &[]), ("b", &["a"])]);
+        let result = downstream_inclusive(&dag, "b");
+        assert_eq!(result, std::collections::HashSet::from(["b"]));
+    }
+
+    // ── eval_when ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn eval_when_malformed_expr_defaults_true() {
+        let statuses = HashMap::new();
+        assert!(eval_when("not-a-valid-expr", &statuses));
+    }
+
+    #[test]
+    fn eval_when_matches_success_status() {
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            "validate".to_string(),
+            JobStatus::Succeeded {
+                elapsed: std::time::Duration::from_millis(1),
+            },
+        );
+        assert!(eval_when("validate.status == 'SUCCESS'", &statuses));
+        assert!(!eval_when("validate.status != 'SUCCESS'", &statuses));
+        assert!(!eval_when("validate.status == 'FAILED'", &statuses));
+    }
+
+    #[test]
+    fn eval_when_matches_failed_status() {
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            "build".to_string(),
+            JobStatus::Failed {
+                elapsed: std::time::Duration::from_millis(1),
+                reason: "boom".to_string(),
+            },
+        );
+        assert!(eval_when("build.status == 'FAILED'", &statuses));
+    }
+
+    #[test]
+    fn eval_when_unknown_job_defaults_unknown() {
+        let statuses: HashMap<String, JobStatus> = HashMap::new();
+        assert!(!eval_when("missing.status == 'SUCCESS'", &statuses));
+        assert!(eval_when("missing.status == 'UNKNOWN'", &statuses));
+    }
+
+    #[test]
+    fn eval_when_non_status_attr_defaults_true() {
+        let statuses = HashMap::new();
+        assert!(eval_when("job.other == 'x'", &statuses));
+    }
 }
