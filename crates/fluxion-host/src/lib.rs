@@ -146,8 +146,15 @@ impl FluxionHost {
     ///
     /// `repository` and `reference` follow OCI conventions, e.g.
     /// `("org/hello", "v1.0")`.
+    ///
+    /// Takes `self: Arc<Self>` (matching every other execution call site in
+    /// this crate — scheduler.rs, fluxion-worker) because the actual
+    /// component run happens on `spawn_blocking`: `run_component_with_key` is
+    /// synchronous and CPU-bound, and running it inline on the async task
+    /// would block the tokio worker thread — and every other task scheduled
+    /// on it — until the epoch-interrupt timeout (#233).
     pub async fn run_from_oci(
-        &self,
+        self: Arc<Self>,
         repository: &str,
         reference: &str,
         input: Vec<u8>,
@@ -173,7 +180,14 @@ impl FluxionHost {
             .collect();
         let cache_key = CacheKey::Digest(format!("sha256:{hex}"));
 
-        self.run_component_with_key(&wasm_bytes, cache_key, input, perms, env)
+        let perms = perms.clone();
+        let env = env.clone();
+        let host = self;
+        tokio::task::spawn_blocking(move || {
+            host.run_component_with_key(&wasm_bytes, cache_key, input, &perms, &env)
+        })
+        .await
+        .context("run_from_oci: blocking task panicked")?
     }
 
     /// Like `run_component_measured` but accepts raw wasm bytes + an explicit cache key.
