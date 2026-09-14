@@ -598,4 +598,121 @@ mod tests {
         let won = store.claim_schedule("nonexistent", 0, 100).unwrap();
         assert!(!won, "claim on unknown id must return false");
     }
+
+    // ── worker registry ──────────────────────────────────────────────────────
+
+    #[test]
+    fn register_and_list_workers() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w2:9000").unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers.len(), 2);
+        assert_eq!(workers[0].url, "http://w1:9000");
+        assert!(workers[0].last_health.is_none());
+    }
+
+    #[test]
+    fn register_worker_is_idempotent() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w1:9000").unwrap();
+        assert_eq!(store.list_workers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_worker_deletes_row() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        let removed = store.remove_worker("http://w1:9000").unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.list_workers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_worker_missing_returns_zero() {
+        let store = open_tmp();
+        assert_eq!(store.remove_worker("http://ghost:9000").unwrap(), 0);
+    }
+
+    #[test]
+    fn update_worker_health_sets_status() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.update_worker_health("http://w1:9000", true).unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("healthy"));
+
+        store.update_worker_health("http://w1:9000", false).unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("unreachable"));
+    }
+
+    #[test]
+    fn registered_worker_urls_excludes_unreachable() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w2:9000").unwrap();
+        store.update_worker_health("http://w2:9000", false).unwrap();
+
+        let urls = store.registered_worker_urls().unwrap();
+        assert_eq!(urls, vec!["http://w1:9000".to_string()]);
+    }
+
+    // ── schedule registry ────────────────────────────────────────────────────
+
+    #[test]
+    fn add_list_remove_schedule_roundtrip() {
+        let store = open_tmp();
+        store
+            .add_schedule("sched-1", "wf.yaml", "0 * * * * *", 1000)
+            .unwrap();
+
+        let schedules = store.list_schedules().unwrap();
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].id, "sched-1");
+        assert_eq!(schedules[0].workflow_path, "wf.yaml");
+        assert_eq!(schedules[0].next_run_at, 1000);
+        assert!(schedules[0].last_run_at.is_none());
+
+        let removed = store.remove_schedule("sched-1").unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.list_schedules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_schedule_missing_returns_zero() {
+        let store = open_tmp();
+        assert_eq!(store.remove_schedule("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn due_schedules_filters_by_next_run_at() {
+        let store = open_tmp();
+        let past = now_secs().saturating_sub(60);
+        let future = now_secs() + 3600;
+        store
+            .add_schedule("due", "wf.yaml", "* * * * * *", past)
+            .unwrap();
+        store
+            .add_schedule("not-due", "wf.yaml", "* * * * * *", future)
+            .unwrap();
+
+        let due = store.due_schedules().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "due");
+    }
+
+    #[test]
+    fn update_schedule_next_advances_run_times() {
+        let store = open_tmp();
+        store
+            .add_schedule("s1", "wf.yaml", "* * * * * *", 100)
+            .unwrap();
+        store.update_schedule_next("s1", 100, 200).unwrap();
+
+        let schedules = store.list_schedules().unwrap();
+        assert_eq!(schedules[0].last_run_at, Some(100));
+        assert_eq!(schedules[0].next_run_at, 200);
+    }
 }
