@@ -1001,10 +1001,9 @@ fn component_item_kind(item: &wasmtime::component::types::ComponentItem) -> &'st
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn fmt_unix(secs: u64) -> String {
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    chrono::DateTime::<Utc>::from_timestamp(secs as i64, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "invalid timestamp".to_string())
 }
 
 // ── fluxion schedule ──────────────────────────────────────────────────────────
@@ -1168,5 +1167,22 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         if let Ok(s) = RunStore::open() {
             let _ = s.update_schedule_next(&sched_id, now, next);
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::fmt_unix;
+
+    #[test]
+    fn fmt_unix_includes_date_and_time() {
+        // 2024-01-15T03:04:05Z
+        let formatted = fmt_unix(1705287845);
+        assert_eq!(formatted, "2024-01-15 03:04:05");
+    }
+
+    #[test]
+    fn fmt_unix_epoch_zero() {
+        assert_eq!(fmt_unix(0), "1970-01-01 00:00:00");
     }
 }
