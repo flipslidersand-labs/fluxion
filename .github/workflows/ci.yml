@@ -27,6 +27,7 @@ jobs:
   build-test:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,6 +55,7 @@ jobs:
   clippy:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,6 +137,7 @@ jobs:
   fmt:
     if: github.event.pull_request.draft == false && github.actor != 'github-actions[bot]'
     runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
