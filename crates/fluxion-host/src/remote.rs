@@ -52,8 +52,11 @@ pub async fn run_remote(
 ) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
     // Reading the local .wasm file is an orchestrator-side error, not a worker
     // fault — surface it as Execution so we don't pointlessly try every worker.
-    let wasm_bytes =
-        std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
+    // `Bytes` so the CAS PUT body below can be handed a cheap refcount clone
+    // instead of a full copy of the (potentially large) component (#235).
+    let wasm_bytes: bytes::Bytes = std::fs::read(wasm_path.as_ref())
+        .map_err(|e| RemoteError::Execution(e.into()))?
+        .into();
 
     // Compute SHA-256 and check whether the worker already has this component in its CAS.
     let sha256 = {
@@ -189,8 +192,11 @@ pub async fn run_remote_async(
     env: &HashMap<String, String>,
     tls: Option<&TlsConfig>,
 ) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
-    let wasm_bytes =
-        std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
+    // `Bytes` so the CAS PUT body below can be handed a cheap refcount clone
+    // instead of a full copy of the (potentially large) component (#235).
+    let wasm_bytes: bytes::Bytes = std::fs::read(wasm_path.as_ref())
+        .map_err(|e| RemoteError::Execution(e.into()))?
+        .into();
 
     // CAS probe + upload (same as run_remote).
     let sha256 = {
