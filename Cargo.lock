@@ -1062,6 +1062,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "cap-std",
  "clap",
  "criterion",
