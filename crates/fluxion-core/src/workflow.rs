@@ -268,8 +268,31 @@ pub struct NetworkPermission {
 
 impl NetworkPermission {
     pub fn allows(&self, addr: &str) -> bool {
-        self.allow.iter().any(|h| addr.starts_with(h.as_str()))
+        self.allow
+            .iter()
+            .any(|entry| Self::entry_matches(entry, addr))
     }
+
+    /// Strict match: `entry` must equal `addr` exactly as a socket address, or
+    /// — if `entry` is a bare IP with no port — match any port on that IP.
+    /// A plain string-prefix match here would let an allowlist entry of
+    /// `"10.0.0.1"` wrongly permit `"10.0.0.100:80"` (#236).
+    fn entry_matches(entry: &str, addr: &str) -> bool {
+        if let (Ok(entry_addr), Ok(addr)) = (
+            entry.parse::<std::net::SocketAddr>(),
+            addr.parse::<std::net::SocketAddr>(),
+        ) {
+            return entry_addr == addr;
+        }
+        if let (Ok(entry_ip), Ok(addr)) = (
+            entry.parse::<std::net::IpAddr>(),
+            addr.parse::<std::net::SocketAddr>(),
+        ) {
+            return entry_ip == addr.ip();
+        }
+        entry == addr
+    }
+
     pub fn is_deny_all(&self) -> bool {
         self.allow.is_empty()
     }
@@ -537,6 +560,51 @@ jobs:
 "#;
         let result: Result<Workflow, _> = serde_yaml::from_str(src);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn network_allows_exact_host_port_match() {
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1:80".to_string()],
+        };
+        assert!(perm.allows("10.0.0.1:80"));
+    }
+
+    #[test]
+    fn network_allows_rejects_prefix_match_bypass() {
+        // #236: a plain string-prefix match would wrongly let "10.0.0.1"
+        // permit "10.0.0.100:80". Strict matching must reject this.
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1".to_string()],
+        };
+        assert!(!perm.allows("10.0.0.100:80"));
+    }
+
+    #[test]
+    fn network_allows_bare_ip_matches_any_port() {
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1".to_string()],
+        };
+        assert!(perm.allows("10.0.0.1:80"));
+        assert!(perm.allows("10.0.0.1:443"));
+        assert!(!perm.allows("10.0.0.2:80"));
+    }
+
+    #[test]
+    fn network_allows_exact_hostname_port_match() {
+        let perm = NetworkPermission {
+            allow: vec!["db.internal:5432".to_string()],
+        };
+        assert!(perm.allows("db.internal:5432"));
+        assert!(!perm.allows("evil.example.com:1234"));
+        assert!(!perm.allows("db.internal.evil.com:5432"));
+    }
+
+    #[test]
+    fn network_allows_empty_allowlist_denies_all() {
+        let perm = NetworkPermission::default();
+        assert!(!perm.allows("10.0.0.1:80"));
+        assert!(perm.is_deny_all());
     }
 
     #[test]
