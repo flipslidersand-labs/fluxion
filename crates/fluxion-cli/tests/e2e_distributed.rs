@@ -5,11 +5,22 @@
 
 use assert_cmd::Command;
 use std::io::Write;
+use std::net::TcpListener;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
 fn fluxion() -> Command {
     Command::cargo_bin("fluxion").expect("fluxion binary not found")
+}
+
+/// Ask the OS for an unused port instead of hardcoding one, so this test
+/// doesn't collide with other processes on the same shared CI runner (#237).
+fn find_free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn write_yaml(content: &str) -> NamedTempFile {
@@ -53,7 +64,7 @@ fn wait_for_worker(port: u16, timeout: Duration) {
 #[test]
 #[cfg_attr(not(feature = "ci"), ignore = "requires pre-built Wasm components")]
 fn two_job_remote_workflow_both_succeed() {
-    let port: u16 = 17777;
+    let port: u16 = find_free_port();
     let hello = hello_wasm();
 
     // Start worker with --async-jobs on a background thread.
