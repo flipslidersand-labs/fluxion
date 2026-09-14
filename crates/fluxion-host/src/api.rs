@@ -28,7 +28,7 @@ pub fn router(state: ApiState) -> Router {
 }
 
 async fn list_runs(State(s): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
-    let rows = s.store.lock().unwrap().list_runs(100)?;
+    let rows = lock_store(&s)?.list_runs(100)?;
     Ok(json_response(&rows))
 }
 
@@ -36,18 +36,27 @@ async fn list_run_jobs(
     State(s): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = s.store.lock().unwrap().get_run_jobs(&id)?;
+    let rows = lock_store(&s)?.get_run_jobs(&id)?;
     Ok(json_response(&rows))
 }
 
 async fn list_schedules(State(s): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
-    let rows = s.store.lock().unwrap().list_schedules()?;
+    let rows = lock_store(&s)?.list_schedules()?;
     Ok(json_response(&rows))
 }
 
 async fn list_workers(State(s): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
-    let rows = s.store.lock().unwrap().list_workers()?;
+    let rows = lock_store(&s)?.list_workers()?;
     Ok(json_response(&rows))
+}
+
+/// Lock the shared store, converting mutex poisoning into a clean 500 error
+/// instead of panicking. A previous request panicking mid-operation (e.g. a
+/// sqlite failure) must not take down every subsequent request on this worker.
+fn lock_store(s: &ApiState) -> Result<std::sync::MutexGuard<'_, RunStore>, ApiError> {
+    s.store
+        .lock()
+        .map_err(|_| ApiError(anyhow::anyhow!("store lock poisoned")))
 }
 
 async fn metrics() -> impl IntoResponse {
@@ -239,5 +248,38 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn poisoned_store_returns_500_instead_of_panicking() {
+        let state = test_state();
+        // Poison the mutex the same way a panicking handler would: panic while
+        // holding the lock.
+        let poison_store = state.store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_store.lock().unwrap();
+            panic!("simulated panic while holding the store lock");
+        })
+        .join();
+        assert!(state.store.is_poisoned());
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "poisoned lock must yield a clean 500, not a panic"
+        );
+        let body = body_bytes(resp.into_body()).await;
+        assert!(String::from_utf8(body).unwrap().contains("poisoned"));
     }
 }
