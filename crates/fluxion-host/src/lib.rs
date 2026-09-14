@@ -478,6 +478,27 @@ fn is_epoch_trap(e: &anyhow::Error) -> bool {
     false
 }
 
+/// Detects whether a component is componentize-py 0.25+ output.
+///
+/// componentize-py 0.25 generates an extra top-level `exports` instance
+/// (holding `init`) alongside the `fluxion:task/processor` export declared in
+/// our WIT world. That `init` must be called before `process` is callable, or
+/// the guest hangs until the epoch deadline (see #213). This only detects the
+/// shape; invoking `init` is handled separately (#226).
+pub fn is_componentize_py_component(component: &Component, engine: &Engine) -> bool {
+    use wasmtime::component::types::ComponentItem;
+
+    let Some(ComponentItem::ComponentInstance(exports)) =
+        component.component_type().get_export(engine, "exports")
+    else {
+        return false;
+    };
+    matches!(
+        exports.get_export(engine, "init"),
+        Some(ComponentItem::ComponentFunc(_))
+    )
+}
+
 // An entry in the network allowlist: either an exact IP:port or all ports on an IP.
 #[derive(Debug)]
 enum NetworkEntry {
@@ -733,6 +754,48 @@ fn build_wasi_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #225 componentize-py component detection ───────────────────────────────
+
+    fn test_engine() -> Engine {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        Engine::new(&config).unwrap()
+    }
+
+    #[test]
+    fn detects_plain_component_as_not_componentize_py() {
+        let engine = test_engine();
+        let wat = r#"
+            (component
+              (core module $m
+                (func (export "process")))
+              (core instance $i (instantiate $m))
+              (func $process (canon lift (core func $i "process")))
+              (instance $proc_inst (export "process" (func $process)))
+              (export "fluxion:task/processor@0.1.0" (instance $proc_inst))
+            )
+        "#;
+        let component = Component::new(&engine, wat).expect("valid component");
+        assert!(!is_componentize_py_component(&component, &engine));
+    }
+
+    #[test]
+    fn detects_componentize_py_component_via_exports_init() {
+        let engine = test_engine();
+        let wat = r#"
+            (component
+              (core module $m
+                (func (export "init") (result i32) i32.const 0))
+              (core instance $i (instantiate $m))
+              (func $init (result u32) (canon lift (core func $i "init")))
+              (instance $exports_inst (export "init" (func $init)))
+              (export "exports" (instance $exports_inst))
+            )
+        "#;
+        let component = Component::new(&engine, wat).expect("valid component");
+        assert!(is_componentize_py_component(&component, &engine));
+    }
 
     // ── #67 SHA-256 component digest verification ─────────────────────────────
 
