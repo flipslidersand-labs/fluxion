@@ -308,6 +308,45 @@ struct ExecOpts<'a> {
     workers: Vec<WorkerInfo>,
 }
 
+/// When the run stops early on a failure, any job still recorded as
+/// `Running` was already dispatched (`launch()` spawned its task and it has
+/// not reported back yet) but will never be waited on again once the event
+/// loop breaks. Left as `Running`, its RunStore entry would look stuck
+/// forever — breaking `fluxion status`/`fluxion retry --from` and silently
+/// leaking the semaphore permit it holds until the detached task eventually
+/// finishes on its own (#243).
+///
+/// Marks every such job `Cancelled` in both the store and the in-memory
+/// `statuses` map so the persisted history reflects "abandoned due to
+/// upstream failure" rather than a lie of still-in-progress.
+fn cancel_orphaned_running_jobs(
+    store: &RunStore,
+    run_id: &str,
+    statuses: &mut HashMap<String, JobStatus>,
+    print_progress: bool,
+    pad: usize,
+) -> Result<()> {
+    let running: Vec<String> = statuses
+        .iter()
+        .filter(|(_, status)| matches!(status, JobStatus::Running))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    for job_id in running {
+        store.upsert_job(run_id, &job_id, &JobStatus::Cancelled)?;
+        statuses.insert(job_id.clone(), JobStatus::Cancelled);
+        if print_progress {
+            println!(
+                "[{}] {:<pad$}  CANCELLED (abandoned after upstream failure)",
+                timestamp(),
+                job_id,
+                pad = pad
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Core execution loop. Returns a structured RunResult.
 async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
     let ExecOpts {
@@ -510,12 +549,29 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                                     }
                                 }
                             }
+                            cancel_orphaned_running_jobs(
+                                store,
+                                run_id,
+                                &mut statuses,
+                                print_progress,
+                                pad,
+                            )?;
                             break;
                         }
                         // fail_fast=false: let remaining siblings run to completion;
                         // the fan-in cancellation happens in the dep-ready check above.
                     }
-                    None => break, // non-foreach job failure → stop immediately
+                    None => {
+                        // non-foreach job failure → stop immediately
+                        cancel_orphaned_running_jobs(
+                            store,
+                            run_id,
+                            &mut statuses,
+                            print_progress,
+                            pad,
+                        )?;
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -1750,6 +1806,171 @@ mod tests {
                 "local executor should not trigger remote-worker validation: {e}"
             );
         }
+    }
+
+    // ── #243: orphaned in-flight jobs on non-foreach failure ─────────────────
+
+    /// Like `spawn_mock_worker` but waits `delay` before replying, so the
+    /// caller can assert on state while the job is still in flight.
+    async fn spawn_delayed_mock_worker(output: Vec<u8>, delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let out_b64 = B64.encode(&output);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let mut header_end = None;
+                    let mut content_len = None;
+                    while let Ok(n) = sock.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if header_end.is_none()
+                            && let Some(p) = find(&buf, b"\r\n\r\n")
+                        {
+                            header_end = Some(p + 4);
+                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                            for line in head.lines() {
+                                if let Some(v) = line.strip_prefix("content-length:") {
+                                    content_len = v.trim().parse::<usize>().ok();
+                                }
+                            }
+                            if content_len.is_none() {
+                                break;
+                            }
+                        }
+                        if let (Some(he), Some(cl)) = (header_end, content_len)
+                            && buf.len() >= he + cl
+                        {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    let body = format!(
+                        "{{\"output\":\"{out_b64}\",\"compile_ms\":0,\"instantiate_ms\":0,\"execute_ms\":0}}"
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Answers every request with `500` immediately, so the job fails fast
+    /// without depending on timeout behavior.
+    async fn spawn_failing_mock_worker() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let mut header_end = None;
+                    let mut content_len = None;
+                    while let Ok(n) = sock.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if header_end.is_none()
+                            && let Some(p) = find(&buf, b"\r\n\r\n")
+                        {
+                            header_end = Some(p + 4);
+                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                            for line in head.lines() {
+                                if let Some(v) = line.strip_prefix("content-length:") {
+                                    content_len = v.trim().parse::<usize>().ok();
+                                }
+                            }
+                            if content_len.is_none() {
+                                break;
+                            }
+                        }
+                        if let (Some(he), Some(cl)) = (header_end, content_len)
+                            && buf.len() >= he + cl
+                        {
+                            break;
+                        }
+                    }
+                    let body = "{\"error\":\"boom\"}";
+                    let resp = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn non_foreach_failure_cancels_orphaned_running_siblings() {
+        let slow_url =
+            spawn_delayed_mock_worker(b"slow-output".to_vec(), Duration::from_millis(300)).await;
+        let fail_url = spawn_failing_mock_worker().await;
+        // Both jobs need a real (dummy) component file on disk — a
+        // nonexistent path would fail at the local read step before the
+        // mock worker is ever contacted, defeating the point of this test.
+        let slow_wasm = tmp_wasm();
+        let fail_wasm = tmp_wasm();
+        let slow_path = slow_wasm.path().to_string_lossy();
+        let fail_path = fail_wasm.path().to_string_lossy();
+
+        let wf: Workflow = serde_json::from_str(&format!(
+            r#"{{"name":"t","jobs":{{
+                "slow_ok":{{"component":"{slow_path}","executor":"remote","worker":"{slow_url}"}},
+                "fast_fail":{{"component":"{fail_path}","executor":"remote","worker":"{fail_url}"}}
+            }}}}"#
+        ))
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let run_id = "test-run-243";
+        store.create_run(run_id, "t", Path::new("t.yaml")).unwrap();
+
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id,
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: vec![],
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(10), execute(&wf, opts))
+            .await
+            .expect("execute must not hang")
+            .expect("execute should return Ok even when a job fails");
+        assert!(!result.success, "run must be reported as failed overall");
+
+        // "slow_ok" was still in flight (300ms delay) when "fast_fail" reported
+        // failure. It must be persisted as Cancelled, not left dangling as
+        // Running forever.
+        let (_, jobs) = store.load_run(run_id).unwrap();
+        assert!(
+            matches!(jobs.get("slow_ok"), Some(JobStatus::Cancelled)),
+            "orphaned in-flight job must be marked Cancelled, got: {:?}",
+            jobs.get("slow_ok")
+        );
     }
 
     // ── downstream_inclusive ────────────────────────────────────────────────
