@@ -127,8 +127,18 @@ impl OciClient {
             .context("parse manifest JSON")
     }
 
-    /// `GET /v2/<repository>/blobs/<digest>`
-    async fn fetch_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>> {
+    /// `GET /v2/<repository>/blobs/<digest>`, rejecting anything larger than
+    /// `expected_size` (the manifest's declared layer size) to bound memory
+    /// use against a malicious or corrupt registry that returns an oversized
+    /// or never-ending blob.
+    async fn fetch_blob(
+        &self,
+        repository: &str,
+        digest: &str,
+        expected_size: u64,
+    ) -> Result<Vec<u8>> {
+        use futures::StreamExt;
+
         let url = format!("{}/v2/{}/blobs/{}", self.base_url, repository, digest);
         let resp = self
             .add_auth(self.client.get(&url))
@@ -141,7 +151,35 @@ impl OciClient {
             bail!("GET blob {url} → {status}");
         }
 
-        Ok(resp.bytes().await.context("read blob body")?.to_vec())
+        if let Some(len) = resp.content_length()
+            && len != expected_size
+        {
+            bail!(
+                "blob {digest} Content-Length ({len}) does not match manifest size ({expected_size})"
+            );
+        }
+
+        let mut buf = Vec::with_capacity(expected_size.min(64 * 1024 * 1024) as usize);
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("read blob chunk")?;
+            if buf.len() as u64 + chunk.len() as u64 > expected_size {
+                bail!(
+                    "blob {digest} exceeded manifest-declared size of {expected_size} bytes — \
+                     aborting download to bound memory use"
+                );
+            }
+            buf.extend_from_slice(&chunk);
+        }
+
+        if buf.len() as u64 != expected_size {
+            bail!(
+                "blob {digest} incomplete: expected {expected_size} bytes, got {}",
+                buf.len()
+            );
+        }
+
+        Ok(buf)
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -168,7 +206,9 @@ impl OciClient {
                 )
             })?;
 
-        let bytes = self.fetch_blob(repository, &layer.digest).await?;
+        let bytes = self
+            .fetch_blob(repository, &layer.digest, layer.size)
+            .await?;
 
         // Verify SHA-256.
         let actual_digest = sha256_digest(&bytes);
@@ -504,5 +544,80 @@ mod tests {
         let parsed: OciManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.schema_version, 2);
         assert_eq!(parsed.layers[0].media_type, WASM_LAYER_TYPE);
+    }
+}
+
+// ── fetch_blob size-guard tests (real TCP, no external network) ──────────────
+#[cfg(test)]
+mod fetch_blob_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal single-shot HTTP server: drains the request, replies with
+    /// `status_line` + `extra_headers` + `body`, then closes.
+    async fn spawn_blob_server(extra_headers: String, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let mut resp =
+                    format!("HTTP/1.1 200 OK\r\n{extra_headers}Connection: close\r\n\r\n")
+                        .into_bytes();
+                resp.extend_from_slice(&body);
+                let _ = sock.write_all(&resp).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_succeeds_when_size_matches() {
+        let body = b"hello wasm bytes".to_vec();
+        let headers = format!("Content-Length: {}\r\n", body.len());
+        let base = spawn_blob_server(headers, body.clone()).await;
+        let client = OciClient::new(base, None).unwrap();
+
+        let result = client
+            .fetch_blob("repo", "sha256:x", body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(result, body);
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_rejects_content_length_mismatch() {
+        let body = b"hello wasm bytes".to_vec();
+        let headers = format!("Content-Length: {}\r\n", body.len());
+        let base = spawn_blob_server(headers, body).await;
+        let client = OciClient::new(base, None).unwrap();
+
+        let err = client
+            .fetch_blob("repo", "sha256:x", 999)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match manifest size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_aborts_when_body_exceeds_declared_size() {
+        // No Content-Length header — forces the client onto the streaming
+        // path, where the running-total check must catch the oversized body
+        // instead of buffering it all into memory.
+        let body = vec![0u8; 4096];
+        let base = spawn_blob_server(String::new(), body).await;
+        let client = OciClient::new(base, None).unwrap();
+
+        let err = client.fetch_blob("repo", "sha256:x", 10).await.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeded manifest-declared size"),
+            "unexpected error: {err}"
+        );
     }
 }
