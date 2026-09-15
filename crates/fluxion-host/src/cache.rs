@@ -81,6 +81,7 @@ impl ComponentCache {
         let artifact = engine.precompile_component(wasm_bytes)?;
         let path = self.artifact_path(wasm_bytes);
         atomic_write(&path, &artifact)?;
+        enforce_cache_limit(&self.dir, MAX_CACHE_BYTES);
         // SAFETY: we just wrote this artifact from the same engine version.
         Ok(unsafe { Component::deserialize_file(engine, &path)? })
     }
@@ -117,6 +118,7 @@ impl ComponentCache {
         let hex = key.as_str_key(wasm_bytes);
         let path = self.dir.join(format!("{hex}.cwasm"));
         atomic_write(&path, &artifact)?;
+        enforce_cache_limit(&self.dir, MAX_CACHE_BYTES);
         Ok(unsafe { Component::deserialize_file(engine, &path)? })
     }
 
@@ -145,6 +147,54 @@ fn cache_base_dir() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_default();
             PathBuf::from(home).join(".cache")
         })
+}
+
+/// Maximum total size of the on-disk `.cwasm` cache before the
+/// least-recently-modified entries are evicted. Without this, the cache
+/// grows without bound: a wasmtime upgrade changes the artifact format and
+/// invalidates old entries by making them fail to deserialize (see `load`),
+/// but the stale files themselves are never deleted, and neither are entries
+/// for components that are no longer used (#242).
+const MAX_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Evict least-recently-modified `.cwasm` entries from `dir` until its total
+/// size is at or under `max_bytes`. Best-effort: any I/O error here is
+/// swallowed so a failed cleanup never blocks compilation — worst case the
+/// cache temporarily grows past `max_bytes`.
+fn enforce_cache_limit(dir: &Path, max_bytes: u64) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("cwasm") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let size = meta.len();
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        total += size;
+        entries.push((path, size, modified));
+    }
+
+    if total <= max_bytes {
+        return;
+    }
+
+    // Oldest (least-recently-modified) first.
+    entries.sort_by_key(|(_, _, mtime)| *mtime);
+
+    for (path, size, _) in entries {
+        if total <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
@@ -286,6 +336,63 @@ mod tests {
 
         let key = CacheKey::Digest("sha256:doesnotexist".to_string());
         assert!(cache.load_by_key(&engine, &key, b"bytes").is_none());
+    }
+
+    #[test]
+    fn enforce_cache_limit_is_noop_when_under_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.cwasm"), vec![0u8; 100]).unwrap();
+        std::fs::write(tmp.path().join("b.cwasm"), vec![0u8; 100]).unwrap();
+
+        enforce_cache_limit(tmp.path(), 1_000_000);
+
+        assert!(tmp.path().join("a.cwasm").exists());
+        assert!(tmp.path().join("b.cwasm").exists());
+    }
+
+    #[test]
+    fn enforce_cache_limit_evicts_oldest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let oldest = tmp.path().join("oldest.cwasm");
+        let middle = tmp.path().join("middle.cwasm");
+        let newest = tmp.path().join("newest.cwasm");
+
+        // Stagger mtimes: filesystem mtime resolution is coarser than a
+        // single instruction, so sleep briefly between writes to guarantee
+        // a strict modified-time ordering for the eviction test.
+        std::fs::write(&oldest, vec![0u8; 100]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&middle, vec![0u8; 100]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&newest, vec![0u8; 100]).unwrap();
+
+        // Total = 300 bytes; cap at 150 → only the newest (100) should
+        // comfortably fit, so both older entries must be evicted.
+        enforce_cache_limit(tmp.path(), 150);
+
+        assert!(!oldest.exists(), "oldest entry must be evicted first");
+        assert!(!middle.exists(), "middle entry must also be evicted");
+        assert!(newest.exists(), "newest entry must survive");
+    }
+
+    #[test]
+    fn enforce_cache_limit_ignores_non_cwasm_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unrelated = tmp.path().join("notes.txt");
+        std::fs::write(&unrelated, vec![0u8; 1_000_000]).unwrap();
+        std::fs::write(tmp.path().join("a.cwasm"), vec![0u8; 10]).unwrap();
+
+        enforce_cache_limit(tmp.path(), 1);
+
+        assert!(
+            unrelated.exists(),
+            "non-.cwasm files must never be touched by the cache evictor"
+        );
+    }
+
+    #[test]
+    fn enforce_cache_limit_on_missing_dir_does_not_panic() {
+        enforce_cache_limit(Path::new("/nonexistent/path/xyz"), 100);
     }
 
     #[test]
