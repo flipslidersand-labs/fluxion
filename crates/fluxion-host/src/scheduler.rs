@@ -1192,17 +1192,24 @@ fn launch(
                     let p = perms.clone();
                     let e = env.clone();
                     let i = input.clone();
-                    match tokio::time::timeout(
-                        Duration::from_secs(timeout_secs),
-                        tokio::task::spawn_blocking(move || {
-                            host.run_component_measured(&c, i, &p, &e)
-                        }),
-                    )
+                    // Rely solely on the wasmtime epoch deadline (set inside
+                    // run_component_measured with this same timeout_secs) to
+                    // bound execution time. An outer tokio::time::timeout
+                    // around spawn_blocking cannot cancel the underlying OS
+                    // thread — spawn_blocking tasks always run to completion
+                    // regardless of whether anything is still awaiting them
+                    // (a documented tokio limitation). Wrapping it here only
+                    // gave up waiting early while the runaway guest kept
+                    // occupying a blocking-pool slot until its own epoch
+                    // trap eventually fired, silently reducing the pool's
+                    // effective capacity under repeated timeouts (#244).
+                    match tokio::task::spawn_blocking(move || {
+                        host.run_component_measured(&c, i, &p, &e)
+                    })
                     .await
                     {
-                        Err(_) => Err(anyhow::anyhow!("Timeout after {}s", timeout_secs)),
-                        Ok(Err(e)) => Err(anyhow::anyhow!("{}", e)),
-                        Ok(Ok(r)) => r,
+                        Err(e) => Err(anyhow::anyhow!("{}", e)),
+                        Ok(r) => r,
                     }
                 }
             };
