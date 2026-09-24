@@ -9,6 +9,7 @@ use base64::Engine as _;
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 // ── Media types ───────────────────────────────────────────────────────────────
 
@@ -79,6 +80,13 @@ impl OciClient {
     pub fn new(base_url: impl Into<String>, credentials: Option<Credentials>) -> Result<Self> {
         let client = Client::builder()
             .use_rustls_tls()
+            // reqwest has no default timeout: an unresponsive registry would
+            // otherwise hang every fetch_manifest/fetch_blob/push/list_tags
+            // call indefinitely (#245). read_timeout (idle time between reads)
+            // rather than a total timeout, so a slow-but-progressing large
+            // blob download isn't cut off mid-transfer.
+            .read_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .context("failed to build reqwest client")?;
         Ok(Self {
