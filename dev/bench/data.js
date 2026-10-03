@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788793759987,
+  "lastUpdate": 1791028670282,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -175,6 +175,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 14602812,
             "range": "± 184711",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9c339980228572388bc17d5793ea9ef94ce3d2ad",
+          "message": "test(host): cache テストを ci feature で有効化し e2e ジョブで実行 (#302) (#327)\n\n* test(host): cache テストを ci feature で有効化し e2e ジョブで実行 (#302)\n\ncache.rs の2テストを cfg_attr(not(feature=ci), ignore) に変更し、e2e ジョブで --lib も実行。\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n* style(host): cache.rs の cfg_attr を rustfmt 整形 (#302)\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-03T20:48:46+09:00",
+          "tree_id": "de07efaf20c70111f881d28a97e44b355bc3fcde",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/9c339980228572388bc17d5793ea9ef94ce3d2ad"
+        },
+        "date": 1791028669633,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1232713,
+            "range": "± 130748",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 24966974,
+            "range": "± 1269542",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 20341,
+            "range": "± 524",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 81344,
+            "range": "± 715",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1255654,
+            "range": "± 7542",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 4979191,
+            "range": "± 165137",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5061268,
+            "range": "± 206788",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 10500949,
+            "range": "± 280205",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 7981964,
+            "range": "± 316133",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 16429994,
+            "range": "± 235333",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 11725966,
+            "range": "± 519657",
             "unit": "ns/iter"
           }
         ]
