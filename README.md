@@ -23,15 +23,19 @@ cd fluxion
 # Build the CLI (use -j2 to avoid OOM — wasmtime is large)
 cargo build -j2
 
-# Build components (each is an independent workspace)
+# Build components (each is an independent workspace).
+# Use `cargo component build` (not plain `cargo build`): the host loads
+# Wasm *components*, and a plain build only produces a core module.
 for c in hello file-reader pipeline-stage spin alloc-bomb; do
-  cargo build --manifest-path components/$c/Cargo.toml \
-    --target wasm32-wasip1
+  (cd components/$c && cargo component build -j2)
 done
 # network-probe uses wasip2
-cargo build --manifest-path components/network-probe/Cargo.toml \
-  --target wasm32-wasip2
+(cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
 ```
+
+Outputs land in `components/<name>/target/wasm32-wasip1/debug/<name>.wasm`
+(`wasm32-wasip2` for network-probe), which is where the E2E tests
+(`crates/fluxion-host/tests/e2e.rs`) look for them.
 
 ## CLI Commands
 
