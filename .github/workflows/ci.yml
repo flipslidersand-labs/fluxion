@@ -104,7 +104,7 @@ jobs:
               sleep 5
             fi
           done
-          sudo apt-get install -y build-essential libssl-dev pkg-config
+          sudo apt-get install -y build-essential libssl-dev pkg-config python3 python3-venv
       - name: Cache cargo (host + components)
         uses: Swatinem/rust-cache@v2
         with:
@@ -124,7 +124,12 @@ jobs:
             cargo install cargo-component --locked -j2
           fi
       - name: Install componentize-py
-        run: pip install componentize-py
+        # Use a venv: works on runners without a global `pip` (e.g. arc-fluxion)
+        # and avoids PEP 668 "externally-managed-environment" errors.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/componentize-venv"
+          "$RUNNER_TEMP/componentize-venv/bin/pip" install componentize-py
+          echo "$RUNNER_TEMP/componentize-venv/bin" >> "$GITHUB_PATH"
       - name: Build Wasm components
         run: |
           for comp in alloc-bomb file-reader hello pipeline-stage spin; do
