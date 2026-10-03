@@ -188,17 +188,21 @@ async fn effective_workers(wf: &Workflow) -> Vec<String> {
     health_check_workers(&candidates).await
 }
 
+/// Look up the mTLS config for `url` among the workflow's static `workers:`.
+fn tls_for(wf: &Workflow, url: &str) -> Option<TlsConfig> {
+    wf.workers
+        .iter()
+        .find(|w| w.url() == url)
+        .and_then(|w| w.tls().cloned())
+}
+
 /// Resolve effective workers and return them as `WorkerInfo`, preserving TLS config.
 async fn effective_workers_info(wf: &Workflow) -> Vec<WorkerInfo> {
     let healthy_urls = effective_workers(wf).await;
     healthy_urls
         .into_iter()
         .map(|url| {
-            let tls = wf
-                .workers
-                .iter()
-                .find(|w| w.url() == url.as_str())
-                .and_then(|w| w.tls().cloned());
+            let tls = tls_for(wf, &url);
             WorkerInfo { url, tls }
         })
         .collect()
@@ -893,7 +897,7 @@ async fn resolve_workers(
     if let Some(url) = &wf.jobs[job_id].worker {
         return vec![WorkerInfo {
             url: url.clone(),
-            tls: None,
+            tls: tls_for(wf, url),
         }];
     }
     if workers.is_empty() {
@@ -1419,6 +1423,24 @@ mod tests {
             worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::RoundRobin).await),
             vec!["http://pinned"]
         );
+    }
+
+    /// #279: a pinned `worker:` URL must inherit the mTLS config declared in `workers:`.
+    #[tokio::test]
+    async fn pinned_worker_inherits_tls_from_workers() {
+        let s = r#"{"name":"t","jobs":{"j":{"component":"x.wasm","worker":"https://w1"}},
+            "workers":[{"url":"https://w1","tls":{"cert":"c.pem","key":"k.pem","ca":"ca.pem"}},"https://w2"]}"#;
+        let w: Workflow = serde_json::from_str(s).unwrap();
+        let rr = AtomicUsize::new(0);
+        let got = resolve_workers("j", &w, &[], &rr, &LbStrategy::RoundRobin).await;
+        assert_eq!(worker_urls(&got), vec!["https://w1"]);
+        assert!(got[0].tls.is_some(), "pinned worker lost its TLS config");
+
+        // A pinned URL not declared in `workers:` has no TLS.
+        let s2 = s.replace(r#""worker":"https://w1""#, r#""worker":"https://other""#);
+        let w2: Workflow = serde_json::from_str(&s2).unwrap();
+        let got2 = resolve_workers("j", &w2, &[], &rr, &LbStrategy::RoundRobin).await;
+        assert!(got2[0].tls.is_none());
     }
 
     #[tokio::test]
