@@ -4,6 +4,13 @@ use std::sync::Arc;
 use fluxion_core::workflow::Workflow;
 use fluxion_host::{FluxionHost, scheduler};
 
+fn silent() -> scheduler::RunOptions {
+    scheduler::RunOptions {
+        progress: false,
+        ..Default::default()
+    }
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -81,7 +88,7 @@ async fn vehicle_pipeline_validate_retry() {
     patch_pipeline_paths(&mut wf, &data_dir, &out_dir);
 
     // First run: fetch and normalize succeed, validate fails (year=1999 in row 184).
-    let r1 = scheduler::run_silent(&wf, &wf_path, host.clone())
+    let r1 = scheduler::run_with_options(&wf, &wf_path, host.clone(), &silent())
         .await
         .unwrap();
     assert!(!r1.success, "first run should fail at validate");
@@ -102,7 +109,7 @@ async fn vehicle_pipeline_validate_retry() {
     std::fs::write(&norm, content.replacen(",1999,", ",2019,", 1)).unwrap();
 
     // Retry from validate: only validate + export re-run.
-    let r2 = scheduler::retry_silent(&wf, &wf_path, host, &r1.run_id, "validate")
+    let r2 = scheduler::retry_with_options(&wf, &wf_path, host, &r1.run_id, "validate", &silent())
         .await
         .unwrap();
     assert!(
@@ -123,7 +130,9 @@ async fn resource_limits_spin_timeout() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let (wf, wf_path) = load_wf("resource-limits-demo.yaml", "spin");
 
-    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
+        .await
+        .unwrap();
 
     assert!(
         !result.success,
@@ -168,7 +177,9 @@ async fn three_stage_sequential() {
         job.component = hello.clone();
     }
 
-    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
+        .await
+        .unwrap();
 
     assert!(
         result.success,
@@ -200,7 +211,9 @@ async fn sandbox_fs_cap() {
         }
     }
 
-    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
+        .await
+        .unwrap();
 
     assert!(!result.success, "workflow should fail at read-denied");
     let allowed = result
@@ -252,7 +265,9 @@ async fn sandbox_network_cap() {
     // Use any address — the sandbox check fires before the connect reaches the OS.
     denied_job.input = Some("127.0.0.1:19999".to_string());
 
-    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
+        .await
+        .unwrap();
 
     assert!(
         !result.success,
@@ -278,7 +293,9 @@ async fn memory_limits_oom_enforcement() {
     let host = Arc::new(FluxionHost::new().unwrap());
     let (wf, wf_path) = load_wf("memory-limits-demo.yaml", "alloc-bomb");
 
-    let result = scheduler::run_silent(&wf, &wf_path, host).await.unwrap();
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
+        .await
+        .unwrap();
 
     assert!(!result.success, "workflow should fail due to oom-job OOM");
 
@@ -333,9 +350,9 @@ async fn map_reduce_static_foreach() {
         job.component = hello.clone();
     }
 
-    let result = scheduler::run_silent(&wf, &wf_path, host)
+    let result = scheduler::run_with_options(&wf, &wf_path, host, &silent())
         .await
-        .expect("run_silent");
+        .expect("run_with_options");
 
     assert!(
         result.success,
