@@ -84,9 +84,17 @@ jobs:
     std::fs::write(&wf_path, &yaml).unwrap();
 
     let host = std::sync::Arc::new(fluxion_host::FluxionHost::new().unwrap());
-    let result = fluxion_host::scheduler::run(&wf, &wf_path, host)
-        .await
-        .expect("workflow run should succeed");
+    let result = fluxion_host::scheduler::run_with_options(
+        &wf,
+        &wf_path,
+        host,
+        &fluxion_host::scheduler::RunOptions {
+            progress: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("workflow run should succeed");
 
     assert!(result.success, "workflow must succeed: {result:?}");
     assert_eq!(result.succeeded, 1);
