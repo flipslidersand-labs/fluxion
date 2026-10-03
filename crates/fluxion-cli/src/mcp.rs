@@ -219,7 +219,11 @@ async fn dispatch_tool(name: &str, args: &Value) -> Result<String> {
                 .unwrap_or(PathBuf::from(path));
             let host = Arc::new(FluxionHost::new()?);
 
-            let result = scheduler::run_silent(&wf, &workflow_path, host).await?;
+            let opts = scheduler::RunOptions {
+                progress: false,
+                ..Default::default()
+            };
+            let result = scheduler::run_with_options(&wf, &workflow_path, host, &opts).await?;
             Ok(serde_json::to_string_pretty(&result)?)
         }
 
@@ -238,7 +242,11 @@ async fn dispatch_tool(name: &str, args: &Value) -> Result<String> {
             let wp = PathBuf::from(&workflow_path);
             let host = Arc::new(FluxionHost::new()?);
 
-            let result = scheduler::retry_silent(&wf, &wp, host, run_id, from).await?;
+            let opts = scheduler::RunOptions {
+                progress: false,
+                ..Default::default()
+            };
+            let result = scheduler::retry_with_options(&wf, &wp, host, run_id, from, &opts).await?;
             Ok(serde_json::to_string_pretty(&result)?)
         }
 
