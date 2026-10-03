@@ -272,6 +272,14 @@ impl FluxionHost {
                     perms.limits.memory_mb,
                     e
                 )
+            } else if is_epoch_trap(&e) {
+                // The deadline is set before compilation, which the epoch
+                // cannot interrupt; a slow compile can therefore exhaust it
+                // so the trap fires here rather than in the call (#267).
+                anyhow::anyhow!(
+                    "Timeout: killed after {}s (epoch interrupt)",
+                    perms.limits.timeout_secs
+                )
             } else {
                 e
             }
@@ -416,6 +424,14 @@ impl FluxionHost {
                     "OOM: component exceeded memory_mb={} limit ({})",
                     perms.limits.memory_mb,
                     e
+                )
+            } else if is_epoch_trap(&e) {
+                // The deadline is set before compilation, which the epoch
+                // cannot interrupt; a slow compile can therefore exhaust it
+                // so the trap fires here rather than in the call (#267).
+                anyhow::anyhow!(
+                    "Timeout: killed after {}s (epoch interrupt)",
+                    perms.limits.timeout_secs
                 )
             } else {
                 e

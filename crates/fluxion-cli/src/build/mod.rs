@@ -70,7 +70,22 @@ pub fn resolve_wit_path(wit_path: Option<PathBuf>) -> PathBuf {
 }
 
 /// Generate a Python stub for the given WIT path and write it to `output`.
-pub fn generate_stub(wit_path: &Path, output: &Path) -> Result<()> {
+///
+/// Refuses to clobber an existing non-empty file unless `force` is set — with
+/// `--stub`, `output` is often the same path as the script being built, so an
+/// unconditional write would silently destroy hand-written implementation code.
+pub fn generate_stub(wit_path: &Path, output: &Path, force: bool) -> Result<()> {
+    if !force
+        && let Ok(meta) = std::fs::metadata(output)
+        && meta.len() > 0
+    {
+        anyhow::bail!(
+            "{} already exists and is not empty; refusing to overwrite it.\n\
+             Re-run with --force to overwrite anyway.",
+            output.display()
+        );
+    }
+
     let stub = wit_stub::generate(wit_path)
         .with_context(|| format!("failed to generate stub from {}", wit_path.display()))?;
     std::fs::write(output, stub)
@@ -112,7 +127,7 @@ mod tests {
         std::fs::write(&wit_path, "record task-input {}\nrecord task-output {}\n").unwrap();
         let output = tmp.path().join("stub.py");
 
-        generate_stub(&wit_path, &output).unwrap();
+        generate_stub(&wit_path, &output, false).unwrap();
 
         let contents = std::fs::read_to_string(&output).unwrap();
         assert!(contents.contains("class TaskInput"));
@@ -124,7 +139,52 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("nope.wit");
         let output = tmp.path().join("stub.py");
-        let err = generate_stub(&missing, &output).unwrap_err();
+        let err = generate_stub(&missing, &output, false).unwrap_err();
         assert!(err.to_string().contains("failed to generate stub"));
+    }
+
+    #[test]
+    fn generate_stub_refuses_to_overwrite_nonempty_file_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wit_path = tmp.path().join("task.wit");
+        std::fs::write(&wit_path, "record task-input {}\nrecord task-output {}\n").unwrap();
+        let output = tmp.path().join("task.py");
+        std::fs::write(&output, "def process(input): ...  # hand-written impl").unwrap();
+
+        let err = generate_stub(&wit_path, &output, false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "def process(input): ...  # hand-written impl",
+            "existing file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn generate_stub_overwrites_with_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wit_path = tmp.path().join("task.wit");
+        std::fs::write(&wit_path, "record task-input {}\nrecord task-output {}\n").unwrap();
+        let output = tmp.path().join("task.py");
+        std::fs::write(&output, "old content").unwrap();
+
+        generate_stub(&wit_path, &output, true).unwrap();
+
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert!(contents.contains("class TaskInput"));
+    }
+
+    #[test]
+    fn generate_stub_overwrites_empty_existing_file_without_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wit_path = tmp.path().join("task.wit");
+        std::fs::write(&wit_path, "record task-input {}\nrecord task-output {}\n").unwrap();
+        let output = tmp.path().join("task.py");
+        std::fs::write(&output, "").unwrap();
+
+        generate_stub(&wit_path, &output, false).unwrap();
+
+        let contents = std::fs::read_to_string(&output).unwrap();
+        assert!(contents.contains("class TaskInput"));
     }
 }

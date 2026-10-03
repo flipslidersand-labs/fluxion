@@ -138,10 +138,20 @@ async fn resource_limits_spin_timeout() {
         spin.status, "failed",
         "spin-forever should be killed by epoch timeout"
     );
-    // Elapsed should be close to the 2s timeout, not several minutes.
+    // Assert the kill mechanism directly: the epoch interrupt must be what
+    // ended the job, not some unrelated failure.
+    let reason = spin.reason.as_deref().unwrap_or_default();
     assert!(
-        spin.elapsed_ms < 8_000,
-        "epoch interruption should kill the job well under 8s, got {}ms",
+        reason.contains("interrupt"),
+        "spin-forever should be killed by the epoch interrupt, got reason: {reason:?}"
+    );
+    // The epoch deadline cannot interrupt native (Cranelift) compilation, so
+    // elapsed = cold compile + ~timeout. On a loaded shared runner compile
+    // alone can take several seconds (#267), so this bound only guards
+    // against falling back to the 60s default or running unbounded.
+    assert!(
+        spin.elapsed_ms < 30_000,
+        "epoch interruption should kill the job well under 30s, got {}ms",
         spin.elapsed_ms
     );
 }
