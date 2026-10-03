@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791029645695,
+  "lastUpdate": 1791031167502,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -355,6 +355,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 27831740,
             "range": "± 7576912",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3d7c9cadd68d30e65f25bd39d0f7ba93fc2e95c2",
+          "message": "refactor(worker): replace rustls-pemfile with rustls pki_types PemObject (#305) (#354)\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-03T21:34:49+09:00",
+          "tree_id": "8826ef16c77cecda434804d49b6d4c7e4c4951c0",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/3d7c9cadd68d30e65f25bd39d0f7ba93fc2e95c2"
+        },
+        "date": 1791031166766,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1785819,
+            "range": "± 5504",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 44289415,
+            "range": "± 623060",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 30840,
+            "range": "± 173",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 123453,
+            "range": "± 596",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1847057,
+            "range": "± 12062",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5826954,
+            "range": "± 101628",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6022557,
+            "range": "± 289650",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 13070936,
+            "range": "± 220919",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 9559961,
+            "range": "± 1216288",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 20565831,
+            "range": "± 655286",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 13261432,
+            "range": "± 1577079",
             "unit": "ns/iter"
           }
         ]
