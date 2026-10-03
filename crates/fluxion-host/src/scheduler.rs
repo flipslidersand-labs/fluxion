@@ -472,7 +472,6 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
         match &event.status {
             JobStatus::Succeeded { elapsed } => {
-                crate::metrics::ACTIVE_JOBS.dec();
                 crate::metrics::JOBS_TOTAL
                     .with_label_values(&["succeeded", &event.job_id])
                     .inc();
@@ -497,7 +496,6 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 }
             }
             JobStatus::Failed { elapsed, reason } => {
-                crate::metrics::ACTIVE_JOBS.dec();
                 crate::metrics::JOBS_TOTAL
                     .with_label_values(&["failed", &event.job_id])
                     .inc();
@@ -1045,6 +1043,23 @@ async fn run_with_failover_async(
     unreachable!("resolve_workers never returns an empty list here")
 }
 
+/// RAII guard for the `fluxion_active_jobs` gauge: `inc` on creation, `dec` on
+/// drop, so the gauge stays balanced regardless of which path a job exits by.
+struct ActiveJobGuard;
+
+impl ActiveJobGuard {
+    fn new() -> Self {
+        crate::metrics::ACTIVE_JOBS.inc();
+        Self
+    }
+}
+
+impl Drop for ActiveJobGuard {
+    fn drop(&mut self) {
+        crate::metrics::ACTIVE_JOBS.dec();
+    }
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
@@ -1055,7 +1070,8 @@ fn launch(
     // Override input bytes (used for fan-in assembly). If None, falls back to wf.jobs[job_id].input.
     input_override: Option<Vec<u8>>,
 ) {
-    crate::metrics::ACTIVE_JOBS.inc();
+    // Balanced by Drop on every exit path of the spawned task (#296).
+    let active = ActiveJobGuard::new();
     let job_id = job_id.to_string();
     let executor = wf.jobs[&job_id].executor.clone();
     let async_dispatch = wf.jobs[&job_id].async_dispatch;
@@ -1078,6 +1094,7 @@ fn launch(
 
     tokio::spawn(
         async move {
+            let _active = active;
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let start = Instant::now();
 
@@ -1126,7 +1143,6 @@ fn launch(
                                     instantiate_us: 0,
                                     execute_us: 0,
                                 });
-                                crate::metrics::ACTIVE_JOBS.dec();
                                 return;
                             }
                         }
@@ -1144,7 +1160,6 @@ fn launch(
                             instantiate_us: 0,
                             execute_us: 0,
                         });
-                        crate::metrics::ACTIVE_JOBS.dec();
                         return;
                     }
                 }
@@ -1167,7 +1182,6 @@ fn launch(
                     instantiate_us: 0,
                     execute_us: 0,
                 });
-                crate::metrics::ACTIVE_JOBS.dec();
                 return;
             }
 
