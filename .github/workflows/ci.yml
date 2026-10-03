@@ -125,13 +125,16 @@ jobs:
       - name: Build host and CLI
         run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
-        run: cargo test -p fluxion-host --test e2e --features ci -j2
+        run: |
+          set -o pipefail
+          cargo test -p fluxion-host --test e2e --features ci -j2 2>&1 | tee e2e-test.log
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs-${{ github.run_id }}
-          path: /tmp/fluxion-e2e-*/
+          path: e2e-test.log
+          if-no-files-found: warn
           retention-days: 7
 
   fmt:
