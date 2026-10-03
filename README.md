@@ -9,7 +9,7 @@ Each job runs as a WebAssembly component — isolated, permission-scoped, and la
 
 ## Required Tools
 
-- Rust 1.82+
+- Rust 1.88+(edition 2024 のクレートを含むため。fluxion-worker のみ edition 2021)
 - `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
 - `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (network-probe only)
 - `cargo-component`: `cargo install cargo-component`
@@ -23,15 +23,19 @@ cd fluxion
 # Build the CLI (use -j2 to avoid OOM — wasmtime is large)
 cargo build -j2
 
-# Build components (each is an independent workspace)
+# Build components (each is an independent workspace).
+# Use `cargo component build` (not plain `cargo build`): the host loads
+# Wasm *components*, and a plain build only produces a core module.
 for c in hello file-reader pipeline-stage spin alloc-bomb; do
-  cargo build --manifest-path components/$c/Cargo.toml \
-    --target wasm32-wasip1
+  (cd components/$c && cargo component build -j2)
 done
 # network-probe uses wasip2
-cargo build --manifest-path components/network-probe/Cargo.toml \
-  --target wasm32-wasip2
+(cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
 ```
+
+Outputs land in `components/<name>/target/wasm32-wasip1/debug/<name>.wasm`
+(`wasm32-wasip2` for network-probe), which is where the E2E tests
+(`crates/fluxion-host/tests/e2e.rs`) look for them.
 
 ## CLI Commands
 
@@ -217,7 +221,7 @@ jobs:
 | `json_array` *(default)* | Wraps each child output as a JSON array element |
 | `concat` | Concatenates raw bytes |
 | `json_merge` | Deep-merges JSON objects |
-| `{ component: path/to/reducer.wasm }` | Pipes all outputs through a custom Wasm reducer |
+| `{ custom: path/to/reducer.wasm }` | Pipes all outputs through a custom Wasm reducer |
 
 ## MCP Integration
 
@@ -388,7 +392,7 @@ docker run -d -p 5000:5000 registry:2
 
 # Push a component
 fluxion registry push components/hello/target/wasm32-wasip1/debug/hello.wasm \
-  --to localhost:5000/fluxion/hello:latest
+  localhost:5000/fluxion/hello:latest
 
 # Pull a component (auto-pulls before execution)
 fluxion run examples/oci-registry.yaml
@@ -399,9 +403,13 @@ In YAML workflows, reference registry components via `oci_ref`:
 ```yaml
 jobs:
   greet:
+    component: ignored.wasm   # required by the schema; ignored when oci_ref is set
     oci_ref: localhost:5000/fluxion/hello:latest
     input: '{"name":"World"}'
 ```
+
+> `component` is currently a required field even when `oci_ref` is used; the
+> value is a placeholder and is not read.
 
 ## Status
 
