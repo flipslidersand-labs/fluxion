@@ -217,7 +217,7 @@ jobs:
 | `json_array` *(default)* | Wraps each child output as a JSON array element |
 | `concat` | Concatenates raw bytes |
 | `json_merge` | Deep-merges JSON objects |
-| `{ component: path/to/reducer.wasm }` | Pipes all outputs through a custom Wasm reducer |
+| `{ custom: path/to/reducer.wasm }` | Pipes all outputs through a custom Wasm reducer |
 
 ## MCP Integration
 
