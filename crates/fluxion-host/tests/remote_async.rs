@@ -272,6 +272,9 @@ async fn scheduler_async_dispatch_fails_over_to_second_worker() {
     let submits = mock.submit_count.clone();
     let live = spawn(mock).await;
 
+    // Order is deterministic: the scheduler's round-robin counter starts at 0
+    // for each run and this workflow has a single job, so the primary is
+    // workers[0] (flaky) and workers[1] (live) is the failover target.
     let wasm = tmp_wasm();
     let wf: fluxion_core::workflow::Workflow = serde_json::from_value(json!({
         "name": "async-failover",
@@ -289,7 +292,12 @@ async fn scheduler_async_dispatch_fails_over_to_second_worker() {
     let wf_path = home.path().join("wf.yaml");
     let result = tokio::time::timeout(
         Duration::from_secs(60),
-        fluxion_host::scheduler::run(&wf, &wf_path, host),
+        fluxion_host::scheduler::run_with_strategy(
+            &wf,
+            &wf_path,
+            host,
+            fluxion_host::scheduler::LbStrategy::RoundRobin,
+        ),
     )
     .await
     .expect("scheduler run hung")
@@ -298,7 +306,7 @@ async fn scheduler_async_dispatch_fails_over_to_second_worker() {
     assert_eq!(
         flaky_posts.load(Ordering::SeqCst),
         1,
-        "flaky worker tried first"
+        "flaky worker (workers[0], the round-robin primary) must be tried exactly once"
     );
     assert_eq!(submits.load(Ordering::SeqCst), 1, "live worker got the job");
 }
