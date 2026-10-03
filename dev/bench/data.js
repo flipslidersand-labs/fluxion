@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791028670282,
+  "lastUpdate": 1791029645695,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -265,6 +265,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 11725966,
             "range": "± 519657",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7f526e381b8209031bd10f7b5e4c7ae613d63977",
+          "message": "test(host): run_remote_async と async_dispatch フェイルオーバーのテストを追加 (#277) (#356)\n\n* test(host): run_remote_async と async_dispatch フェイルオーバーのテストを追加 (#277)\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n* test(host): async failover テストのワーカー順序を RoundRobin 明示で固定 (#277)\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-03T21:09:50+09:00",
+          "tree_id": "b2e5847c8629fde11f6571e41c12d08d9fe40c82",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/7f526e381b8209031bd10f7b5e4c7ae613d63977"
+        },
+        "date": 1791029645363,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1694825,
+            "range": "± 140694",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 38239937,
+            "range": "± 2535083",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 26831,
+            "range": "± 1826",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 108691,
+            "range": "± 7216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1752477,
+            "range": "± 74020",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 7125170,
+            "range": "± 2628037",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 7338047,
+            "range": "± 1790003",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 23873857,
+            "range": "± 9781710",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 14961215,
+            "range": "± 7181766",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 28332501,
+            "range": "± 8943097",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 27831740,
+            "range": "± 7576912",
             "unit": "ns/iter"
           }
         ]
