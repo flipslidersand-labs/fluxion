@@ -629,3 +629,184 @@ mod fetch_blob_tests {
         );
     }
 }
+
+// ── pull() / parse_oci_ref tests (mock registry on loopback, no external network) ──
+#[cfg(test)]
+mod pull_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// (path, status line, body). Matched by exact request path.
+    type Route = (String, &'static str, Vec<u8>);
+
+    /// Loopback registry that serves each configured path for any number of
+    /// requests (one response per connection, `Connection: close`).
+    async fn spawn_mock_registry(routes: Vec<Route>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, s, b)| (*s, b.clone()))
+                    .unwrap_or(("404 Not Found", b"no route".to_vec()));
+                let mut resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                resp.extend_from_slice(&body);
+                let _ = sock.write_all(&resp).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn manifest_json(layer_media_type: &str, layer_digest: &str, size: usize) -> Vec<u8> {
+        serde_json::to_vec(&OciManifest {
+            schema_version: 2,
+            media_type: OCI_MANIFEST_TYPE.to_string(),
+            config: OciDescriptor {
+                media_type: OCI_CONFIG_TYPE.to_string(),
+                digest: "sha256:cfg".to_string(),
+                size: 2,
+            },
+            layers: vec![OciDescriptor {
+                media_type: layer_media_type.to_string(),
+                digest: layer_digest.to_string(),
+                size: size as u64,
+            }],
+        })
+        .unwrap()
+    }
+
+    fn routes_for(manifest: Vec<u8>, digest: &str, blob: Vec<u8>) -> Vec<Route> {
+        vec![
+            ("/v2/ns/repo/manifests/v1".into(), "200 OK", manifest),
+            (format!("/v2/ns/repo/blobs/{digest}"), "200 OK", blob),
+        ]
+    }
+
+    #[tokio::test]
+    async fn pull_returns_bytes_when_digest_matches() {
+        let blob = b"\0asm-fake-component".to_vec();
+        let digest = format!("sha256:{}", sha256_digest(&blob));
+        let manifest = manifest_json(WASM_LAYER_TYPE, &digest, blob.len());
+        let base = spawn_mock_registry(routes_for(manifest, &digest, blob.clone())).await;
+
+        let got = OciClient::new(base, None)
+            .unwrap()
+            .pull("ns/repo", "v1")
+            .await
+            .unwrap();
+        assert_eq!(got, blob);
+    }
+
+    #[tokio::test]
+    async fn pull_accepts_digest_without_sha256_prefix() {
+        // Documents current behavior: a bare hex digest is accepted if it matches.
+        let blob = b"bare-digest-blob".to_vec();
+        let bare = sha256_digest(&blob);
+        let manifest = manifest_json(WASM_LAYER_TYPE, &bare, blob.len());
+        let base = spawn_mock_registry(routes_for(manifest, &bare, blob.clone())).await;
+
+        let got = OciClient::new(base, None)
+            .unwrap()
+            .pull("ns/repo", "v1")
+            .await
+            .unwrap();
+        assert_eq!(got, blob);
+    }
+
+    #[tokio::test]
+    async fn pull_errors_with_status_when_manifest_is_404() {
+        let base = spawn_mock_registry(vec![]).await;
+        let err = OciClient::new(base, None)
+            .unwrap()
+            .pull("ns/repo", "v1")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("404"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn pull_errors_when_manifest_has_no_wasm_layer() {
+        let blob = b"not wasm".to_vec();
+        let digest = format!("sha256:{}", sha256_digest(&blob));
+        let manifest = manifest_json("application/octet-stream", &digest, blob.len());
+        let base = spawn_mock_registry(routes_for(manifest, &digest, blob)).await;
+
+        let err = OciClient::new(base, None)
+            .unwrap()
+            .pull("ns/repo", "v1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("contains no Wasm layer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_blob_whose_digest_differs_from_manifest() {
+        // Same size as declared, different content: only the SHA-256 check can catch it.
+        let expected_blob = b"expected-content".to_vec();
+        let tampered = b"tampered-content".to_vec();
+        assert_eq!(expected_blob.len(), tampered.len());
+        let digest = format!("sha256:{}", sha256_digest(&expected_blob));
+        let manifest = manifest_json(WASM_LAYER_TYPE, &digest, expected_blob.len());
+        let base = spawn_mock_registry(routes_for(manifest, &digest, tampered)).await;
+
+        let err = OciClient::new(base, None)
+            .unwrap()
+            .pull("ns/repo", "v1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("digest mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_oci_ref_table() {
+        let cases: &[(&str, (&str, &str, &str))] = &[
+            ("ghcr.io/org/app:v1", ("ghcr.io", "org/app", "v1")),
+            (
+                "ghcr.io/org/app@sha256:abc",
+                ("ghcr.io", "org/app", "sha256:abc"),
+            ),
+            ("ghcr.io/org/app", ("ghcr.io", "org/app", "latest")),
+            ("localhost:5000/repo:v2", ("localhost:5000", "repo", "v2")),
+            (
+                "localhost:5000/ns/repo",
+                ("localhost:5000", "ns/repo", "latest"),
+            ),
+            ("reg.io/a/b/c/d:t", ("reg.io", "a/b/c/d", "t")),
+        ];
+        for (input, (reg, repo, reference)) in cases {
+            let (r, p, f) = parse_oci_ref(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(
+                (r.as_str(), p.as_str(), f.as_str()),
+                (*reg, *repo, *reference),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_oci_ref_without_slash_is_error() {
+        let err = parse_oci_ref("noslash:v1").unwrap_err();
+        assert!(err.to_string().contains("invalid OCI ref"), "{err}");
+    }
+}

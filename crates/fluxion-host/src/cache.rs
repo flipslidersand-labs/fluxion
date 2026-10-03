@@ -242,7 +242,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"]
+    #[cfg_attr(
+        not(feature = "ci"),
+        ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"
+    )]
     fn miss_then_hit_roundtrip() {
         let engine = test_engine();
         let wasm = hello_wasm();
@@ -261,7 +264,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"]
+    #[cfg_attr(
+        not(feature = "ci"),
+        ignore = "requires pre-built components/hello — run `cargo component build` in components/hello first"
+    )]
     fn stale_artifact_is_evicted() {
         let engine = test_engine();
         let wasm = hello_wasm();
