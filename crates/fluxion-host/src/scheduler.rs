@@ -121,6 +121,64 @@ pub async fn retry_silent(
     .await
 }
 
+/// Options shared by [`run_with_options`] and [`retry_with_options`].
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// Load-balancing strategy for distributing jobs across remote workers.
+    pub strategy: LbStrategy,
+    /// Print progress to stdout/stderr (`false` for MCP / programmatic use).
+    pub progress: bool,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            strategy: LbStrategy::default(),
+            progress: true,
+        }
+    }
+}
+
+/// Run a workflow from scratch with the given [`RunOptions`].
+pub async fn run_with_options(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    opts: &RunOptions,
+) -> Result<RunResult> {
+    run_inner(
+        wf,
+        workflow_path,
+        host,
+        HashMap::new(),
+        opts.progress,
+        opts.strategy.clone(),
+    )
+    .await
+}
+
+/// Retry a previous run, re-executing `from_job` and its dependents, with the
+/// given [`RunOptions`].
+pub async fn retry_with_options(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    prev_run_id: &str,
+    from_job: &str,
+    opts: &RunOptions,
+) -> Result<RunResult> {
+    retry_inner(
+        wf,
+        workflow_path,
+        host,
+        prev_run_id,
+        from_job,
+        opts.progress,
+        opts.strategy.clone(),
+    )
+    .await
+}
+
 /// Perform GET /health on each candidate URL concurrently.
 /// Returns the subset that responded successfully, updating the DB health status.
 async fn health_check_workers(candidates: &[String]) -> Vec<String> {
@@ -1384,6 +1442,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// Serializes tests that mutate the process-wide `HOME` (RunStore location).
+    static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     // Build a Workflow with a single job "j" via JSON so we don't depend on
     // indexmap directly in this crate's tests.
     fn wf(workers: &[&str], job_worker: Option<&str>) -> Workflow {
@@ -1768,6 +1829,7 @@ mod tests {
         let host = Arc::new(FluxionHost::new().unwrap());
         let wf = wf_with_executor("remote", false);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -1793,6 +1855,7 @@ mod tests {
         let host = Arc::new(FluxionHost::new().unwrap());
         let wf = wf_with_executor("local", false);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -1945,6 +2008,7 @@ mod tests {
         .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -1978,6 +2042,109 @@ mod tests {
             "orphaned in-flight job must be marked Cancelled, got: {:?}",
             jobs.get("slow_ok")
         );
+    }
+
+    /// Counts POST requests (job executions) per worker; `/health` GETs are
+    /// answered but not counted.
+    async fn spawn_counting_mock_worker(hits: Arc<AtomicUsize>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let hits = Arc::clone(&hits);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let mut need = None;
+                    while let Ok(n) = sock.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if need.is_none()
+                            && let Some(p) = find(&buf, b"\r\n\r\n")
+                        {
+                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                            let cl = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            need = Some(p + 4 + cl);
+                        }
+                        if need.is_some_and(|n| buf.len() >= n) {
+                            break;
+                        }
+                    }
+                    if buf.starts_with(b"POST") {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let body =
+                        "{\"output\":\"\",\"compile_ms\":0,\"instantiate_ms\":0,\"execute_ms\":0}";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// #317: `retry_with_options` must hand `opts.strategy` to `retry_inner`.
+    /// Workers weighted [2, 1] and two sequential jobs: Weighted sends both
+    /// jobs to worker A (slots 0 and 1), RoundRobin would send the second to B.
+    #[tokio::test]
+    async fn retry_with_options_propagates_weighted_strategy() {
+        let hits_a = Arc::new(AtomicUsize::new(0));
+        let hits_b = Arc::new(AtomicUsize::new(0));
+        let url_a = spawn_counting_mock_worker(Arc::clone(&hits_a)).await;
+        let url_b = spawn_counting_mock_worker(Arc::clone(&hits_b)).await;
+        let wasm = tmp_wasm();
+        let p = wasm.path().to_string_lossy();
+        let wf: Workflow = serde_json::from_str(&format!(
+            r#"{{"name":"t","workers":[{{"url":"{url_a}","weight":2}},{{"url":"{url_b}","weight":1}}],
+                "jobs":{{
+                    "a":{{"component":"{p}","executor":"remote"}},
+                    "b":{{"component":"{p}","executor":"remote","depends_on":["a"]}}
+                }}}}"#
+        ))
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
+        // SAFETY: same pattern as the other RunStore-backed tests in this module.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        store
+            .create_run("prev-317", "t", Path::new("t.yaml"))
+            .unwrap();
+        let host = Arc::new(FluxionHost::new().unwrap());
+
+        let opts = RunOptions {
+            strategy: LbStrategy::Weighted,
+            progress: false,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            retry_with_options(&wf, Path::new("t.yaml"), host, "prev-317", "a", &opts),
+        )
+        .await
+        .expect("retry must not hang")
+        .expect("retry should succeed");
+        assert!(result.success);
+        assert_eq!(hits_a.load(Ordering::SeqCst), 2);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn run_options_default_is_round_robin_with_progress() {
+        let d = RunOptions::default();
+        assert!(matches!(d.strategy, LbStrategy::RoundRobin));
+        assert!(d.progress);
     }
 
     // ── downstream_inclusive ────────────────────────────────────────────────
