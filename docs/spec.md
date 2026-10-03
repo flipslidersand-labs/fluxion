@@ -96,3 +96,13 @@ Denied:
 | Phase 3 | ファイル権限外へのアクセスが Denied になる                |
 | Phase 4 | 失敗したジョブから `--from` で再実行できる                |
 | Phase 5 | 実行トレースが OpenTelemetry 形式で出力される             |
+
+## ワーカーの信頼モデル（`fluxion worker serve`）
+
+- 既定は `--bind 127.0.0.1`（ループバックのみ）。外部公開は `--bind <addr>` で明示する。
+- TLS 無し（`--tls-cert/--tls-key/--ca-cert` 省略）では `/run`・`/jobs`・`/components` に認証が無い。非ループバックで TLS 無しの場合は起動時に警告する。外部公開時は mTLS を使うこと。
+- リクエストの `permissions` は信頼しない前提で、ワーカー側ポリシーで上限を設けられる。超過したリクエストは 403。
+  - `--allow-fs-root <dir>`（複数可）: `filesystem.read/write` を配下に限定（`..`・相対パス・シンボリックリンク脱出は拒否）
+  - `--max-memory-mb <N>`: `limits.memory_mb` の上限
+  - `--deny-network`: `network.allow` を指定したリクエストを拒否
+- ポリシー未指定の場合はリクエストの権限がそのまま適用される（起動時に警告）。
