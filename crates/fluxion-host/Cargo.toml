@@ -2,6 +2,7 @@
 name = "fluxion-host"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 
 # #770: lib ターゲットの暗黙ベンチハーネスを無効化する。
 # 無効化しないと `cargo bench -p fluxion-host` が実 bench (host_bench, harness=false)
