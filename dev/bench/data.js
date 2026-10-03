@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791031167502,
+  "lastUpdate": 1791031415652,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -445,6 +445,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 13261432,
             "range": "± 1577079",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2b5891f1d27026da30f55864fdf1c18feaab1bfb",
+          "message": "deps: migrate serde_yaml (deprecated) to serde_yaml_ng 0.10 (#290) (#351)\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-03T21:39:34+09:00",
+          "tree_id": "61491927778293c849e873addc136e21483444b9",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/2b5891f1d27026da30f55864fdf1c18feaab1bfb"
+        },
+        "date": 1791031414870,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1293635,
+            "range": "± 25192",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 26571346,
+            "range": "± 2241201",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 20179,
+            "range": "± 1399",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 84923,
+            "range": "± 1553",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1300331,
+            "range": "± 39049",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5204090,
+            "range": "± 269720",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 4995349,
+            "range": "± 399547",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12491449,
+            "range": "± 1110360",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 8655996,
+            "range": "± 342043",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 17345495,
+            "range": "± 577763",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 12600754,
+            "range": "± 315026",
             "unit": "ns/iter"
           }
         ]
