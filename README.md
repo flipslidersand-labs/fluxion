@@ -9,7 +9,7 @@ Each job runs as a WebAssembly component — isolated, permission-scoped, and la
 
 ## Required Tools
 
-- Rust 1.82+
+- Rust 1.88+(edition 2024 のクレートを含むため。fluxion-worker のみ edition 2021)
 - `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
 - `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (network-probe only)
 - `cargo-component`: `cargo install cargo-component`
