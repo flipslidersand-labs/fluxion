@@ -392,7 +392,7 @@ docker run -d -p 5000:5000 registry:2
 
 # Push a component
 fluxion registry push components/hello/target/wasm32-wasip1/debug/hello.wasm \
-  --to localhost:5000/fluxion/hello:latest
+  localhost:5000/fluxion/hello:latest
 
 # Pull a component (auto-pulls before execution)
 fluxion run examples/oci-registry.yaml
@@ -403,9 +403,13 @@ In YAML workflows, reference registry components via `oci_ref`:
 ```yaml
 jobs:
   greet:
+    component: ignored.wasm   # required by the schema; ignored when oci_ref is set
     oci_ref: localhost:5000/fluxion/hello:latest
     input: '{"name":"World"}'
 ```
+
+> `component` is currently a required field even when `oci_ref` is used; the
+> value is a placeholder and is not read.
 
 ## Status
 
