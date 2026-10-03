@@ -67,7 +67,7 @@ pub async fn watch_and_run(path: PathBuf, debounce_ms: u64) -> Result<()> {
                                         let wf_path = PathBuf::from(&path)
                                             .canonicalize()
                                             .unwrap_or(PathBuf::from(&path));
-                                        scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), scheduler::LbStrategy::RoundRobin).await
+                                        scheduler::run_with_options(&wf, &wf_path, Arc::clone(&host), &scheduler::RunOptions::default()).await
                                     })
                                 }) {
                                     Ok(result) => {

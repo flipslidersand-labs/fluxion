@@ -53,6 +53,9 @@ enum Commands {
         /// Re-execute this job and all its downstream dependents
         #[arg(long)]
         from: String,
+        /// Load-balancing strategy for distributing jobs across remote workers
+        #[arg(long, value_enum, default_value_t = LbStrategy::RoundRobin)]
+        lb_strategy: LbStrategy,
     },
     /// Show detailed status of a previous run
     Status { run_id: String },
@@ -323,14 +326,21 @@ async fn run(command: Commands) -> Result<()> {
                 .canonicalize()
                 .unwrap_or(PathBuf::from(&path));
             let host = Arc::new(FluxionHost::new()?);
-            let result =
-                scheduler::run_with_strategy(&wf, &workflow_path, host, lb_strategy).await?;
+            let opts = scheduler::RunOptions {
+                strategy: lb_strategy,
+                progress: true,
+            };
+            let result = scheduler::run_with_options(&wf, &workflow_path, host, &opts).await?;
             if metrics {
                 print_metrics_table(&result.jobs);
             }
         }
 
-        Commands::Retry { run_id, from } => {
+        Commands::Retry {
+            run_id,
+            from,
+            lb_strategy,
+        } => {
             let store = RunStore::open()?;
             let (workflow_path, _) = store.load_run(&run_id)?;
             let wf = Workflow::from_file(&workflow_path).map_err(|e| {
@@ -338,7 +348,11 @@ async fn run(command: Commands) -> Result<()> {
             })?;
             let wp = PathBuf::from(&workflow_path);
             let host = Arc::new(FluxionHost::new()?);
-            scheduler::retry(&wf, &wp, host, &run_id, &from).await?;
+            let opts = scheduler::RunOptions {
+                strategy: lb_strategy,
+                progress: true,
+            };
+            scheduler::retry_with_options(&wf, &wp, host, &run_id, &from, &opts).await?;
         }
 
         Commands::Status { run_id } => {
@@ -1175,9 +1189,11 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         };
         let wf_path = PathBuf::from(&sched.workflow_path);
         tracing::info!(schedule = %sched_id, "firing scheduled workflow");
-        let _ =
-            scheduler::run_with_strategy(&wf, &wf_path, Arc::clone(&host), LbStrategy::RoundRobin)
-                .await;
+        let opts = scheduler::RunOptions {
+            strategy: LbStrategy::RoundRobin,
+            progress: true,
+        };
+        let _ = scheduler::run_with_options(&wf, &wf_path, Arc::clone(&host), &opts).await;
 
         // Record last_run_at (next_run_at is already updated by claim_schedule).
         let now = std::time::SystemTime::now()
@@ -1192,7 +1208,39 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{fmt_unix, validate_worker_url};
+    use super::{Cli, Commands, LbStrategy, fmt_unix, validate_worker_url};
+    use clap::Parser;
+
+    #[test]
+    fn retry_accepts_lb_strategy_weighted() {
+        let cli = Cli::try_parse_from([
+            "fluxion",
+            "retry",
+            "run-1",
+            "--from",
+            "a",
+            "--lb-strategy",
+            "weighted",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Retry { lb_strategy, .. } => {
+                assert!(matches!(lb_strategy, LbStrategy::Weighted))
+            }
+            _ => panic!("expected Retry"),
+        }
+    }
+
+    #[test]
+    fn retry_lb_strategy_defaults_to_round_robin() {
+        let cli = Cli::try_parse_from(["fluxion", "retry", "run-1", "--from", "a"]).unwrap();
+        match cli.command {
+            Commands::Retry { lb_strategy, .. } => {
+                assert!(matches!(lb_strategy, LbStrategy::RoundRobin))
+            }
+            _ => panic!("expected Retry"),
+        }
+    }
 
     #[test]
     fn fmt_unix_includes_date_and_time() {
