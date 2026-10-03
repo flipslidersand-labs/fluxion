@@ -45,14 +45,9 @@ jobs:
           done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: ci-build-test
       - name: Build
         run: cargo build --workspace -j2
       - name: Test
@@ -80,14 +75,9 @@ jobs:
           done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: ci-clippy
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
@@ -115,21 +105,18 @@ jobs:
           done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo (host + components)
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-component
-            target
-            components/alloc-bomb/target
-            components/file-reader/target
-            components/hello/target
-            components/network-probe/target
-            components/pipeline-stage/target
-            components/spin/target
-          key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-e2e-
+          shared-key: ci-e2e
+          workspaces: |
+            .
+            components/alloc-bomb
+            components/file-reader
+            components/hello
+            components/network-probe
+            components/pipeline-stage
+            components/spin
+          cache-bin: true
       - name: Install cargo-component
         run: |
           if ! command -v cargo-component &>/dev/null; then
