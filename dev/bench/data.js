@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791031415652,
+  "lastUpdate": 1791070281021,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -535,6 +535,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 12600754,
             "range": "± 315026",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "840b60a50670d5b6a92f5bdb5653406a3a2aa194",
+          "message": "fix(host): trust only the configured CA for worker mTLS (#281) (#340)\n\nDisable built-in public roots when tls is configured and dedupe the two\nclient builders into build_client().\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-04T08:26:14+09:00",
+          "tree_id": "8f34badd1052de27327f90037b95259b86491209",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/840b60a50670d5b6a92f5bdb5653406a3a2aa194"
+        },
+        "date": 1791070280272,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1788452,
+            "range": "± 48669",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 45317120,
+            "range": "± 492925",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31026,
+            "range": "± 114",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 124379,
+            "range": "± 353",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1848507,
+            "range": "± 8172",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5603100,
+            "range": "± 68546",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5666206,
+            "range": "± 101002",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12862605,
+            "range": "± 87471",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 9029437,
+            "range": "± 243198",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 19694404,
+            "range": "± 253513",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 12805598,
+            "range": "± 458508",
             "unit": "ns/iter"
           }
         ]
