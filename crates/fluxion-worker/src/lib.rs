@@ -468,28 +468,23 @@ pub async fn serve(
 }
 
 async fn serve_tls(app: Router, addr: &str, tls: WorkerTls) -> Result<()> {
+    use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls::ServerConfig;
-    use rustls_pemfile::{certs, private_key};
-    use std::io::BufReader;
     use std::sync::Arc as StdArc;
     use tokio_rustls::TlsAcceptor;
     use tower::Service;
 
     // Load server certificate chain.
-    let cert_file = std::fs::File::open(&tls.cert)?;
     let server_certs: Vec<CertificateDer<'static>> =
-        certs(&mut BufReader::new(cert_file)).collect::<std::result::Result<_, _>>()?;
+        CertificateDer::pem_file_iter(&tls.cert)?.collect::<std::result::Result<_, _>>()?;
 
     // Load server private key.
-    let key_file = std::fs::File::open(&tls.key)?;
-    let server_key: PrivateKeyDer<'static> = private_key(&mut BufReader::new(key_file))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {:?}", tls.key))?;
+    let server_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_file(&tls.key)?;
 
     // Build client certificate verifier from CA (mTLS).
-    let ca_file = std::fs::File::open(&tls.ca)?;
     let ca_certs: Vec<CertificateDer<'static>> =
-        certs(&mut BufReader::new(ca_file)).collect::<std::result::Result<_, _>>()?;
+        CertificateDer::pem_file_iter(&tls.ca)?.collect::<std::result::Result<_, _>>()?;
 
     let mut root_store = rustls::RootCertStore::empty();
     for cert in ca_certs {
@@ -536,6 +531,60 @@ async fn serve_tls(app: Router, addr: &str, tls: WorkerTls) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIBfzCCASWgAwIBAgIUBAUNdTRtIudbWKEEbfd3xl2bh00wCgYIKoZIzj0EAwIw\nFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwMzAzMjIzMFoYDzIxMjYwOTA5\nMDMyMjMwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAAQEwGgOr30cIGOMVDodWniz7cpYg+Fx//KQZtJtCqzjeCxQrfLSqcXt\nygGr0DOc4Y655xUOk0MxvUzquSmHliodo1MwUTAdBgNVHQ4EFgQUlOy9dNL3R8IJ\nmTrEyKtw1PWpz08wHwYDVR0jBBgwFoAUlOy9dNL3R8IJmTrEyKtw1PWpz08wDwYD\nVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEA0jahTYL3c4zTXw0dEmrU\n6f0Xb4mIXkbmPcOiOWkJupACIESaAvzQKcgNdXzwXLaJVdjvYn6bvN0RQOxI69Es\nwrfZ\n-----END CERTIFICATE-----\n";
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4aqcgIiKGn/mk2m0\n3qmdxVWqzC9+08p8b6R5qJX5cP6hRANCAAQEwGgOr30cIGOMVDodWniz7cpYg+Fx\n//KQZtJtCqzjeCxQrfLSqcXtygGr0DOc4Y655xUOk0MxvUzquSmHliod\n-----END PRIVATE KEY-----\n";
+
+    fn write_pem(content: &str) -> NamedTempFile {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f
+    }
+
+    fn tls_files(cert: &str, key: &str, ca: &str) -> (WorkerTls, [NamedTempFile; 3]) {
+        let files = [write_pem(cert), write_pem(key), write_pem(ca)];
+        let tls = WorkerTls {
+            cert: files[0].path().to_path_buf(),
+            key: files[1].path().to_path_buf(),
+            ca: files[2].path().to_path_buf(),
+        };
+        (tls, files)
+    }
+
+    #[tokio::test]
+    async fn serve_tls_loads_valid_pem_and_serves() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (tls, _files) = tls_files(TEST_CERT_PEM, TEST_KEY_PEM, TEST_CERT_PEM);
+        // Valid PEM: loading succeeds and the server keeps running (timeout elapses).
+        let res = tokio::time::timeout(
+            Duration::from_millis(300),
+            serve_tls(Router::new(), "127.0.0.1:0", tls),
+        )
+        .await;
+        assert!(res.is_err(), "serve_tls returned early: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn serve_tls_errors_on_invalid_key_pem() {
+        let (tls, _files) = tls_files(TEST_CERT_PEM, "not a pem", TEST_CERT_PEM);
+        let res = serve_tls(Router::new(), "127.0.0.1:0", tls).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn serve_tls_errors_on_invalid_cert_pem() {
+        let (tls, _files) = tls_files(
+            "-----BEGIN CERTIFICATE-----
+!!!
+-----END CERTIFICATE-----
+",
+            TEST_KEY_PEM,
+            TEST_CERT_PEM,
+        );
+        let res = serve_tls(Router::new(), "127.0.0.1:0", tls).await;
+        assert!(res.is_err());
+    }
 
     fn entry(status: &str, completed_at: Option<Instant>) -> JobEntry {
         JobEntry {
