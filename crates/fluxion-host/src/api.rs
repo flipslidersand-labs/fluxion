@@ -85,13 +85,17 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
     }
 }
 
-/// Bind the API + metrics router on `port` and serve until the process exits.
-pub async fn start(port: u16) -> anyhow::Result<()> {
+/// Bind the API + metrics router on `addr` and serve until the process exits.
+///
+/// The API has no authentication; callers should default to a loopback address.
+pub async fn start(addr: SocketAddr) -> anyhow::Result<()> {
     let store = Arc::new(Mutex::new(fluxion_core::store::RunStore::open()?));
     let app = router(ApiState { store });
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("fluxion API server listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(
+        "fluxion API server listening on http://{}",
+        listener.local_addr()?
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
