@@ -27,7 +27,6 @@ rusqlite   = { version = "0.31", features = ["bundled"] }
 clap       = { version = "4", features = ["derive"] }
 wasmtime   = { version = "28", features = ["component-model"] }
 wasmtime-wasi = "28"
-cap-std       = "3"
 sha2          = "0.10"
 lru           = "0.12"
 axum          = "0.7"

@@ -15,7 +15,6 @@ bench = false
 
 [dependencies]
 anyhow        = { workspace = true }
-cap-std       = { workspace = true }
 clap          = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
