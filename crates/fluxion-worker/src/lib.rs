@@ -16,6 +16,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -81,9 +82,31 @@ pub struct JobEntry {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// When this entry reached a terminal state ("succeeded"/"failed").
+    /// `None` while still "running". Used by `sweep_expired_jobs` to purge
+    /// completed entries after `JOB_RETENTION` — otherwise a long-lived
+    /// worker accumulates one entry per job forever (#239).
+    #[serde(skip)]
+    completed_at: Option<Instant>,
 }
 
 type JobStore = Arc<DashMap<String, JobEntry>>;
+
+/// How long a completed job's entry stays in memory before being purged.
+const JOB_RETENTION: Duration = Duration::from_secs(300);
+/// How often the background sweep checks for expired entries.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Remove completed job entries older than `retention`. Entries still
+/// "running" (`completed_at: None`) are never swept.
+fn sweep_expired_jobs(jobs: &JobStore, retention: Duration) {
+    jobs.retain(|_, entry| {
+        entry
+            .completed_at
+            .map(|t| t.elapsed() < retention)
+            .unwrap_or(true)
+    });
+}
 
 /// Shared state threaded through all axum handlers.
 #[derive(Clone)]
@@ -111,6 +134,7 @@ async fn handle_submit_job(
             status: "running".into(),
             output: None,
             error: None,
+            completed_at: None,
         },
     );
 
@@ -123,11 +147,13 @@ async fn handle_submit_job(
                 status: "succeeded".into(),
                 output: Some(output_b64),
                 error: None,
+                completed_at: Some(Instant::now()),
             },
             Err(msg) => JobEntry {
                 status: "failed".into(),
                 output: None,
                 error: Some(msg),
+                completed_at: Some(Instant::now()),
             },
         };
         state2.jobs.insert(jid, entry);
@@ -416,6 +442,15 @@ pub async fn serve(
         app = app
             .route("/jobs", post(handle_submit_job))
             .route("/jobs/:id", get(handle_get_job));
+
+        let sweep_jobs = Arc::clone(&state.jobs);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+            loop {
+                interval.tick().await;
+                sweep_expired_jobs(&sweep_jobs, JOB_RETENTION);
+            }
+        });
     }
 
     let app = app.with_state(state);
@@ -495,5 +530,57 @@ async fn serve_tls(app: Router, addr: &str, tls: WorkerTls) -> Result<()> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(status: &str, completed_at: Option<Instant>) -> JobEntry {
+        JobEntry {
+            status: status.into(),
+            output: None,
+            error: None,
+            completed_at,
+        }
+    }
+
+    fn past(secs_ago: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs_ago))
+            .expect("time went backwards")
+    }
+
+    #[test]
+    fn sweep_removes_completed_entries_past_retention() {
+        let jobs: JobStore = Arc::new(DashMap::new());
+        jobs.insert("old".into(), entry("succeeded", Some(past(600))));
+        jobs.insert("fresh".into(), entry("succeeded", Some(past(10))));
+
+        sweep_expired_jobs(&jobs, Duration::from_secs(300));
+
+        assert!(!jobs.contains_key("old"), "expired entry must be swept");
+        assert!(jobs.contains_key("fresh"), "recent entry must survive");
+    }
+
+    #[test]
+    fn sweep_never_removes_running_entries() {
+        let jobs: JobStore = Arc::new(DashMap::new());
+        jobs.insert("running".into(), entry("running", None));
+
+        sweep_expired_jobs(&jobs, Duration::from_secs(0));
+
+        assert!(
+            jobs.contains_key("running"),
+            "in-flight jobs must never be swept regardless of age"
+        );
+    }
+
+    #[test]
+    fn sweep_on_empty_store_is_a_noop() {
+        let jobs: JobStore = Arc::new(DashMap::new());
+        sweep_expired_jobs(&jobs, Duration::from_secs(300));
+        assert!(jobs.is_empty());
     }
 }

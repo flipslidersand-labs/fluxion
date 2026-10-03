@@ -164,6 +164,9 @@ enum BuildCommands {
         /// Generate a task.py stub from wit/task.wit instead of building
         #[arg(long)]
         stub: bool,
+        /// With --stub: overwrite the script file even if it already has content
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -417,6 +420,7 @@ async fn run(command: Commands) -> Result<()> {
                 fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
             }
             WorkerCommands::Register { url } => {
+                validate_worker_url(&url)?;
                 let store = RunStore::open()?;
                 store.register_worker(&url)?;
                 println!("Registered: {url}");
@@ -504,11 +508,12 @@ async fn run(command: Commands) -> Result<()> {
                 out,
                 wit_path,
                 stub,
+                force,
             } => {
                 let wit = build::resolve_wit_path(wit_path);
                 if stub {
                     let stub_out = script.with_extension("py");
-                    build::generate_stub(&wit.join("task.wit"), &stub_out)?;
+                    build::generate_stub(&wit.join("task.wit"), &stub_out, force)?;
                 } else {
                     build::build_python(&script, &out, &wit)?;
                 }
@@ -1000,11 +1005,25 @@ fn component_item_kind(item: &wasmtime::component::types::ComponentItem) -> &'st
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Validate a worker URL before registering it. Rejects anything that isn't a
+/// well-formed http(s) URL, so a typo surfaces immediately instead of as an
+/// opaque connection error deep in the scheduler/worker dispatch path.
+fn validate_worker_url(url: &str) -> Result<()> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow::anyhow!("'{url}' is not a valid URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        anyhow::bail!(
+            "'{url}' has unsupported scheme '{}' — expected http or https",
+            parsed.scheme()
+        );
+    }
+    Ok(())
+}
+
 fn fmt_unix(secs: u64) -> String {
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    chrono::DateTime::<Utc>::from_timestamp(secs as i64, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "invalid timestamp".to_string())
 }
 
 // ── fluxion schedule ──────────────────────────────────────────────────────────
@@ -1168,5 +1187,110 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
         if let Ok(s) = RunStore::open() {
             let _ = s.update_schedule_next(&sched_id, now, next);
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::{fmt_unix, next_run_secs, validate_worker_url};
+
+    #[test]
+    fn fmt_unix_includes_date_and_time() {
+        // 2024-01-15T03:04:05Z
+        let formatted = fmt_unix(1705287845);
+        assert_eq!(formatted, "2024-01-15 03:04:05");
+    }
+
+    #[test]
+    fn fmt_unix_epoch_zero() {
+        assert_eq!(fmt_unix(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn validate_worker_url_accepts_http_and_https() {
+        assert!(validate_worker_url("http://worker-1:7777").is_ok());
+        assert!(validate_worker_url("https://worker-1:7777").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_malformed_url() {
+        let err = validate_worker_url("not a url").unwrap_err();
+        assert!(err.to_string().contains("not a valid URL"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_unsupported_scheme() {
+        let err = validate_worker_url("ftp://worker-1:7777").unwrap_err();
+        assert!(err.to_string().contains("unsupported scheme"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_missing_scheme() {
+        let err = validate_worker_url("worker-1:7777").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn next_run_secs_valid_expr_is_in_the_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next = next_run_secs("0 * * * * *").unwrap();
+        assert!(next > now, "next={next} now={now}");
+        assert!(next <= now + 61);
+    }
+
+    #[test]
+    fn next_run_secs_rejects_invalid_expr() {
+        let err = next_run_secs("not a cron").unwrap_err();
+        assert!(err.to_string().contains("Invalid cron expression"));
+    }
+
+    /// The only test in this binary that touches `HOME` / `RunStore::open()`.
+    #[tokio::test]
+    async fn fire_due_schedules_claims_even_when_workflow_is_missing() {
+        use super::fire_due_schedules;
+        use fluxion_core::store::RunStore;
+        use fluxion_host::FluxionHost;
+        use std::sync::Arc;
+
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: no other test in this binary reads or writes HOME.
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let missing = home.path().join("missing.yaml");
+        {
+            let store = RunStore::open().unwrap();
+            // next_run_at = 1 (long past) => due immediately.
+            store
+                .add_schedule("sched-missing", missing.to_str().unwrap(), "0 * * * * *", 1)
+                .unwrap();
+        }
+        assert_eq!(RunStore::open().unwrap().due_schedules().unwrap().len(), 1);
+
+        let host = Arc::new(FluxionHost::new().unwrap());
+        // Must not panic even though the workflow file cannot be loaded.
+        fire_due_schedules(Arc::clone(&host)).await;
+
+        // Claim happened before the load failure: next_run_at advanced into the
+        // future, last_run_at stays unset (the run was skipped).
+        let list = RunStore::open().unwrap().list_schedules().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].next_run_at > 1);
+        assert_eq!(list[0].last_run_at, None);
+        let advanced = list[0].next_run_at;
+
+        // Second call: no longer due, nothing changes.
+        assert!(
+            RunStore::open()
+                .unwrap()
+                .due_schedules()
+                .unwrap()
+                .is_empty()
+        );
+        fire_due_schedules(host).await;
+        let list = RunStore::open().unwrap().list_schedules().unwrap();
+        assert_eq!(list[0].next_run_at, advanced);
     }
 }
