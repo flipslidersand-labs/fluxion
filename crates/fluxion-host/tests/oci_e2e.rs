@@ -127,11 +127,17 @@ async fn run_from_oci_does_not_starve_worker_thread() {
     let perms = fluxion_core::workflow::PermissionSet::default();
     let env = std::collections::HashMap::new();
 
-    let sleep_task = tokio::spawn(async {
+    // Wait until the sleep task has actually been polled before starting
+    // `run_from_oci`; otherwise a blocked worker could delay the task's first
+    // poll and its `start` would be taken too late to observe the starvation.
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let sleep_task = tokio::spawn(async move {
         let start = std::time::Instant::now();
+        let _ = started_tx.send(());
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         start.elapsed()
     });
+    started_rx.await.unwrap();
 
     let run_result = host
         .clone()

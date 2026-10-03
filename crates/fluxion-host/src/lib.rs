@@ -187,7 +187,7 @@ impl FluxionHost {
             host.run_component_with_key(&wasm_bytes, cache_key, input, &perms, &env)
         })
         .await
-        .context("run_from_oci: blocking task panicked")?
+        .context("run_from_oci: blocking task failed")?
     }
 
     /// Like `run_component_measured` but accepts raw wasm bytes + an explicit cache key.
