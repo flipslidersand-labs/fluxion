@@ -1197,7 +1197,7 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{Cli, Commands, fmt_unix, validate_worker_url};
+    use super::{Cli, Commands, fmt_unix, next_run_secs, validate_worker_url};
     use clap::Parser;
     use std::net::IpAddr;
 
@@ -1256,5 +1256,69 @@ mod helper_tests {
     fn validate_worker_url_rejects_missing_scheme() {
         let err = validate_worker_url("worker-1:7777").unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn next_run_secs_valid_expr_is_in_the_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next = next_run_secs("0 * * * * *").unwrap();
+        assert!(next > now, "next={next} now={now}");
+        assert!(next <= now + 61);
+    }
+
+    #[test]
+    fn next_run_secs_rejects_invalid_expr() {
+        let err = next_run_secs("not a cron").unwrap_err();
+        assert!(err.to_string().contains("Invalid cron expression"));
+    }
+
+    /// The only test in this binary that touches `HOME` / `RunStore::open()`.
+    #[tokio::test]
+    async fn fire_due_schedules_claims_even_when_workflow_is_missing() {
+        use super::fire_due_schedules;
+        use fluxion_core::store::RunStore;
+        use fluxion_host::FluxionHost;
+        use std::sync::Arc;
+
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: no other test in this binary reads or writes HOME.
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let missing = home.path().join("missing.yaml");
+        {
+            let store = RunStore::open().unwrap();
+            // next_run_at = 1 (long past) => due immediately.
+            store
+                .add_schedule("sched-missing", missing.to_str().unwrap(), "0 * * * * *", 1)
+                .unwrap();
+        }
+        assert_eq!(RunStore::open().unwrap().due_schedules().unwrap().len(), 1);
+
+        let host = Arc::new(FluxionHost::new().unwrap());
+        // Must not panic even though the workflow file cannot be loaded.
+        fire_due_schedules(Arc::clone(&host)).await;
+
+        // Claim happened before the load failure: next_run_at advanced into the
+        // future, last_run_at stays unset (the run was skipped).
+        let list = RunStore::open().unwrap().list_schedules().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].next_run_at > 1);
+        assert_eq!(list[0].last_run_at, None);
+        let advanced = list[0].next_run_at;
+
+        // Second call: no longer due, nothing changes.
+        assert!(
+            RunStore::open()
+                .unwrap()
+                .due_schedules()
+                .unwrap()
+                .is_empty()
+        );
+        fire_due_schedules(host).await;
+        let list = RunStore::open().unwrap().list_schedules().unwrap();
+        assert_eq!(list[0].next_run_at, advanced);
     }
 }

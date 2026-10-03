@@ -1,5 +1,6 @@
 name: oci-registry-example
 jobs:
   greet:
+    component: ignored.wasm   # required by the schema; ignored when oci_ref is set
     oci_ref: localhost:5000/fluxion/hello:latest
     input: '{"name":"World"}'
