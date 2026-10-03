@@ -38,6 +38,18 @@ impl fmt::Display for RemoteError {
 
 impl std::error::Error for RemoteError {}
 
+/// Refuse to send over plaintext when mTLS is configured: an `http://` URL
+/// would silently skip TLS (no server auth, no client cert) while the caller
+/// believes mTLS is in effect (#299).
+fn ensure_https_for_tls(worker_url: &str, tls: Option<&TlsConfig>) -> Result<(), RemoteError> {
+    if tls.is_some() && !fluxion_core::workflow::is_https_url(worker_url) {
+        return Err(RemoteError::Execution(anyhow::anyhow!(
+            "worker {worker_url}: tls is configured but the URL is not https:// — refusing to send in plaintext"
+        )));
+    }
+    Ok(())
+}
+
 /// Dispatch a Wasm job to a remote worker via HTTP POST /run.
 ///
 /// When `tls` is `Some`, the client presents a mutual-TLS identity and
@@ -50,6 +62,8 @@ pub async fn run_remote(
     env: &HashMap<String, String>,
     tls: Option<&TlsConfig>,
 ) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
+    ensure_https_for_tls(worker_url, tls)?;
+
     // Reading the local .wasm file is an orchestrator-side error, not a worker
     // fault — surface it as Execution so we don't pointlessly try every worker.
     let wasm_bytes =
@@ -196,6 +210,8 @@ pub async fn run_remote_async(
     env: &HashMap<String, String>,
     tls: Option<&TlsConfig>,
 ) -> Result<(Vec<u8>, JobMetrics), RemoteError> {
+    ensure_https_for_tls(worker_url, tls)?;
+
     let wasm_bytes =
         std::fs::read(wasm_path.as_ref()).map_err(|e| RemoteError::Execution(e.into()))?;
 
@@ -376,4 +392,44 @@ fn current_trace_context() -> Option<(String, String)> {
     let traceparent = format!("00-{trace_id:032x}-{span_id:016x}-{flags:02x}");
     let tracestate = sc.trace_state().header();
     Some((traceparent, tracestate.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_tls() -> TlsConfig {
+        TlsConfig {
+            cert: "/nonexistent/c.pem".into(),
+            key: "/nonexistent/k.pem".into(),
+            ca: "/nonexistent/ca.pem".into(),
+        }
+    }
+
+    /// #299: tls + http:// must be rejected before anything is read or sent.
+    #[tokio::test]
+    async fn run_remote_rejects_tls_over_http() {
+        let tls = dummy_tls();
+        let perms = PermissionSet::default();
+        let env = HashMap::new();
+        for url in ["http://127.0.0.1:1", "HTTP://127.0.0.1:1/"] {
+            let err = run_remote(url, "/nonexistent.wasm", vec![], &perms, &env, Some(&tls))
+                .await
+                .unwrap_err();
+            assert!(!err.is_failover(), "must not fail over: {err}");
+            assert!(err.to_string().contains("not https"), "{err}");
+            let err = run_remote_async(url, "/nonexistent.wasm", vec![], &perms, &env, Some(&tls))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("not https"), "{err}");
+        }
+    }
+
+    #[test]
+    fn https_check_allows_https_and_no_tls() {
+        let tls = dummy_tls();
+        assert!(ensure_https_for_tls("https://w:7777", Some(&tls)).is_ok());
+        assert!(ensure_https_for_tls("HTTPS://w:7777", Some(&tls)).is_ok());
+        assert!(ensure_https_for_tls("http://w:7777", None).is_ok());
+    }
 }

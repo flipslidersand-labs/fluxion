@@ -326,12 +326,31 @@ impl Default for ResourceLimits {
 
 #[derive(Debug, Clone)]
 pub enum ValidationError {
-    UnknownDependency { job: String, dep: String },
-    UnknownInputFrom { job: String, src: String },
-    InputFromNotForeach { job: String, src: String },
+    UnknownDependency {
+        job: String,
+        dep: String,
+    },
+    UnknownInputFrom {
+        job: String,
+        src: String,
+    },
+    InputFromNotForeach {
+        job: String,
+        src: String,
+    },
     CyclicDependency,
-    ComponentNotFound { job: String, path: String },
-    ReduceWithoutInputFrom { job: String },
+    ComponentNotFound {
+        job: String,
+        path: String,
+    },
+    ReduceWithoutInputFrom {
+        job: String,
+    },
+    /// A worker has `tls:` configured but its URL is not `https://`, so mTLS
+    /// would silently not be used and data would go out in plaintext.
+    WorkerTlsRequiresHttps {
+        url: String,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -355,6 +374,12 @@ impl std::fmt::Display for ValidationError {
             }
             Self::ReduceWithoutInputFrom { job } => {
                 write!(f, "Job '{job}': `reduce` requires `input_from`")
+            }
+            Self::WorkerTlsRequiresHttps { url } => {
+                write!(
+                    f,
+                    "Worker '{url}': `tls` is configured but the URL is not https:// (mTLS would be silently disabled)"
+                )
             }
         }
     }
@@ -467,6 +492,12 @@ fn has_cycle(jobs: &IndexMap<String, JobDefinition>) -> bool {
         .any(|id| dfs(id.as_str(), jobs, &mut visited, &mut stack))
 }
 
+/// Whether `url` uses the `https` scheme (case-insensitive).
+pub fn is_https_url(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+}
+
 // ── Workflow impl ─────────────────────────────────────────────────────────────
 
 impl Workflow {
@@ -524,6 +555,14 @@ impl Workflow {
             if def.reduce.is_some() && def.input_from.is_none() {
                 report.errors.push(ValidationError::ReduceWithoutInputFrom {
                     job: job_id.clone(),
+                });
+            }
+        }
+
+        for w in &self.workers {
+            if w.tls().is_some() && !is_https_url(w.url()) {
+                report.errors.push(ValidationError::WorkerTlsRequiresHttps {
+                    url: w.url().to_string(),
                 });
             }
         }
@@ -628,6 +667,30 @@ jobs:
 
     fn make_wf(yaml: &str) -> Workflow {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_tls_worker_with_http_url() {
+        let tls = "tls: {cert: c.pem, key: k.pem, ca: ca.pem}";
+        let wf = make_wf(&format!(
+            "name: t\njobs:\n  a:\n    component: a.wasm\nworkers:\n  - url: http://x:7777\n    {tls}\n"
+        ));
+        let report = wf.validate();
+        assert!(
+            report.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::WorkerTlsRequiresHttps { url } if url == "http://x:7777"
+            )),
+            "{:?}",
+            report.errors
+        );
+        assert!(wf.validate().into_result().is_err());
+
+        // https + tls, and http without tls, stay valid.
+        let ok = make_wf(&format!(
+            "name: t\njobs:\n  a:\n    component: a.wasm\nworkers:\n  - url: https://x:7777\n    {tls}\n  - http://y:7777\n  - url: http://z:7777\n"
+        ));
+        assert!(ok.validate().is_ok());
     }
 
     #[test]
