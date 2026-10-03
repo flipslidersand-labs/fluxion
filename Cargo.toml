@@ -10,6 +10,7 @@ resolver = "2"
 
 [workspace.package]
 license = "MIT"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow     = "1"
@@ -27,14 +28,13 @@ rusqlite   = { version = "0.31", features = ["bundled"] }
 clap       = { version = "4", features = ["derive"] }
 wasmtime   = { version = "28", features = ["component-model"] }
 wasmtime-wasi = "28"
-cap-std       = "3"
 sha2          = "0.10"
 lru           = "0.12"
 axum          = "0.7"
 reqwest       = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 tokio-rustls  = "0.26"
-rustls-pemfile = "2"
 rustls        = "0.23"
+tower         = { version = "0.5", features = ["util"] }
 hyper         = { version = "1", features = ["http1", "server"] }
 hyper-util    = { version = "0.1", features = ["tokio"] }
 futures       = "0.3"
