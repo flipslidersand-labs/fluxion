@@ -51,7 +51,8 @@ jobs:
       - name: Build
         run: cargo build --workspace -j2
       - name: Test
-        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        # fluxion-host lib/e2e tests require Wasm components; run in the e2e job
+        # (`--lib --test e2e --features ci`).
         run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
 
   clippy:
@@ -133,7 +134,7 @@ jobs:
       - name: Build host and CLI
         run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
-        run: cargo test -p fluxion-host --test e2e --features ci -j2
+        run: cargo test -p fluxion-host --lib --test e2e --features ci -j2
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
