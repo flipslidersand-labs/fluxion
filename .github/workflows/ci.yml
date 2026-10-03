@@ -106,6 +106,7 @@ jobs:
             components/hello/target
             components/network-probe/target
             components/pipeline-stage/target
+            components/sandbox-probe/target
             components/spin/target
           key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-e2e-
@@ -118,14 +119,14 @@ jobs:
         run: pip install componentize-py
       - name: Build Wasm components
         run: |
-          for comp in alloc-bomb file-reader hello pipeline-stage spin; do
+          for comp in alloc-bomb file-reader hello pipeline-stage sandbox-probe spin; do
             (cd components/$comp && cargo component build -j2)
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
       - name: Build host and CLI
         run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
-        run: cargo test -p fluxion-host --test e2e --features ci -j2
+        run: cargo test -p fluxion-host --test e2e --test sandbox_regression --features ci -j2
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

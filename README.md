@@ -24,7 +24,7 @@ cd fluxion
 cargo build -j2
 
 # Build components (each is an independent workspace)
-for c in hello file-reader pipeline-stage spin alloc-bomb; do
+for c in hello file-reader pipeline-stage spin alloc-bomb sandbox-probe; do
   cargo build --manifest-path components/$c/Cargo.toml \
     --target wasm32-wasip1
 done
@@ -84,7 +84,8 @@ fluxion/
 │   ├── network-probe/   # TCP connect; demonstrates network caps (wasip2)
 │   ├── pipeline-stage/  # 4-stage ETL: fetch → normalize → validate → export
 │   ├── spin/            # CPU busy-loop; used in timeout / epoch-interrupt demos
-│   └── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   ├── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   └── sandbox-probe/   # One filesystem op per call; used by sandbox regression tests
 ├── examples/
 │   ├── vehicle-pipeline.yaml     # 4-stage DAG — validate fails on bad year, retry fixes it
 │   ├── resource-limits-demo.yaml # spin-forever killed by epoch timeout after 2s
