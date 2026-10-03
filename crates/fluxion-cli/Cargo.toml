@@ -36,3 +36,4 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile   = { workspace = true }
 reqwest    = { workspace = true, features = ["blocking"] }
+rusqlite   = { workspace = true }
