@@ -9,7 +9,7 @@ exclude = ["components/hello", "components/file-reader", "components/network-pro
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow     = "1"

@@ -4,7 +4,7 @@
 
 | 役割                                  | 言語                     | バージョン                 |
 | ------------------------------------- | ------------------------ | -------------------------- |
-| ホストランタイム・CLI・スケジューラー | Rust                     | 1.85+ (edition 2024 クレートに必要: host/cli/core。fluxion-worker は edition 2021 / wasm32-wasip2 対応) |
+| ホストランタイム・CLI・スケジューラー | Rust                     | 1.88+ (edition 2024 クレートに必要: host/cli/core。fluxion-worker は edition 2021 / wasm32-wasip2 対応) |
 | Wasm コンポーネント (初期)            | Rust → wasm32-wasip2     | 同上                       |
 | Wasm コンポーネント (将来)            | JavaScript / Python / Go | TBD                        |
 
