@@ -6,6 +6,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
+      - ".github/workflows/bench.yml"
       - "crates/fluxion-host/benches/**"
       - "crates/fluxion-host/src/**"
       - "crates/fluxion-core/src/**"
@@ -48,6 +49,12 @@ jobs:
 
       - name: Compile benchmarks (no-run)
         run: cargo bench -p fluxion-host --no-run
+
+      - name: Clear restored Criterion baseline
+        # #273: rust-cache が復元した target/criterion の不完全な base/ を
+        # Criterion が読もうとして sample.json エラーを bencher 出力に混ぜ、
+        # github-action-benchmark が結果を1件も読めず失敗していた。
+        run: rm -rf target/criterion
 
       - name: Run benchmarks
         # #770: `| tee` は cargo bench 自体の終了コードをマスクするため、
