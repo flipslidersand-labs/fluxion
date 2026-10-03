@@ -51,6 +51,6 @@ tempfile         = "3"
 reqwest          = { workspace = true }
 tokio            = { workspace = true }
 rusqlite         = { workspace = true }
-tower            = { version = "0.4", features = ["util"] }
+tower            = { workspace = true }
 http-body-util   = "0.1"
 serde_yaml       = { workspace = true }
