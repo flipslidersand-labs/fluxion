@@ -2,6 +2,7 @@
 name = "fluxion-worker"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 
 [dependencies]
 anyhow         = { workspace = true }
@@ -12,13 +13,11 @@ tracing        = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
 tempfile       = { workspace = true }
-prometheus     = { workspace = true }
 tokio-rustls   = { workspace = true }
-rustls-pemfile = { workspace = true }
 rustls         = { workspace = true }
 hyper          = { workspace = true }
 hyper-util     = { workspace = true }
-tower          = "0.5"
+tower          = { workspace = true }
 sha2           = { workspace = true }
 uuid           = { workspace = true }
 dashmap        = { workspace = true }
