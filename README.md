@@ -26,7 +26,7 @@ cargo build -j2
 # Build components (each is an independent workspace).
 # Use `cargo component build` (not plain `cargo build`): the host loads
 # Wasm *components*, and a plain build only produces a core module.
-for c in hello file-reader pipeline-stage spin alloc-bomb; do
+for c in hello file-reader pipeline-stage spin alloc-bomb sandbox-probe; do
   (cd components/$c && cargo component build -j2)
 done
 # network-probe uses wasip2
@@ -88,7 +88,8 @@ fluxion/
 │   ├── network-probe/   # TCP connect; demonstrates network caps (wasip2)
 │   ├── pipeline-stage/  # 4-stage ETL: fetch → normalize → validate → export
 │   ├── spin/            # CPU busy-loop; used in timeout / epoch-interrupt demos
-│   └── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   ├── alloc-bomb/      # Allocates N MB; used in OOM / StoreLimits demos
+│   └── sandbox-probe/   # One filesystem op per call; used by sandbox regression tests
 ├── examples/
 │   ├── vehicle-pipeline.yaml     # 4-stage DAG — validate fails on bad year, retry fixes it
 │   ├── resource-limits-demo.yaml # spin-forever killed by epoch timeout after 2s
