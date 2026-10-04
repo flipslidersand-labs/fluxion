@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791070281021,
+  "lastUpdate": 1791106284699,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -625,6 +625,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 12805598,
             "range": "± 458508",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3827586f80d92417abf84f61b673d38a09fb776c",
+          "message": "chore(deps): wasmtime / wasmtime-wasi 28 -> 36.0.17 and follow host API (#311) (#360)\n\nwasmtime 28 is out of the security-backport window. WasiView now returns\nWasiCtxView (table() removed) and add_to_linker_sync moved to p2::.\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-04T18:25:17+09:00",
+          "tree_id": "7b4831ec3c2fed777ae250f849bfc34f4e6b04d6",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/3827586f80d92417abf84f61b673d38a09fb776c"
+        },
+        "date": 1791106283965,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1772270,
+            "range": "± 21011",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 48500777,
+            "range": "± 419600",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31350,
+            "range": "± 71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 123574,
+            "range": "± 1155",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1828443,
+            "range": "± 11712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5503008,
+            "range": "± 111319",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5551464,
+            "range": "± 124617",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12530802,
+            "range": "± 177811",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 8882644,
+            "range": "± 197060",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 19555300,
+            "range": "± 326039",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 12460895,
+            "range": "± 239312",
             "unit": "ns/iter"
           }
         ]
