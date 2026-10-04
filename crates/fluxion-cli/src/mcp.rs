@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 
 use fluxion_core::{store::RunStore, workflow::Workflow};
 use fluxion_host::{FluxionHost, scheduler};
 
 // ── Transport ────────────────────────────────────────────────────────────────
 
-async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Result<Option<String>> {
+async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<String>> {
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -44,7 +46,7 @@ async fn read_message(reader: &mut BufReader<tokio::io::Stdin>) -> Result<Option
     Ok(Some(String::from_utf8(buf)?))
 }
 
-async fn write_message(writer: &mut tokio::io::Stdout, body: &str) -> Result<()> {
+async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(body.as_bytes()).await?;
@@ -67,34 +69,36 @@ pub async fn serve() -> Result<()> {
             continue;
         }
 
-        let req: Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let id = req.get("id").cloned();
-        let method = req["method"].as_str().unwrap_or("");
-
-        // Notifications have no id and require no response
-        if id.is_none() {
-            continue;
+        if let Some(response) = process_message(&body).await {
+            write_message(&mut stdout, &response).await?;
         }
-
-        let result = handle_request(method, req.get("params")).await;
-
-        let response = match result {
-            Ok(val) => json!({ "jsonrpc": "2.0", "id": id, "result": val }),
-            Err(e) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32603, "message": e.to_string() }
-            }),
-        };
-
-        write_message(&mut stdout, &response.to_string()).await?;
     }
 
     Ok(())
+}
+
+/// Handle one decoded JSON-RPC message. Returns the serialized response, or
+/// `None` for unparsable bodies and notifications (no `id`), which get no reply.
+async fn process_message(body: &str) -> Option<String> {
+    let req: Value = serde_json::from_str(body).ok()?;
+
+    let id = req.get("id").cloned();
+    let method = req["method"].as_str().unwrap_or("");
+
+    // Notifications have no id and require no response
+    id.as_ref()?;
+
+    let result = handle_request(method, req.get("params")).await;
+
+    let response = match result {
+        Ok(val) => json!({ "jsonrpc": "2.0", "id": id, "result": val }),
+        Err(e) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32603, "message": e.to_string() }
+        }),
+    };
+    Some(response.to_string())
 }
 
 async fn handle_request(method: &str, params: Option<&Value>) -> Result<Value> {
@@ -330,5 +334,219 @@ async fn dispatch_tool(name: &str, args: &Value) -> Result<String> {
         }
 
         _ => Err(anyhow::anyhow!("Unknown tool: {}", name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn frame(body: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+    }
+
+    async fn reply(req: Value) -> Value {
+        let out = process_message(&req.to_string())
+            .await
+            .expect("request with id must get a response");
+        serde_json::from_str(&out).unwrap()
+    }
+
+    // ── framing ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_message_reads_framed_bodies_then_eof() {
+        let mut data = frame(r#"{"a":1}"#);
+        data.extend(frame(r#"{"b":"日本語"}"#));
+        let mut r = Cursor::new(data);
+        assert_eq!(read_message(&mut r).await.unwrap().unwrap(), r#"{"a":1}"#);
+        // Content-Length counts bytes, so multi-byte bodies must round-trip.
+        assert_eq!(
+            read_message(&mut r).await.unwrap().unwrap(),
+            r#"{"b":"日本語"}"#
+        );
+        assert!(read_message(&mut r).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_message_empty_input_is_eof() {
+        let mut r = Cursor::new(Vec::<u8>::new());
+        assert!(read_message(&mut r).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_message_without_or_zero_content_length_yields_empty_string() {
+        let mut r = Cursor::new(b"X-Other: 1\r\n\r\n".to_vec());
+        assert_eq!(read_message(&mut r).await.unwrap().unwrap(), "");
+        let mut r = Cursor::new(b"Content-Length: 0\r\n\r\n".to_vec());
+        assert_eq!(read_message(&mut r).await.unwrap().unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn read_message_header_name_is_case_sensitive() {
+        // Pins current behaviour: only the exact "Content-Length: " prefix is
+        // recognised, so a lowercase header is treated as missing.
+        let body = r#"{"a":1}"#;
+        let data = format!("content-length: {}\r\n\r\n{}", body.len(), body);
+        let mut r = Cursor::new(data.into_bytes());
+        assert_eq!(read_message(&mut r).await.unwrap().unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn read_message_truncated_body_is_error() {
+        let mut r = Cursor::new(b"Content-Length: 50\r\n\r\n{}".to_vec());
+        assert!(read_message(&mut r).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_message_emits_content_length_frame() {
+        let mut out: Vec<u8> = Vec::new();
+        write_message(&mut out, "{\"é\":1}").await.unwrap();
+        // "é" is 2 bytes in UTF-8: body is 8 bytes, not 7 chars.
+        assert_eq!(out, b"Content-Length: 8\r\n\r\n{\"\xc3\xa9\":1}");
+    }
+
+    #[tokio::test]
+    async fn write_then_read_roundtrip() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_message(&mut buf, r#"{"x":true}"#).await.unwrap();
+        let mut r = Cursor::new(buf);
+        assert_eq!(
+            read_message(&mut r).await.unwrap().unwrap(),
+            r#"{"x":true}"#
+        );
+    }
+
+    // ── protocol ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn initialize_reports_server_info_and_tools_capability() {
+        let v = reply(json!({"jsonrpc":"2.0","id":1,"method":"initialize"})).await;
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["result"]["serverInfo"]["name"], "fluxion-mcp");
+        assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
+        assert!(v["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn ping_returns_empty_object_and_echoes_string_id() {
+        let v = reply(json!({"jsonrpc":"2.0","id":"abc","method":"ping"})).await;
+        assert_eq!(v["id"], "abc");
+        assert_eq!(v["result"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn tools_list_returns_the_five_tools() {
+        let v = reply(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
+        let mut names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "runs_list",
+                "workflow_logs",
+                "workflow_retry",
+                "workflow_run",
+                "workflow_status"
+            ]
+        );
+        for t in v["result"]["tools"].as_array().unwrap() {
+            assert_eq!(t["inputSchema"]["type"], "object", "{t}");
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_without_id_gets_no_response() {
+        let n = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        assert!(process_message(&n.to_string()).await.is_none());
+        // Even a method that would error produces no reply without an id.
+        let n = json!({"jsonrpc":"2.0","method":"nope"});
+        assert!(process_message(&n.to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_json_gets_no_response() {
+        assert!(process_message("not json").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_method_is_error_minus_32603() {
+        // Pins current behaviour: JSON-RPC says -32601 (Method not found) but
+        // every error is reported as -32603 (Internal error).
+        let v = reply(json!({"jsonrpc":"2.0","id":3,"method":"nope"})).await;
+        assert_eq!(v["error"]["code"], -32603);
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Method not found: nope")
+        );
+        assert!(v.get("result").is_none());
+    }
+
+    // ── tools/call error paths (no store / Wasm access) ──────────────────────
+
+    async fn call_tool(name: &str, args: Value) -> Value {
+        reply(json!({
+            "jsonrpc":"2.0","id":9,"method":"tools/call",
+            "params": { "name": name, "arguments": args }
+        }))
+        .await
+    }
+
+    fn err_message(v: &Value) -> &str {
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{v}"))
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_error() {
+        let v = call_tool("nope", json!({})).await;
+        assert!(err_message(&v).contains("Unknown tool: nope"));
+    }
+
+    #[tokio::test]
+    async fn missing_name_is_unknown_tool() {
+        let v = reply(json!({"jsonrpc":"2.0","id":4,"method":"tools/call"})).await;
+        assert!(err_message(&v).contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_requires_path() {
+        let v = call_tool("workflow_run", json!({})).await;
+        assert!(err_message(&v).contains("missing 'path'"));
+        // Non-string path is treated as missing.
+        let v = call_tool("workflow_run", json!({"path": 5})).await;
+        assert!(err_message(&v).contains("missing 'path'"));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_with_missing_file_reports_load_failure() {
+        let v = call_tool("workflow_run", json!({"path": "/nonexistent/wf.yaml"})).await;
+        assert!(err_message(&v).contains("Failed to load '/nonexistent/wf.yaml'"));
+    }
+
+    #[tokio::test]
+    async fn workflow_retry_requires_run_id_and_from() {
+        let v = call_tool("workflow_retry", json!({"from": "a"})).await;
+        assert!(err_message(&v).contains("missing 'run_id'"));
+        let v = call_tool("workflow_retry", json!({"run_id": "r"})).await;
+        assert!(err_message(&v).contains("missing 'from'"));
+    }
+
+    #[tokio::test]
+    async fn workflow_status_and_logs_require_run_id() {
+        for tool in ["workflow_status", "workflow_logs"] {
+            let v = call_tool(tool, json!({})).await;
+            assert!(err_message(&v).contains("missing 'run_id'"), "{tool}");
+        }
     }
 }

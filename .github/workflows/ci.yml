@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, main, "feat/**", "fix/**", "hotfix/**", "refactor/**"]
+    branches: [main]
     paths-ignore:
       - "**.md"
       - "docs/**"
@@ -35,21 +35,24 @@ jobs:
           components: rustfmt, clippy
       - name: Install system deps
         run: |
-          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep 5
+            fi
+          done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: ci-build-test
       - name: Build
         run: cargo build --workspace -j2
       - name: Test
-        # fluxion-host unit tests require Wasm components; covered by the e2e job.
+        # fluxion-host lib/e2e tests require Wasm components; run in the e2e job
+        # (`--lib --test e2e --features ci`).
         run: cargo test -p fluxion-core -p fluxion-cli -p fluxion-worker -j2
 
   clippy:
@@ -63,17 +66,19 @@ jobs:
           components: rustfmt, clippy
       - name: Install system deps
         run: |
-          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep 5
+            fi
+          done
           sudo apt-get install -y build-essential libssl-dev pkg-config
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: ci-clippy
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
@@ -91,32 +96,41 @@ jobs:
           targets: wasm32-wasip1,wasm32-wasip2
       - name: Install system deps
         run: |
-          for i in 1 2 3; do sudo apt-get update && break || sleep 5; done
-          sudo apt-get install -y build-essential libssl-dev pkg-config
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+          sudo apt-get install -y build-essential libssl-dev pkg-config python3 python3-venv
       - name: Cache cargo (host + components)
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-component
-            target
-            components/alloc-bomb/target
-            components/file-reader/target
-            components/hello/target
-            components/network-probe/target
-            components/pipeline-stage/target
-            components/sandbox-probe/target
-            components/spin/target
-          key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-e2e-
+          shared-key: ci-e2e
+          workspaces: |
+            .
+            components/alloc-bomb
+            components/file-reader
+            components/hello
+            components/network-probe
+            components/pipeline-stage
+            components/sandbox-probe
+            components/spin
+          cache-bin: true
       - name: Install cargo-component
         run: |
           if ! command -v cargo-component &>/dev/null; then
             cargo install cargo-component --locked -j2
           fi
       - name: Install componentize-py
-        run: pip install componentize-py
+        # Use a venv: works on runners without a global `pip` (e.g. arc-fluxion)
+        # and avoids PEP 668 "externally-managed-environment" errors.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/componentize-venv"
+          "$RUNNER_TEMP/componentize-venv/bin/pip" install componentize-py
+          echo "$RUNNER_TEMP/componentize-venv/bin" >> "$GITHUB_PATH"
       - name: Build Wasm components
         run: |
           for comp in alloc-bomb file-reader hello pipeline-stage sandbox-probe spin; do
@@ -126,7 +140,7 @@ jobs:
       - name: Build host and CLI
         run: cargo build -p fluxion-host -p fluxion-cli -j2
       - name: E2E tests
-        run: cargo test -p fluxion-host --test e2e --test sandbox_regression --features ci -j2
+        run: cargo test -p fluxion-host --lib --test e2e --test sandbox_regression --features ci -j2
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
