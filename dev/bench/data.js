@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791106284699,
+  "lastUpdate": 1791116654122,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -715,6 +715,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 12460895,
             "range": "± 239312",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5035a0448bbe9b2f6fcb63b06168126825bc5e90",
+          "message": "perf(#235): avoid full wasm_bytes copy on CAS upload in remote.rs (#255)\n\nrun_remote()/run_remote_async() read the component into a Vec<u8> and\nthen .clone()'d the whole thing to build the CAS PUT request body,\ndoubling peak memory for large components. Switches wasm_bytes to\nbytes::Bytes (refcounted, already a transitive dep via reqwest) so the\nsame .clone() call sites become a cheap Arc bump instead of a memcpy.\nNo other call site needed to change: Bytes derefs to &[u8] for the\nexisting sha256 digest and base64 fallback-encode usages.\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-04T21:19:59+09:00",
+          "tree_id": "609213b3e45b3e188e37f42abd8a4263c649c1eb",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/5035a0448bbe9b2f6fcb63b06168126825bc5e90"
+        },
+        "date": 1791116653746,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1771310,
+            "range": "± 35558",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 48348676,
+            "range": "± 990277",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31122,
+            "range": "± 101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 122868,
+            "range": "± 1225",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1825900,
+            "range": "± 14271",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5495969,
+            "range": "± 65641",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5444189,
+            "range": "± 82123",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12364108,
+            "range": "± 147499",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 8860214,
+            "range": "± 155812",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 19458859,
+            "range": "± 350716",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 12626102,
+            "range": "± 174447",
             "unit": "ns/iter"
           }
         ]
