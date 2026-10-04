@@ -25,8 +25,8 @@ opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-stdout  = "0.27"
 rusqlite   = { version = "0.31", features = ["bundled"] }
 clap       = { version = "4", features = ["derive"] }
-wasmtime   = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"
+wasmtime   = { version = "36", features = ["component-model"] }
+wasmtime-wasi = "36"
 sha2          = "0.10"
 lru           = "0.12"
 axum          = "0.7"
