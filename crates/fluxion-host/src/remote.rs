@@ -38,6 +38,39 @@ impl fmt::Display for RemoteError {
 
 impl std::error::Error for RemoteError {}
 
+/// Build the HTTP client used to talk to a worker.
+///
+/// When `tls` is set, the worker's server certificate is verified against the
+/// configured CA *only*: built-in public roots are disabled so a certificate
+/// from any other CA is rejected at the handshake.
+pub(crate) fn build_client(
+    tls: Option<&TlsConfig>,
+    timeout: Duration,
+) -> Result<reqwest::Client, RemoteError> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+
+    if let Some(tls) = tls {
+        let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
+        let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
+        // reqwest::Identity::from_pem expects the cert followed by the key in one PEM blob.
+        let identity_pem = [cert_pem, key_pem].concat();
+        let identity = reqwest::Identity::from_pem(&identity_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_pem = std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
+        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+            .map_err(|e| RemoteError::Execution(e.into()))?;
+        builder = builder
+            .use_rustls_tls()
+            .tls_built_in_root_certs(false)
+            .identity(identity)
+            .add_root_certificate(ca_cert);
+    }
+
+    builder
+        .build()
+        .map_err(|e| RemoteError::Execution(e.into()))
+}
+
 /// Dispatch a Wasm job to a remote worker via HTTP POST /run.
 ///
 /// When `tls` is `Some`, the client presents a mutual-TLS identity and
@@ -65,9 +98,18 @@ pub async fn run_remote(
         h.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
     let base_url = worker_url.trim_end_matches('/');
+
+    // Build the TLS/timeout-configured client *before* the CAS calls (not
+    // after, as previously) so HEAD/PUT go through the same mTLS identity
+    // and timeout as the /run request. Using a bare reqwest::Client::new()
+    // here (no timeout, no client cert) meant CAS calls could hang
+    // indefinitely against an unresponsive worker and would fail outright
+    // against a worker requiring mTLS (#245).
+    let client = build_client(tls, Duration::from_secs(perms.limits.timeout_secs + 10))?;
+
     let cas_check_url = format!("{}/components/{}", base_url, sha256);
 
-    let worker_has_component = reqwest::Client::new()
+    let worker_has_component = client
         .head(&cas_check_url)
         .send()
         .await
@@ -77,7 +119,7 @@ pub async fn run_remote(
     let cas_upload_ok = if !worker_has_component {
         // Upload the component to the worker's CAS.
         let upload_url = format!("{}/components/{}", base_url, sha256);
-        reqwest::Client::new()
+        client
             .put(&upload_url)
             .body(wasm_bytes.clone())
             .send()
@@ -107,29 +149,6 @@ pub async fn run_remote(
             "env": env,
         })
     };
-
-    let mut builder =
-        reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 10));
-
-    if let Some(tls) = tls {
-        let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
-        let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
-        // reqwest::Identity::from_pem expects the cert followed by the key in one PEM blob.
-        let identity_pem = [cert_pem, key_pem].concat();
-        let identity = reqwest::Identity::from_pem(&identity_pem)
-            .map_err(|e| RemoteError::Execution(e.into()))?;
-        let ca_pem = std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
-        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
-            .map_err(|e| RemoteError::Execution(e.into()))?;
-        builder = builder
-            .identity(identity)
-            .add_root_certificate(ca_cert)
-            .use_rustls_tls();
-    }
-
-    let client = builder
-        .build()
-        .map_err(|e| RemoteError::Execution(e.into()))?;
 
     let url = format!("{}/run", worker_url.trim_end_matches('/'));
 
@@ -208,25 +227,7 @@ pub async fn run_remote_async(
     };
     let base_url = worker_url.trim_end_matches('/');
 
-    let mut builder =
-        reqwest::Client::builder().timeout(Duration::from_secs(perms.limits.timeout_secs + 30));
-    if let Some(tls) = tls {
-        let cert_pem = std::fs::read(&tls.cert).map_err(|e| RemoteError::Execution(e.into()))?;
-        let key_pem = std::fs::read(&tls.key).map_err(|e| RemoteError::Execution(e.into()))?;
-        let identity_pem = [cert_pem, key_pem].concat();
-        let identity = reqwest::Identity::from_pem(&identity_pem)
-            .map_err(|e| RemoteError::Execution(e.into()))?;
-        let ca_pem = std::fs::read(&tls.ca).map_err(|e| RemoteError::Execution(e.into()))?;
-        let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
-            .map_err(|e| RemoteError::Execution(e.into()))?;
-        builder = builder
-            .identity(identity)
-            .add_root_certificate(ca_cert)
-            .use_rustls_tls();
-    }
-    let client = builder
-        .build()
-        .map_err(|e| RemoteError::Execution(e.into()))?;
+    let client = build_client(tls, Duration::from_secs(perms.limits.timeout_secs + 30))?;
 
     let cas_check_url = format!("{}/components/{}", base_url, sha256);
     let worker_has_component = client
