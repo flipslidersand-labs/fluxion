@@ -1066,6 +1066,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "bytes",
  "clap",
  "criterion",
  "fluxion-core",
