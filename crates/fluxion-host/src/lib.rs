@@ -21,7 +21,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
-use wasmtime_wasi::{DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{
+    DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+};
 
 /// Per-invocation timing breakdown for a single component run.
 #[derive(Debug, Clone, Default)]
@@ -55,11 +57,11 @@ struct HostState {
 }
 
 impl WasiView for HostState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.ctx
-    }
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -256,7 +258,7 @@ impl FluxionHost {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
-                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
                 self.pre_cache
                     .lock()
@@ -409,7 +411,7 @@ impl FluxionHost {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
-                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
                 self.pre_cache
                     .lock()
