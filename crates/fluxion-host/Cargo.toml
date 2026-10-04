@@ -52,5 +52,8 @@ reqwest          = { workspace = true }
 tokio            = { workspace = true }
 rusqlite         = { workspace = true }
 tower            = { workspace = true }
+rcgen            = "0.13"
+tokio-rustls     = { workspace = true }
+rustls           = { workspace = true }
 http-body-util   = "0.1"
 serde_yaml       = { workspace = true }
