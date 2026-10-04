@@ -16,7 +16,7 @@ rust-version = "1.88"
 anyhow     = "1"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 tokio      = { version = "1", features = ["full"] }
 tracing    = "0.1"
 tracing-subscriber    = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -26,8 +26,8 @@ opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-stdout  = "0.27"
 rusqlite   = { version = "0.31", features = ["bundled"] }
 clap       = { version = "4", features = ["derive"] }
-wasmtime   = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"
+wasmtime   = { version = "36", features = ["component-model"] }
+wasmtime-wasi = "36"
 sha2          = "0.10"
 lru           = "0.12"
 axum          = "0.7"
