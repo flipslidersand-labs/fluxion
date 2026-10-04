@@ -9,6 +9,7 @@ exclude = ["components/hello", "components/file-reader", "components/network-pro
 resolver = "2"
 
 [workspace.package]
+license = "MIT"
 rust-version = "1.88"
 
 [workspace.dependencies]
