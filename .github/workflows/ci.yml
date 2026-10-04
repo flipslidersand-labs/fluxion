@@ -116,6 +116,7 @@ jobs:
             components/hello
             components/network-probe
             components/pipeline-stage
+            components/sandbox-probe
             components/spin
           cache-bin: true
       - name: Install cargo-component
@@ -132,7 +133,7 @@ jobs:
           echo "$RUNNER_TEMP/componentize-venv/bin" >> "$GITHUB_PATH"
       - name: Build Wasm components
         run: |
-          for comp in alloc-bomb file-reader hello pipeline-stage spin; do
+          for comp in alloc-bomb file-reader hello pipeline-stage sandbox-probe spin; do
             (cd components/$comp && cargo component build -j2)
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
@@ -141,7 +142,7 @@ jobs:
       - name: E2E tests
         run: |
           set -o pipefail
-          cargo test -p fluxion-host --lib --test e2e --features ci -j2 2>&1 | tee e2e-test.log
+          cargo test -p fluxion-host --lib --test e2e --test sandbox_regression --features ci -j2 2>&1 | tee e2e-test.log
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

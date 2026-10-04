@@ -5,7 +5,7 @@ members = [
     "crates/fluxion-host",
     "crates/fluxion-worker",
 ]
-exclude = ["components/hello", "components/file-reader", "components/network-probe", "components/pipeline-stage", "components/spin", "components/alloc-bomb", "components/python-hello"]
+exclude = ["components/hello", "components/file-reader", "components/network-probe", "components/pipeline-stage", "components/spin", "components/alloc-bomb", "components/python-hello", "components/sandbox-probe"]
 resolver = "2"
 
 [workspace.package]
@@ -31,6 +31,7 @@ sha2          = "0.10"
 lru           = "0.12"
 axum          = "0.7"
 reqwest       = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+bytes         = "1"
 tokio-rustls  = "0.26"
 rustls        = "0.23"
 tower         = { version = "0.5", features = ["util"] }
