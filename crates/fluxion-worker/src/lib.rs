@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+pub mod policy;
+pub use policy::WorkerPolicy;
+
 /// Global counter of jobs currently executing on this worker.
 /// Reported in the `/health` response so the host-side scheduler can
 /// implement least-connections load balancing.
@@ -113,6 +116,11 @@ fn sweep_expired_jobs(jobs: &JobStore, retention: Duration) {
 pub struct WorkerState {
     host: Arc<FluxionHost>,
     jobs: JobStore,
+    policy: Arc<WorkerPolicy>,
+}
+
+fn policy_denied(msg: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::FORBIDDEN, Json(ErrorResponse { error: msg }))
 }
 
 // ── POST /jobs ────────────────────────────────────────────────────────────────
@@ -126,6 +134,10 @@ async fn handle_submit_job(
     State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<(StatusCode, Json<SubmitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    state
+        .policy
+        .check(&req.permissions)
+        .map_err(policy_denied)?;
     let job_id = Uuid::new_v4().to_string();
 
     state.jobs.insert(
@@ -239,6 +251,10 @@ async fn handle_run(
     State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .policy
+        .check(&req.permissions)
+        .map_err(policy_denied)?;
     let host = &state.host;
     // Resolve component bytes: try CAS first, fall back to inline bytes.
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
@@ -417,15 +433,58 @@ async fn handle_cas_put(
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
+/// Server options beyond port/TLS. `Default` binds loopback only, with no
+/// permission policy.
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    /// Address to bind. Default `127.0.0.1` (#275).
+    pub bind: std::net::IpAddr,
+    pub policy: WorkerPolicy,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            policy: WorkerPolicy::default(),
+        }
+    }
+}
+
+/// Start the worker on loopback with no permission policy.
 pub async fn serve(
     port: u16,
     metrics_port: Option<u16>,
     tls: Option<WorkerTls>,
     async_jobs: bool,
 ) -> Result<()> {
+    serve_with(port, metrics_port, tls, async_jobs, WorkerConfig::default()).await
+}
+
+pub async fn serve_with(
+    port: u16,
+    metrics_port: Option<u16>,
+    tls: Option<WorkerTls>,
+    async_jobs: bool,
+    config: WorkerConfig,
+) -> Result<()> {
+    if tls.is_none() && !config.bind.is_loopback() {
+        tracing::warn!(
+            "worker is listening on non-loopback {} WITHOUT TLS/mTLS: /run, /jobs and \
+             /components accept unauthenticated requests. Use --tls-cert/--tls-key/--ca-cert.",
+            config.bind
+        );
+    }
+    if config.policy.is_unrestricted() {
+        tracing::warn!(
+            "worker has no permission policy: client-supplied PermissionSet is applied as-is \
+             (see --allow-fs-root, --max-memory-mb, --deny-network)"
+        );
+    }
     let state = WorkerState {
         host: Arc::new(FluxionHost::new()?),
         jobs: Arc::new(DashMap::new()),
+        policy: Arc::new(config.policy.normalized()),
     };
 
     if let Some(mp) = metrics_port {
@@ -455,7 +514,7 @@ pub async fn serve(
 
     let app = app.with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    let addr = std::net::SocketAddr::new(config.bind, port).to_string();
 
     if let Some(tls) = tls {
         serve_tls(app, &addr, tls).await
