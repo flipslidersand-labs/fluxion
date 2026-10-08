@@ -9,7 +9,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use dashmap::DashMap;
 use fluxion_core::workflow::PermissionSet;
-use fluxion_host::FluxionHost;
+use fluxion_host::{FluxionHost, JobMetrics};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
@@ -143,13 +143,13 @@ async fn handle_submit_job(
     tokio::spawn(async move {
         let result = run_request_inner(&state2.host, req).await;
         let entry = match result {
-            Ok(output_b64) => JobEntry {
+            Ok((output, _metrics)) => JobEntry {
                 status: "succeeded".into(),
-                output: Some(output_b64),
+                output: Some(B64.encode(&output)),
                 error: None,
                 completed_at: Some(Instant::now()),
             },
-            Err(msg) => JobEntry {
+            Err((_status, msg)) => JobEntry {
                 status: "failed".into(),
                 output: None,
                 error: Some(msg),
@@ -181,46 +181,94 @@ async fn handle_get_job(
 
 // ── Shared run logic (used by both sync POST /run and async POST /jobs) ───────
 
-async fn run_request_inner(host: &Arc<FluxionHost>, req: RunRequest) -> Result<String, String> {
+/// Error type of the shared run logic: HTTP status + message.
+type RunError = (StatusCode, String);
+
+fn run_err(status: StatusCode, e: impl ToString) -> RunError {
+    (status, e.to_string())
+}
+
+/// Decrements `ACTIVE_JOBS` on drop so every exit path is covered.
+struct ActiveJobGuard;
+
+impl ActiveJobGuard {
+    fn new() -> Self {
+        ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
+        ActiveJobGuard
+    }
+}
+
+impl Drop for ActiveJobGuard {
+    fn drop(&mut self) {
+        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Resolve the component (CAS first, inline bytes as fallback), run it, and
+/// return the raw output plus metrics. Errors carry the HTTP status that
+/// `POST /run` reports.
+async fn run_request_inner(
+    host: &Arc<FluxionHost>,
+    req: RunRequest,
+) -> Result<(Vec<u8>, JobMetrics), RunError> {
+    let decode_component = |b64: &str| {
+        B64.decode(b64).map_err(|e| {
+            run_err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid component base64: {e}"),
+            )
+        })
+    };
+
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
         let p = cas_path(sha256);
         if p.exists() {
             CAS_HITS.fetch_add(1, Ordering::Relaxed);
-            std::fs::read(&p).map_err(|e| e.to_string())?
+            std::fs::read(&p).map_err(|e| run_err(StatusCode::INTERNAL_SERVER_ERROR, e))?
         } else {
             CAS_MISSES.fetch_add(1, Ordering::Relaxed);
+            // Component not in CAS — require inline bytes from the caller.
             match &req.component {
-                Some(b64) => B64.decode(b64).map_err(|e| e.to_string())?,
-                None => return Err(format!("component {sha256} not in CAS")),
+                Some(b64) => decode_component(b64)?,
+                None => {
+                    return Err(run_err(
+                        StatusCode::NOT_FOUND,
+                        format!(
+                            "component {sha256} not in CAS — upload via PUT /components/{sha256}"
+                        ),
+                    ));
+                }
             }
         }
     } else {
+        // Classic inline mode.
         CAS_MISSES.fetch_add(1, Ordering::Relaxed);
-        let b64 = req.component.as_deref().unwrap_or("");
-        B64.decode(b64).map_err(|e| e.to_string())?
+        decode_component(req.component.as_deref().unwrap_or(""))?
     };
 
-    let input = B64.decode(&req.input).map_err(|e| e.to_string())?;
+    let input = B64.decode(&req.input).map_err(|e| {
+        run_err(
+            StatusCode::BAD_REQUEST,
+            format!("invalid input base64: {e}"),
+        )
+    })?;
 
-    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-    tmp.write_all(&component_bytes).map_err(|e| e.to_string())?;
+    // Write the component bytes to a temp file so FluxionHost can read them.
+    let mut tmp =
+        NamedTempFile::new().map_err(|e| run_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tmp.write_all(&component_bytes)
+        .map_err(|e| run_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let tmp_path = tmp.path().to_path_buf();
 
     let perms = req.permissions;
     let env = req.env;
     let host = Arc::clone(host);
 
-    ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
-    let res = tokio::task::spawn_blocking(move || {
-        host.run_component_measured(&tmp_path, input, &perms, &env)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string());
-    ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
-
-    let (output, _metrics) = res?;
-    Ok(B64.encode(&output))
+    let _active = ActiveJobGuard::new();
+    tokio::task::spawn_blocking(move || host.run_component_measured(&tmp_path, input, &perms, &env))
+        .await
+        .map_err(|e| run_err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|e| run_err(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 /// mTLS configuration for the worker server.
@@ -239,116 +287,9 @@ async fn handle_run(
     State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let host = &state.host;
-    // Resolve component bytes: try CAS first, fall back to inline bytes.
-    let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
-        let p = cas_path(sha256);
-        if p.exists() {
-            CAS_HITS.fetch_add(1, Ordering::Relaxed);
-            std::fs::read(&p).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
-        } else {
-            CAS_MISSES.fetch_add(1, Ordering::Relaxed);
-            // Component not in CAS — require inline bytes from the caller.
-            match &req.component {
-                Some(b64) => B64.decode(b64).map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse {
-                            error: format!("invalid component base64: {e}"),
-                        }),
-                    )
-                })?,
-                None => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        Json(ErrorResponse {
-                            error: format!(
-                            "component {sha256} not in CAS — upload via PUT /components/{sha256}"
-                        ),
-                        }),
-                    ))
-                }
-            }
-        }
-    } else {
-        // Classic inline mode.
-        CAS_MISSES.fetch_add(1, Ordering::Relaxed);
-        let b64 = req.component.as_deref().unwrap_or("");
-        B64.decode(b64).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("invalid component base64: {e}"),
-                }),
-            )
-        })?
-    };
-
-    let input = B64.decode(&req.input).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("invalid input base64: {e}"),
-            }),
-        )
-    })?;
-
-    // Write the component bytes to a temp file so FluxionHost can read them.
-    let mut tmp = NamedTempFile::new().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-    tmp.write_all(&component_bytes).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-    let tmp_path = tmp.path().to_path_buf();
-
-    let perms = req.permissions;
-    let env = req.env;
-    let host = Arc::clone(host);
-
-    ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
-    let result = tokio::task::spawn_blocking(move || {
-        host.run_component_measured(&tmp_path, input, &perms, &env)
-    })
-    .await
-    .map_err(|e| {
-        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?
-    .map_err(|e| {
-        ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-    ACTIVE_JOBS.fetch_sub(1, Ordering::Relaxed);
-
-    let (output, metrics) = result;
+    let (output, metrics) = run_request_inner(&state.host, req)
+        .await
+        .map_err(|(status, error)| (status, Json(ErrorResponse { error })))?;
     Ok(Json(RunResponse {
         output: B64.encode(&output),
         compile_ms: metrics.compile.as_millis(),
