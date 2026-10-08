@@ -9,7 +9,7 @@ pub async fn pull(oci_ref_str: &str, output: Option<PathBuf>) -> Result<()> {
     let r = OciRef::parse(oci_ref_str)?;
     let base_url = format!("http://{}", r.registry);
     let client = OciClient::new(base_url, None)?;
-    let reference = r.tag.as_deref().or(r.digest.as_deref()).unwrap_or("latest");
+    let reference = r.reference();
 
     eprintln!("Pulling {oci_ref_str} …");
     let bytes = client.pull(&r.repository, reference).await?;
@@ -30,7 +30,7 @@ pub async fn push(wasm_path: &PathBuf, oci_ref_str: &str) -> Result<()> {
     let r = OciRef::parse(oci_ref_str)?;
     let base_url = format!("http://{}", r.registry);
     let client = OciClient::new(base_url, None)?;
-    let reference = r.tag.as_deref().or(r.digest.as_deref()).unwrap_or("latest");
+    let reference = r.reference();
 
     let bytes = std::fs::read(wasm_path)
         .map_err(|e| anyhow::anyhow!("Cannot read '{}': {e}", wasm_path.display()))?;
