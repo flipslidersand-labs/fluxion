@@ -1669,6 +1669,51 @@ mod tests {
         assert!(msg.contains(&d2), "error should list {d2}: {msg}");
     }
 
+    /// Run `run_with_failover` over `workers` with a hang guard; returns the error text.
+    async fn failover_err(workers: &[WorkerInfo]) -> String {
+        let f = tmp_wasm();
+        let path = f.path().to_string_lossy().into_owned();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with_failover(
+                workers,
+                &path,
+                b"in",
+                &fast_timeout_perms(),
+                &HashMap::new(),
+            ),
+        )
+        .await
+        .expect("run_with_failover should not hang (#220)")
+        .expect_err("dispatch should fail")
+        .to_string()
+    }
+
+    /// #285: a worker that answers 5xx is an Execution error — stop immediately,
+    /// never fail over to the (healthy) next worker.
+    #[tokio::test]
+    async fn execution_error_5xx_does_not_fail_over() {
+        let failing = spawn_failing_mock_worker().await;
+        let healthy = spawn_mock_worker(b"ok-output".to_vec()).await;
+        let msg = failover_err(&plain_workers(&[failing.clone(), healthy.clone()])).await;
+        assert!(msg.contains(&failing), "error should name {failing}: {msg}");
+        assert!(
+            !msg.contains(&healthy),
+            "must not have tried the second worker {healthy}: {msg}"
+        );
+    }
+
+    /// #285: HTTP 200 but no `output` field is also an Execution error (no failover).
+    #[tokio::test]
+    async fn missing_output_field_does_not_fail_over() {
+        let bad = spawn_canned_mock_worker("200 OK", "{\"compile_ms\":1}").await;
+        let healthy = spawn_mock_worker(b"ok-output".to_vec()).await;
+        let msg = failover_err(&plain_workers(&[bad.clone(), healthy.clone()])).await;
+        assert!(msg.contains(&bad), "error should name {bad}: {msg}");
+        assert!(msg.contains("missing output field"), "{msg}");
+        assert!(!msg.contains(&healthy), "must not fail over: {msg}");
+    }
+
     // ── build_fanin_input reduce mode tests ──────────────────────────────────
 
     fn fanin_wf(reduce_json: Option<&str>) -> Workflow {
@@ -1875,6 +1920,11 @@ mod tests {
     /// Answers every request with `500` immediately, so the job fails fast
     /// without depending on timeout behavior.
     async fn spawn_failing_mock_worker() -> String {
+        spawn_canned_mock_worker("500 Internal Server Error", "{\"error\":\"boom\"}").await
+    }
+
+    /// Answers every request with the given status line and JSON body.
+    async fn spawn_canned_mock_worker(status: &'static str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1909,11 +1959,9 @@ mod tests {
                             break;
                         }
                     }
-                    let body = "{\"error\":\"boom\"}";
                     let resp = format!(
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len(),
-                        body
                     );
                     let _ = sock.write_all(resp.as_bytes()).await;
                     let _ = sock.flush().await;
