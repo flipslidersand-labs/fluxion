@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791697809883,
+  "lastUpdate": 1791814628323,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -895,6 +895,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 16236811,
             "range": "± 4305758",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "800c82a41d48ef44a7a9827b1891e94e5fd62b92",
+          "message": "ci: add gitleaks secrets scan (#365)\n\n* ci: add gitleaks secrets scan caller workflow\n\nStandard application of ADR-006 (enforcement three-tier).\nReusable workflow pinned by SHA.\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n* ci: allowlist test fixture key for gitleaks\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-12T23:13:09+09:00",
+          "tree_id": "9e005b78097ba1ae20b960294f31b6e98f26bc4e",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/800c82a41d48ef44a7a9827b1891e94e5fd62b92"
+        },
+        "date": 1791814627734,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1773597,
+            "range": "± 12665",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 49133581,
+            "range": "± 639334",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31403,
+            "range": "± 530",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 124269,
+            "range": "± 634",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1845570,
+            "range": "± 7307",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5878485,
+            "range": "± 145965",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5967467,
+            "range": "± 133624",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 13238128,
+            "range": "± 198749",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 9471416,
+            "range": "± 175456",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 20773096,
+            "range": "± 450792",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 14106509,
+            "range": "± 198692",
             "unit": "ns/iter"
           }
         ]
