@@ -1504,12 +1504,15 @@ mod tests {
         }
     }
 
-    // Bind then drop so the port is guaranteed to refuse connections.
+    // Distinct privileged ports (1, 2, ...): an unprivileged test process cannot
+    // bind them, so no parallel test's ephemeral listener can ever take the port
+    // over, and nothing listens there so connections are refused. (A
+    // bind-then-drop ephemeral port races with other tests' mock servers.)
     async fn closed_port_url() -> String {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        drop(l);
-        format!("http://{addr}")
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT: AtomicU16 = AtomicU16::new(1);
+        let port = NEXT.fetch_add(1, Ordering::Relaxed);
+        format!("http://127.0.0.1:{port}")
     }
 
     fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
