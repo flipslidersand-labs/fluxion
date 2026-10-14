@@ -14,8 +14,8 @@
 
 | クレート               | バージョン | 用途                          | 選定理由                                      |
 | ---------------------- | ---------- | ----------------------------- | --------------------------------------------- |
-| `wasmtime`             | 28.x       | Wasm Component Model の実行   | Component Model の参照実装。WASI 0.2 対応済み |
-| `wasmtime-wasi`        | 同上       | WASI 実装                     | wasmtime とセット                             |
+| `wasmtime`             | 36.x       | Wasm Component Model の実行   | Component Model の参照実装。WASI 0.2 対応済み |
+| `wasmtime-wasi`        | 同上       | WASI 実装（`p2` モジュール）  | wasmtime とセット。36 系は LTS（セキュリティ修正のバックポート対象） |
 | `tokio`                | 1.x        | 非同期ランタイム              | Rust の非同期エコシステムのデファクト         |
 | `clap`                 | 4.x        | CLI パーサー                  | derive マクロで型安全に書ける                 |
 | `serde` + `serde_yaml` | 1.x        | YAML ワークフロー定義のパース | シリアライズ/デシリアライズの標準             |
