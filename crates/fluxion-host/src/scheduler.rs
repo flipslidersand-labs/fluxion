@@ -191,15 +191,18 @@ async fn effective_workers(wf: &Workflow) -> Vec<String> {
 /// Resolve effective workers and return them as `WorkerInfo`, preserving TLS config.
 async fn effective_workers_info(wf: &Workflow) -> Vec<WorkerInfo> {
     let healthy_urls = effective_workers(wf).await;
-    healthy_urls
-        .into_iter()
+    worker_infos_for(wf, healthy_urls)
+}
+
+/// Attach TLS config and weight from `wf.workers` (matched by URL) to each URL.
+/// Workers not listed in YAML (SRV/DB-discovered) get no TLS and weight 1.
+fn worker_infos_for(wf: &Workflow, urls: Vec<String>) -> Vec<WorkerInfo> {
+    urls.into_iter()
         .map(|url| {
-            let tls = wf
-                .workers
-                .iter()
-                .find(|w| w.url() == url.as_str())
-                .and_then(|w| w.tls().cloned());
-            WorkerInfo { url, tls }
+            let cfg = wf.workers.iter().find(|w| w.url() == url.as_str());
+            let tls = cfg.and_then(|w| w.tls().cloned());
+            let weight = cfg.map_or(1, |w| w.weight());
+            WorkerInfo { url, tls, weight }
         })
         .collect()
 }
@@ -877,6 +880,8 @@ struct JobEvent {
 struct WorkerInfo {
     url: String,
     tls: Option<TlsConfig>,
+    /// Load-balancing weight (1 for workers not listed in `wf.workers`).
+    weight: u32,
 }
 
 /// Resolve the ordered list of workers to try for a job, including failover targets.
@@ -894,6 +899,7 @@ async fn resolve_workers(
         return vec![WorkerInfo {
             url: url.clone(),
             tls: None,
+            weight: 1,
         }];
     }
     if workers.is_empty() {
@@ -902,23 +908,23 @@ async fn resolve_workers(
     let n = workers.len();
     let start = match strategy {
         LbStrategy::RoundRobin => rr.fetch_add(1, Ordering::Relaxed) % n,
-        LbStrategy::Weighted => pick_weighted(&wf.workers, rr),
-        LbStrategy::LeastConn => pick_least_conn(&wf.workers).await,
+        LbStrategy::Weighted => pick_weighted(workers, rr),
+        LbStrategy::LeastConn => pick_least_conn(workers).await,
     };
     (0..n).map(|i| workers[(start + i) % n].clone()).collect()
 }
 
 /// Weighted round-robin: picks the worker index proportionally to its weight.
 /// Uses a global counter so successive calls cycle through the weight-space evenly.
-fn pick_weighted(workers: &[fluxion_core::workflow::WorkerConfig], rr: &AtomicUsize) -> usize {
-    let total_weight: u32 = workers.iter().map(|w| w.weight()).sum();
+fn pick_weighted(workers: &[WorkerInfo], rr: &AtomicUsize) -> usize {
+    let total_weight: u32 = workers.iter().map(|w| w.weight).sum();
     if total_weight == 0 {
         return rr.fetch_add(1, Ordering::Relaxed) % workers.len();
     }
     let slot = (rr.fetch_add(1, Ordering::Relaxed) as u32) % total_weight;
     let mut acc = 0u32;
     for (i, w) in workers.iter().enumerate() {
-        acc += w.weight();
+        acc += w.weight;
         if slot < acc {
             return i;
         }
@@ -929,11 +935,11 @@ fn pick_weighted(workers: &[fluxion_core::workflow::WorkerConfig], rr: &AtomicUs
 /// Least-connections: query each worker's `/health` endpoint and return the
 /// index of the worker with the fewest active jobs.
 /// Workers that fail to respond are skipped (treated as having max load).
-async fn pick_least_conn(workers: &[fluxion_core::workflow::WorkerConfig]) -> usize {
+async fn pick_least_conn(workers: &[WorkerInfo]) -> usize {
     let mut best_idx = 0usize;
     let mut best_count = u64::MAX;
     for (i, w) in workers.iter().enumerate() {
-        let url = format!("{}/health", w.url().trim_end_matches('/'));
+        let url = format!("{}/health", w.url.trim_end_matches('/'));
         if let Ok(resp) = reqwest::get(&url).await
             && let Ok(json) = resp.json::<serde_json::Value>().await
         {
@@ -1405,6 +1411,7 @@ mod tests {
             .map(|u| WorkerInfo {
                 url: u.to_string(),
                 tls: None,
+                weight: 1,
             })
             .collect()
     }
@@ -1465,14 +1472,26 @@ mod tests {
         serde_json::from_str(&s).unwrap()
     }
 
+    /// Effective-worker list with explicit weights (mirrors `effective_workers_info`).
+    fn weighted_infos(weights: &[(u32, &str)]) -> Vec<WorkerInfo> {
+        weights
+            .iter()
+            .map(|(weight, url)| WorkerInfo {
+                url: url.to_string(),
+                tls: None,
+                weight: *weight,
+            })
+            .collect()
+    }
+
     #[test]
     fn weighted_rr_distributes_proportionally() {
         // Workers with weights [2, 1]: over 30 slots, A should get ~20, B ~10.
-        let w = wf_weighted(&[(2, "http://a"), (1, "http://b")]);
+        let ew = weighted_infos(&[(2, "http://a"), (1, "http://b")]);
         let rr = AtomicUsize::new(0);
         let mut counts = std::collections::HashMap::new();
         for _ in 0..30 {
-            let idx = pick_weighted(&w.workers, &rr);
+            let idx = pick_weighted(&ew, &rr);
             *counts.entry(idx).or_insert(0usize) += 1;
         }
         let a = counts.get(&0).copied().unwrap_or(0);
@@ -1485,11 +1504,11 @@ mod tests {
     #[test]
     fn weighted_rr_equal_weights_acts_like_round_robin() {
         // Both weight=1: should distribute exactly 50/50 over 10 calls.
-        let w = wf_weighted(&[(1, "http://a"), (1, "http://b")]);
+        let ew = weighted_infos(&[(1, "http://a"), (1, "http://b")]);
         let rr = AtomicUsize::new(0);
         let mut counts = [0usize; 2];
         for _ in 0..10 {
-            counts[pick_weighted(&w.workers, &rr)] += 1;
+            counts[pick_weighted(&ew, &rr)] += 1;
         }
         assert_eq!(counts[0], 5);
         assert_eq!(counts[1], 5);
@@ -1497,11 +1516,45 @@ mod tests {
 
     #[test]
     fn weighted_rr_single_worker_always_picked() {
-        let w = wf_weighted(&[(5, "http://only")]);
+        let ew = weighted_infos(&[(5, "http://only")]);
         let rr = AtomicUsize::new(0);
         for _ in 0..10 {
-            assert_eq!(pick_weighted(&w.workers, &rr), 0);
+            assert_eq!(pick_weighted(&ew, &rr), 0);
         }
+    }
+
+    /// #271: `workers_srv:` / DB-registered workers only → `wf.workers` is empty.
+    /// Weighted selection must not panic (previously `% 0`).
+    #[tokio::test]
+    async fn weighted_with_empty_static_workers_does_not_panic() {
+        let w = wf(&[], None);
+        assert!(w.workers.is_empty());
+        let ew = weighted_infos(&[(1, "http://srv-only")]);
+        let rr = AtomicUsize::new(0);
+        assert_eq!(
+            worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::Weighted).await),
+            vec!["http://srv-only"]
+        );
+    }
+
+    /// #271: when a static worker is filtered out (unhealthy), the remaining
+    /// workers keep their own weights instead of inheriting by index.
+    #[tokio::test]
+    async fn weighted_applies_weight_to_matching_url_after_filtering() {
+        // YAML: a(w=1), b(w=9), c(w=1). `a` is unhealthy → effective = [b, c].
+        let w = wf_weighted(&[(1, "http://a"), (9, "http://b"), (1, "http://c")]);
+        let ew = worker_infos_for(&w, vec!["http://b".into(), "http://c".into()]);
+        assert_eq!(ew[0].weight, 9);
+        assert_eq!(ew[1].weight, 1);
+        let rr = AtomicUsize::new(0);
+        let mut first_b = 0;
+        for _ in 0..10 {
+            let order = resolve_workers("j", &w, &ew, &rr, &LbStrategy::Weighted).await;
+            if order[0].url == "http://b" {
+                first_b += 1;
+            }
+        }
+        assert_eq!(first_b, 9, "b (weight 9) should lead 9 of 10 times");
     }
 
     // Bind then drop so the port is guaranteed to refuse connections.
@@ -1593,6 +1646,7 @@ mod tests {
             .map(|u| WorkerInfo {
                 url: u.clone(),
                 tls: None,
+                weight: 1,
             })
             .collect()
     }
