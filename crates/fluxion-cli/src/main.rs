@@ -239,6 +239,20 @@ enum WorkerCommands {
         /// Enable POST /jobs and GET /jobs/:id async endpoints
         #[arg(long)]
         async_jobs: bool,
+        /// Address to bind (default loopback). A non-loopback address without
+        /// TLS exposes unauthenticated endpoints and logs a warning.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// Restrict request filesystem.{read,write} to paths under this root
+        /// (repeatable). Others are rejected with 403.
+        #[arg(long = "allow-fs-root")]
+        allow_fs_root: Vec<PathBuf>,
+        /// Reject requests with limits.memory_mb above this value (403)
+        #[arg(long)]
+        max_memory_mb: Option<u64>,
+        /// Reject requests that ask for any network.allow entry (403)
+        #[arg(long)]
+        deny_network: bool,
     },
     /// Register a worker URL in the local registry
     Register {
@@ -410,6 +424,10 @@ async fn run(command: Commands) -> Result<()> {
                 tls_key,
                 ca_cert,
                 async_jobs,
+                bind,
+                allow_fs_root,
+                max_memory_mb,
+                deny_network,
             } => {
                 let tls = match (tls_cert, tls_key, ca_cert) {
                     (Some(cert), Some(key), Some(ca)) => {
@@ -417,7 +435,15 @@ async fn run(command: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
+                let config = fluxion_worker::WorkerConfig {
+                    bind,
+                    policy: fluxion_worker::WorkerPolicy {
+                        allow_fs_roots: allow_fs_root,
+                        max_memory_mb,
+                        deny_network,
+                    },
+                };
+                fluxion_worker::serve_with(port, metrics_port, tls, async_jobs, config).await?;
             }
             WorkerCommands::Register { url } => {
                 validate_worker_url(&url)?;
