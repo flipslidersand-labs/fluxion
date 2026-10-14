@@ -185,7 +185,7 @@ pub enum ReduceMode {
     Custom(String),
 }
 
-// serde_yaml 0.9 cannot deserialize externally-tagged enums with non-unit
+// serde_yaml(_ng) 0.9/0.10 cannot deserialize externally-tagged enums with non-unit
 // variants from YAML mappings; implement manually to handle both forms:
 //   reduce: json_array          (string → unit variant)
 //   reduce:
@@ -893,5 +893,45 @@ jobs:
             serde_json::to_string(&ExecutorKind::Remote).unwrap(),
             "\"remote\""
         );
+    }
+
+    // #290: guard YAML-parser behaviour across the serde_yaml -> serde_yaml_ng swap.
+    #[test]
+    fn yaml_reduce_both_forms_and_flow_sequences() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: compat
+jobs:
+  a:
+    component: a.wasm
+    reduce: json_array
+  b:
+    component: b.wasm
+    depends_on: [a]
+    reduce:
+      custom: /path/to/r.wasm
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["a"].reduce, Some(ReduceMode::JsonArray));
+        assert_eq!(
+            wf.jobs["b"].reduce,
+            Some(ReduceMode::Custom("/path/to/r.wasm".into()))
+        );
+    }
+
+    #[test]
+    fn yaml_error_messages_keep_location_and_cause() {
+        let err = serde_yaml::from_str::<Workflow>(
+            "name: t\njobs:\n  a:\n    component: a.wasm\n    reduce: bogus\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown variant `bogus`"), "{err}");
+        assert!(err.contains("line 5"), "{err}");
+        let syntax = serde_yaml::from_str::<Workflow>("name: [unclosed\n")
+            .unwrap_err()
+            .to_string();
+        assert!(syntax.contains("line"), "{syntax}");
     }
 }
