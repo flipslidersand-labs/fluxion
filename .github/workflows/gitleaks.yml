@@ -1,0 +1,16 @@
+name: Gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    permissions:
+      contents: read
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/gitleaks.yml@56278728d2f2cd7d302f5ac48e50bc2daa7cf711
