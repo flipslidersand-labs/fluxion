@@ -21,7 +21,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
-use wasmtime_wasi::{DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{
+    DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+};
 
 /// Per-invocation timing breakdown for a single component run.
 #[derive(Debug, Clone, Default)]
@@ -55,11 +57,11 @@ struct HostState {
 }
 
 impl WasiView for HostState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.ctx
-    }
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -146,8 +148,15 @@ impl FluxionHost {
     ///
     /// `repository` and `reference` follow OCI conventions, e.g.
     /// `("org/hello", "v1.0")`.
+    ///
+    /// Takes `self: Arc<Self>` (matching every other execution call site in
+    /// this crate — scheduler.rs, fluxion-worker) because the actual
+    /// component run happens on `spawn_blocking`: `run_component_with_key` is
+    /// synchronous and CPU-bound, and running it inline on the async task
+    /// would block the tokio worker thread — and every other task scheduled
+    /// on it — until the epoch-interrupt timeout (#233).
     pub async fn run_from_oci(
-        &self,
+        self: Arc<Self>,
         repository: &str,
         reference: &str,
         input: Vec<u8>,
@@ -173,7 +182,14 @@ impl FluxionHost {
             .collect();
         let cache_key = CacheKey::Digest(format!("sha256:{hex}"));
 
-        self.run_component_with_key(&wasm_bytes, cache_key, input, perms, env)
+        let perms = perms.clone();
+        let env = env.clone();
+        let host = self;
+        tokio::task::spawn_blocking(move || {
+            host.run_component_with_key(&wasm_bytes, cache_key, input, &perms, &env)
+        })
+        .await
+        .context("run_from_oci: blocking task failed")?
     }
 
     /// Like `run_component_measured` but accepts raw wasm bytes + an explicit cache key.
@@ -256,7 +272,7 @@ impl FluxionHost {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
-                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
                 self.pre_cache
                     .lock()
@@ -409,7 +425,7 @@ impl FluxionHost {
                 Arc::clone(p)
             } else {
                 let mut linker: Linker<HostState> = Linker::new(&self.engine);
-                wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
                 let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
                 self.pre_cache
                     .lock()
