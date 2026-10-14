@@ -3,7 +3,7 @@ use axum::{
     body::Bytes,
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    routing::{get, head, post, put},
+    routing::{get, head, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -435,8 +435,11 @@ pub async fn serve(
     let mut app = Router::new()
         .route("/run", post(handle_run))
         .route("/health", get(handle_health))
-        .route("/components/{sha256}", head(handle_cas_head))
-        .route("/components/{sha256}", put(handle_cas_put));
+        // axum 0.7 path syntax is `:param` (`{param}` is only valid in 0.8+).
+        .route(
+            "/components/:sha256",
+            head(handle_cas_head).put(handle_cas_put),
+        );
 
     if async_jobs {
         app = app
