@@ -1,0 +1,19 @@
+package fluxion:task@0.1.0;
+
+interface processor {
+    record task-input {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+
+    record task-output {
+        content:  list<u8>,
+        metadata: list<tuple<string, string>>,
+    }
+
+    process: func(input: task-input) -> result<task-output, string>;
+}
+
+world task-component {
+    export processor;
+}
