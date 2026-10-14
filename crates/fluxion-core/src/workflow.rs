@@ -259,6 +259,35 @@ pub struct FilesystemPermission {
     pub write: Vec<PathBuf>,
 }
 
+impl FilesystemPermission {
+    /// Lexical check of every granted path (#246). Each path must be absolute,
+    /// must not contain `..` components, and must not be the filesystem root.
+    /// Returns `(path, reason)` for each offending entry. Symlink resolution and
+    /// allowlist enforcement happen on the host at preopen time.
+    pub fn lexical_violations(&self) -> Vec<(PathBuf, &'static str)> {
+        self.read
+            .iter()
+            .chain(self.write.iter())
+            .filter_map(|p| lexical_path_violation(p).map(|r| (p.clone(), r)))
+            .collect()
+    }
+}
+
+/// Returns the reason `path` is unacceptable as a filesystem grant, if any.
+pub fn lexical_path_violation(path: &std::path::Path) -> Option<&'static str> {
+    use std::path::Component;
+    if !path.is_absolute() {
+        return Some("must be an absolute path");
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Some("must not contain `..`");
+    }
+    if !path.components().any(|c| matches!(c, Component::Normal(_))) {
+        return Some("must not be the filesystem root");
+    }
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkPermission {
     /// Allowlist of host:port strings. Empty = deny all.
@@ -326,12 +355,31 @@ impl Default for ResourceLimits {
 
 #[derive(Debug, Clone)]
 pub enum ValidationError {
-    UnknownDependency { job: String, dep: String },
-    UnknownInputFrom { job: String, src: String },
-    InputFromNotForeach { job: String, src: String },
+    UnknownDependency {
+        job: String,
+        dep: String,
+    },
+    UnknownInputFrom {
+        job: String,
+        src: String,
+    },
+    InputFromNotForeach {
+        job: String,
+        src: String,
+    },
     CyclicDependency,
-    ComponentNotFound { job: String, path: String },
-    ReduceWithoutInputFrom { job: String },
+    ComponentNotFound {
+        job: String,
+        path: String,
+    },
+    ReduceWithoutInputFrom {
+        job: String,
+    },
+    InvalidFilesystemPath {
+        job: String,
+        path: String,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -355,6 +403,9 @@ impl std::fmt::Display for ValidationError {
             }
             Self::ReduceWithoutInputFrom { job } => {
                 write!(f, "Job '{job}': `reduce` requires `input_from`")
+            }
+            Self::InvalidFilesystemPath { job, path, reason } => {
+                write!(f, "Job '{job}': filesystem path '{path}' {reason}")
             }
         }
     }
@@ -521,6 +572,13 @@ impl Workflow {
                     _ => {}
                 }
             }
+            for (path, reason) in def.permissions.filesystem.lexical_violations() {
+                report.errors.push(ValidationError::InvalidFilesystemPath {
+                    job: job_id.clone(),
+                    path: path.display().to_string(),
+                    reason,
+                });
+            }
             if def.reduce.is_some() && def.input_from.is_none() {
                 report.errors.push(ValidationError::ReduceWithoutInputFrom {
                     job: job_id.clone(),
@@ -560,6 +618,37 @@ jobs:
 "#;
         let result: Result<Workflow, _> = serde_yaml::from_str(src);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lexical_path_violation_cases() {
+        use std::path::Path;
+        assert!(lexical_path_violation(Path::new("/tmp/work")).is_none());
+        assert!(lexical_path_violation(Path::new("relative/dir")).is_some());
+        assert!(lexical_path_violation(Path::new("/tmp/../etc")).is_some());
+        assert!(lexical_path_violation(Path::new("/")).is_some());
+    }
+
+    #[test]
+    fn validate_rejects_bad_filesystem_paths() {
+        let src = r#"
+name: bad-fs
+jobs:
+  a:
+    component: foo.wasm
+    permissions:
+      filesystem:
+        read: ["/tmp/ok"]
+        write: ["/", "/tmp/../etc", "rel"]
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        let report = wf.validate();
+        let n = report
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InvalidFilesystemPath { .. }))
+            .count();
+        assert_eq!(n, 3, "{:?}", report.errors);
     }
 
     #[test]

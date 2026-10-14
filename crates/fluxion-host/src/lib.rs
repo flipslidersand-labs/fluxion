@@ -82,6 +82,9 @@ pub struct FluxionHost {
     ticker_shutdown: Arc<AtomicBool>,
     /// Optional OCI client for auto-pulling components by registry reference.
     pub oci_client: Option<Arc<OciClient>>,
+    /// Host-side allowlist for `filesystem.{read,write}` grants (#246).
+    /// `None` = no allowlist (paths are still normalised and checked).
+    fs_allow_roots: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Drop for FluxionHost {
@@ -132,7 +135,21 @@ impl FluxionHost {
             )),
             ticker_shutdown,
             oci_client: None,
+            fs_allow_roots: None,
         })
+    }
+
+    /// Restrict every `filesystem.{read,write}` grant to paths that resolve
+    /// (after `canonicalize`, i.e. with symlinks followed) to somewhere under
+    /// one of `roots`. Grants outside the roots make the run fail.
+    pub fn with_fs_allow_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        self.fs_allow_roots = Some(
+            roots
+                .into_iter()
+                .map(|r| r.canonicalize().unwrap_or(r))
+                .collect(),
+        );
+        self
     }
 
     /// Attach an `OciClient` so `run_from_oci()` can auto-pull components.
@@ -214,7 +231,7 @@ impl FluxionHost {
             "permission_grant"
         );
 
-        let ctx = build_wasi_ctx(perms, env)?;
+        let ctx = build_wasi_ctx(perms, env, self.fs_allow_roots.as_deref())?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
             .build();
@@ -367,7 +384,7 @@ impl FluxionHost {
             "permission_grant"
         );
 
-        let ctx = build_wasi_ctx(perms, env)?;
+        let ctx = build_wasi_ctx(perms, env, self.fs_allow_roots.as_deref())?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
             .build();
@@ -698,9 +715,68 @@ pub fn verify_component_digest(wasm_path: impl AsRef<Path>, expected: Option<&st
     Ok(())
 }
 
+/// Validate and resolve a filesystem grant to the real host path to preopen (#246).
+///
+/// Rejects relative paths, `..` components and the filesystem root, resolves
+/// symlinks via `canonicalize`, and (when `allow_roots` is set) requires the
+/// resolved path to be under an allowed root. With `create`, missing
+/// directories are created only after the nearest existing ancestor has been
+/// checked, and the final path is re-checked. Returns `Ok(None)` for a
+/// non-existent read path (nothing to preopen).
+fn resolve_fs_grant(
+    path: &Path,
+    allow_roots: Option<&[std::path::PathBuf]>,
+    create: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    if let Some(reason) = fluxion_core::workflow::lexical_path_violation(path) {
+        anyhow::bail!("invalid filesystem permission {:?}: {}", path, reason);
+    }
+    let check = |real: &Path| -> Result<()> {
+        anyhow::ensure!(
+            real.parent().is_some(),
+            "filesystem permission {:?} resolves to the filesystem root",
+            path
+        );
+        if let Some(roots) = allow_roots {
+            anyhow::ensure!(
+                roots.iter().any(|r| real.starts_with(r)),
+                "filesystem permission {:?} (resolves to {:?}) is outside the allowed roots",
+                path,
+                real
+            );
+        }
+        Ok(())
+    };
+
+    if create {
+        // Resolve the deepest existing ancestor and check it before creating anything.
+        let mut existing = path;
+        let mut tail = Vec::new();
+        while !existing.exists() {
+            tail.push(existing.file_name().context("invalid filesystem path")?);
+            existing = existing.parent().context("invalid filesystem path")?;
+        }
+        let mut projected = existing.canonicalize()?;
+        for part in tail.iter().rev() {
+            projected.push(part);
+        }
+        check(&projected)?;
+        std::fs::create_dir_all(&projected)
+            .with_context(|| format!("Failed to create write dir {:?}", path))?;
+    } else if !path.exists() {
+        return Ok(None);
+    }
+    let real = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve filesystem permission {:?}", path))?;
+    check(&real)?;
+    Ok(Some(real))
+}
+
 fn build_wasi_ctx(
     perms: &PermissionSet,
     env: &std::collections::HashMap<String, String>,
+    fs_allow_roots: Option<&[std::path::PathBuf]>,
 ) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stdout().inherit_stderr();
@@ -708,21 +784,22 @@ fn build_wasi_ctx(
         builder.env(k, v);
     }
 
-    // Filesystem: preopen read dirs
+    // Filesystem: preopen read dirs. The guest-visible path stays as requested;
+    // the host side preopens the canonical (symlink-resolved) path (#246).
     for path in &perms.filesystem.read {
-        if path.exists() {
+        if let Some(real) = resolve_fs_grant(path, fs_allow_roots, false)? {
             let guest = path.to_string_lossy().to_string();
-            builder.preopened_dir(path, &guest, DirPerms::READ, FilePerms::READ)?;
+            builder.preopened_dir(&real, &guest, DirPerms::READ, FilePerms::READ)?;
         }
     }
 
-    // Filesystem: preopen read-write dirs (created on demand)
+    // Filesystem: preopen read-write dirs (created on demand, after validation)
     for path in &perms.filesystem.write {
-        std::fs::create_dir_all(path)
-            .with_context(|| format!("Failed to create write dir {:?}", path))?;
+        let real = resolve_fs_grant(path, fs_allow_roots, true)?
+            .with_context(|| format!("write dir {:?} could not be resolved", path))?;
         let guest = path.to_string_lossy().to_string();
         builder.preopened_dir(
-            path,
+            &real,
             &guest,
             DirPerms::READ | DirPerms::MUTATE,
             FilePerms::READ | FilePerms::WRITE,
@@ -765,6 +842,75 @@ fn build_wasi_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #246 filesystem grant validation ─────────────────────────────────────
+
+    fn fs_perms(read: &[&Path], write: &[&Path]) -> PermissionSet {
+        let mut p = PermissionSet::default();
+        p.filesystem.read = read.iter().map(|x| x.to_path_buf()).collect();
+        p.filesystem.write = write.iter().map(|x| x.to_path_buf()).collect();
+        p
+    }
+
+    fn ctx_for(p: &PermissionSet, roots: Option<&[std::path::PathBuf]>) -> Result<WasiCtx> {
+        build_wasi_ctx(p, &HashMap::new(), roots)
+    }
+
+    #[test]
+    fn fs_grant_rejects_root_relative_and_parent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dotdot = tmp.path().join("..");
+        for bad in [Path::new("/"), Path::new("rel/dir"), dotdot.as_path()] {
+            assert!(
+                ctx_for(&fs_perms(&[bad], &[]), None).is_err(),
+                "read {bad:?}"
+            );
+            assert!(
+                ctx_for(&fs_perms(&[], &[bad]), None).is_err(),
+                "write {bad:?}"
+            );
+        }
+        // Nothing was created for rejected write grants.
+        assert!(!Path::new("rel/dir").exists());
+    }
+
+    #[test]
+    fn fs_grant_allowlist_enforced() {
+        let base = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let roots = vec![base.path().canonicalize().unwrap()];
+        let inside = base.path().join("work/sub");
+        assert!(ctx_for(&fs_perms(&[], &[&inside]), Some(&roots)).is_ok());
+        assert!(inside.is_dir());
+
+        let outside = other.path().join("new-dir");
+        assert!(ctx_for(&fs_perms(&[], &[&outside]), Some(&roots)).is_err());
+        assert!(!outside.exists(), "must not create dirs outside the roots");
+        assert!(ctx_for(&fs_perms(&[other.path()], &[]), Some(&roots)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_grant_symlink_escape_rejected() {
+        let base = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let roots = vec![base.path().canonicalize().unwrap()];
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(other.path(), &link).unwrap();
+
+        // Existing symlink pointing outside.
+        assert!(ctx_for(&fs_perms(&[&link], &[]), Some(&roots)).is_err());
+        assert!(ctx_for(&fs_perms(&[], &[&link]), Some(&roots)).is_err());
+        // New directory below an escaping symlink must not be created.
+        let via = link.join("created");
+        assert!(ctx_for(&fs_perms(&[], &[&via]), Some(&roots)).is_err());
+        assert!(!other.path().join("created").exists());
+
+        // Symlink to the filesystem root is rejected even without an allowlist.
+        let rootlink = base.path().join("rootlink");
+        std::os::unix::fs::symlink("/", &rootlink).unwrap();
+        assert!(ctx_for(&fs_perms(&[&rootlink], &[]), None).is_err());
+    }
 
     // ── #67 SHA-256 component digest verification ─────────────────────────────
 
