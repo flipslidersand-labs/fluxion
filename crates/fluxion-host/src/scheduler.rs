@@ -127,12 +127,29 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
     if candidates.is_empty() {
         return Vec::new();
     }
+    let results = probe_workers(candidates).await;
+
+    let healthy: Vec<String> = results
+        .iter()
+        .filter_map(|(url, ok)| if *ok { Some(url.clone()) } else { None })
+        .collect();
+
+    if let Ok(s) = RunStore::open() {
+        for (url, ok) in &results {
+            let _ = s.update_worker_health(url, *ok);
+        }
+    }
+
+    healthy
+}
+
+/// Concurrently `GET {url}/health` on each candidate; a worker is healthy only
+/// on a 2xx response. Pure network probe (no DB access).
+async fn probe_workers(candidates: &[String]) -> Vec<(String, bool)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("reqwest client");
-
-    let store = RunStore::open().ok();
 
     let checks = candidates.iter().map(|url| {
         let url = url.clone();
@@ -148,20 +165,7 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
             (url, ok)
         }
     });
-    let results = futures::future::join_all(checks).await;
-
-    let healthy: Vec<String> = results
-        .iter()
-        .filter_map(|(url, ok)| if *ok { Some(url.clone()) } else { None })
-        .collect();
-
-    if let Some(s) = &store {
-        for (url, ok) in &results {
-            let _ = s.update_worker_health(url, *ok);
-        }
-    }
-
-    healthy
+    futures::future::join_all(checks).await
 }
 
 /// Resolve the effective worker list for a workflow run.
@@ -2062,5 +2066,35 @@ mod tests {
     fn eval_when_non_status_attr_defaults_true() {
         let statuses = HashMap::new();
         assert!(eval_when("job.other == 'x'", &statuses));
+    }
+
+    // ── probe_workers (health probe; replaces the removed worker_registry) ──
+
+    async fn spawn_status_server(status_line: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!("HTTP/1.1 {status_line}\r\ncontent-length: 0\r\n\r\n");
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn probe_workers_marks_2xx_healthy_and_5xx_or_closed_unhealthy() {
+        let ok = spawn_status_server("200 OK").await;
+        let err5xx = spawn_status_server("503 Service Unavailable").await;
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            drop(l);
+            format!("http://{addr}")
+        };
+        let results = probe_workers(&[ok.clone(), err5xx.clone(), closed.clone()]).await;
+        assert_eq!(results, vec![(ok, true), (err5xx, false), (closed, false)]);
     }
 }
