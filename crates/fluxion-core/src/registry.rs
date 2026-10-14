@@ -67,6 +67,15 @@ impl OciRef {
         })
     }
 
+    /// Reference used for registry manifest requests: the tag if present,
+    /// else the digest, else `"latest"`.
+    pub fn reference(&self) -> &str {
+        self.tag
+            .as_deref()
+            .or(self.digest.as_deref())
+            .unwrap_or("latest")
+    }
+
     /// Canonical string representation.
     pub fn to_string_repr(&self) -> String {
         let mut s = format!("{}/{}", self.registry, self.repository);
@@ -416,6 +425,32 @@ mod tests {
         assert_eq!(r.registry, "localhost:5000");
         assert_eq!(r.repository, "myrepo");
         assert_eq!(r.tag.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn oci_ref_tag_and_digest_both_parsed() {
+        // Shared by CLI (`fluxion registry`) and the scheduler's auto-pull.
+        let r = OciRef::parse("reg.io/ns/repo:v1@sha256:abc").unwrap();
+        assert_eq!(r.registry, "reg.io");
+        assert_eq!(r.repository, "ns/repo");
+        assert_eq!(r.tag.as_deref(), Some("v1"));
+        assert_eq!(r.digest.as_deref(), Some("sha256:abc"));
+        assert_eq!(r.reference(), "v1");
+    }
+
+    #[test]
+    fn oci_ref_reference_fallbacks() {
+        assert_eq!(OciRef::parse("reg/repo:v2").unwrap().reference(), "v2");
+        assert_eq!(
+            OciRef::parse("reg/repo@sha256:abc").unwrap().reference(),
+            "sha256:abc"
+        );
+        assert_eq!(OciRef::parse("reg/repo").unwrap().reference(), "latest");
+        // host:port registry without tag
+        let r = OciRef::parse("localhost:5000/ns/repo").unwrap();
+        assert_eq!(r.registry, "localhost:5000");
+        assert_eq!(r.repository, "ns/repo");
+        assert_eq!(r.reference(), "latest");
     }
 
     #[test]
