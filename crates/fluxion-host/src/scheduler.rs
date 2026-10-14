@@ -360,6 +360,9 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
         workers,
     } = opts;
     // ── Expand foreach jobs ─────────────────────────────────────────────────
+    // Keep the pre-expansion workflow: static foreach parents (and their
+    // `fail_fast`) only exist there; expanded children always carry `false` (#272).
+    let original_wf = wf;
     let expanded = expand_foreach(wf, None)?;
     let wf = &expanded.workflow;
     let foreach_map = &expanded.foreach_map;
@@ -525,7 +528,11 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
                 match foreach_parent {
                     Some((parent_id, siblings)) => {
-                        let fail_fast = wf.jobs.get(&parent_id).is_some_and(|j| j.fail_fast);
+                        let fail_fast = original_wf
+                            .jobs
+                            .get(&parent_id)
+                            .or_else(|| wf.jobs.get(&parent_id))
+                            .is_some_and(|j| j.fail_fast);
                         if fail_fast {
                             // Cancel all pending siblings immediately.
                             for sibling in &siblings {
@@ -1977,6 +1984,76 @@ mod tests {
             matches!(jobs.get("slow_ok"), Some(JobStatus::Cancelled)),
             "orphaned in-flight job must be marked Cancelled, got: {:?}",
             jobs.get("slow_ok")
+        );
+    }
+
+    /// #272: `fail_fast: true` on a static foreach parent must cancel the
+    /// remaining children once one fails, and end the run promptly.
+    #[tokio::test]
+    async fn static_foreach_fail_fast_cancels_siblings() {
+        let slow_a = spawn_delayed_mock_worker(b"slow".to_vec(), Duration::from_secs(2)).await;
+        let slow_b = spawn_delayed_mock_worker(b"slow".to_vec(), Duration::from_secs(2)).await;
+        let fail_url = spawn_failing_mock_worker().await;
+        let wasm = tmp_wasm();
+        let path = wasm.path().to_string_lossy().into_owned();
+
+        // Round-robin over [fail, slow_a, slow_b]: exactly one child lands on the
+        // failing worker first (a 500 is an Execution error → no failover).
+        let wf: Workflow = serde_json::from_value(serde_json::json!({
+            "name": "t",
+            "jobs": {"j": {
+                "component": path,
+                "executor": "remote",
+                "foreach": "$.items",
+                "input": "{\"items\":[1,2,3]}",
+                "fail_fast": true
+            }}
+        }))
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test context.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        let host = Arc::new(FluxionHost::new().unwrap());
+        let run_id = "test-run-272";
+        store.create_run(run_id, "t", Path::new("t.yaml")).unwrap();
+
+        let opts = ExecOpts {
+            host,
+            store: &store,
+            run_id,
+            pre_succeeded: HashMap::new(),
+            print_progress: false,
+            sem: Arc::new(Semaphore::new(4)),
+            strategy: LbStrategy::RoundRobin,
+            workers: make_worker_infos(&[&fail_url, &slow_a, &slow_b]),
+        };
+
+        let start = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(10), execute(&wf, opts))
+            .await
+            .expect("execute must not hang")
+            .expect("execute should return Ok even when a job fails");
+        assert!(!result.success);
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "run must end right after the failure, not wait for siblings ({:?})",
+            start.elapsed()
+        );
+
+        let (_, jobs) = store.load_run(run_id).unwrap();
+        let count = |f: fn(&JobStatus) -> bool| jobs.values().filter(|s| f(s)).count();
+        assert_eq!(
+            count(|s| matches!(s, JobStatus::Failed { .. })),
+            1,
+            "{jobs:?}"
+        );
+        assert_eq!(count(|s| matches!(s, JobStatus::Cancelled)), 2, "{jobs:?}");
+        assert_eq!(
+            count(|s| matches!(s, JobStatus::Succeeded { .. })),
+            0,
+            "{jobs:?}"
         );
     }
 
