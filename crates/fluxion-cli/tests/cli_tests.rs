@@ -488,3 +488,96 @@ fn watch_debounce_flag_is_accepted() {
         .success()
         .stdout(predicates::str::contains("debounce"));
 }
+
+// ── schedule add / list / remove (#308) ───────────────────────────────────────
+
+#[test]
+fn schedule_add_rejects_invalid_cron() {
+    let home = tempfile::tempdir().unwrap();
+    let wf = write_yaml(SIMPLE_YAML);
+    fluxion()
+        .env("HOME", home.path())
+        .args([
+            "schedule",
+            "add",
+            wf.path().to_str().unwrap(),
+            "--cron",
+            "not a cron",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("Invalid cron expression"));
+    fluxion()
+        .env("HOME", home.path())
+        .args(["schedule", "list"])
+        .assert()
+        .success()
+        .stdout(contains("No schedules registered."));
+}
+
+#[test]
+fn schedule_add_rejects_missing_workflow() {
+    let home = tempfile::tempdir().unwrap();
+    fluxion()
+        .env("HOME", home.path())
+        .args([
+            "schedule",
+            "add",
+            "/nonexistent/wf.yaml",
+            "--cron",
+            "0 * * * * *",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("Cannot load workflow"));
+}
+
+#[test]
+fn schedule_add_list_remove_roundtrip() {
+    let home = tempfile::tempdir().unwrap();
+    let wf = write_yaml(SIMPLE_YAML);
+    let out = fluxion()
+        .env("HOME", home.path())
+        .args([
+            "schedule",
+            "add",
+            wf.path().to_str().unwrap(),
+            "--cron",
+            "0 * * * * *",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Schedule added: sched-"))
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("Schedule added: "))
+        .unwrap()
+        .trim()
+        .to_string();
+
+    fluxion()
+        .env("HOME", home.path())
+        .args(["schedule", "list"])
+        .assert()
+        .success()
+        .stdout(contains(id.as_str()))
+        .stdout(contains("0 * * * * *"));
+
+    fluxion()
+        .env("HOME", home.path())
+        .args(["schedule", "remove", &id])
+        .assert()
+        .success()
+        .stdout(contains(format!("Removed: {id}")));
+
+    fluxion()
+        .env("HOME", home.path())
+        .args(["schedule", "list"])
+        .assert()
+        .success()
+        .stdout(contains("No schedules registered."));
+}
