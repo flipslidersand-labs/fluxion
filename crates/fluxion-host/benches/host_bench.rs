@@ -8,6 +8,13 @@ use fluxion_host::cache::ComponentCache;
 use fluxion_host::{FluxionHost, scheduler};
 use indexmap::IndexMap;
 
+fn silent() -> scheduler::RunOptions {
+    scheduler::RunOptions {
+        progress: false,
+        ..Default::default()
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn workspace_root() -> PathBuf {
@@ -246,8 +253,13 @@ fn bench_workflow_run(c: &mut Criterion) {
         let h = Arc::clone(&host);
         group.bench_with_input(BenchmarkId::new("sequential", n), &n, |b, _| {
             b.iter(|| {
-                rt.block_on(scheduler::run_silent(&seq_wf, &seq_path, Arc::clone(&h)))
-                    .expect("sequential run");
+                rt.block_on(scheduler::run_with_options(
+                    &seq_wf,
+                    &seq_path,
+                    Arc::clone(&h),
+                    &silent(),
+                ))
+                .expect("sequential run");
             });
         });
 
@@ -257,8 +269,13 @@ fn bench_workflow_run(c: &mut Criterion) {
         let h = Arc::clone(&host);
         group.bench_with_input(BenchmarkId::new("parallel", n), &n, |b, _| {
             b.iter(|| {
-                rt.block_on(scheduler::run_silent(&par_wf, &par_path, Arc::clone(&h)))
-                    .expect("parallel run");
+                rt.block_on(scheduler::run_with_options(
+                    &par_wf,
+                    &par_path,
+                    Arc::clone(&h),
+                    &silent(),
+                ))
+                .expect("parallel run");
             });
         });
     }
