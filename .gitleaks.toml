@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+# Test-only throwaway TLS key fixture (TEST_KEY_PEM in mod tests). False positive.
+[[allowlists]]
+description = "Test fixture private key in fluxion-worker unit tests"
+condition = "AND"
+paths = ['''crates/fluxion-worker/src/lib\.rs''']
+targetRules = ["private-key"]
