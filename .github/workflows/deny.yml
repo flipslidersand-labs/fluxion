@@ -1,0 +1,39 @@
+name: Deny
+
+# #291: cargo-deny (advisories / licenses / bans / sources).
+# Kept in its own workflow so it does not conflict with ci.yml changes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  schedule:
+    # New advisories appear without any code change.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 15
+    # Report-only for now: known advisories (serde_yaml / rustls-pemfile / wasmtime)
+    # are being resolved in separate issues. Remove this line once they are fixed
+    # to make cargo-deny a blocking check (#291).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # Prebuilt binary (no Docker needed, unlike EmbarkStudios/cargo-deny-action,
+      # which may not work on the k8s self-hosted runner).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check advisories licenses bans sources

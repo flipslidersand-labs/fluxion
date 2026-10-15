@@ -1,0 +1,36 @@
+# cargo-deny configuration (#291). Run locally: `cargo deny check`
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities fail. Known findings today: wasmtime 28 (#294), rustls-pemfile,
+# lru, protobuf, h2, rustls etc. Intentionally NOT put in `ignore` here so they stay
+# visible; the CI job is report-only (continue-on-error) until they are fixed.
+unmaintained = "workspace"  # only direct deps (e.g. rustls-pemfile)
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",                # notify 6 (public-domain dedication)
+    "CDLA-Permissive-2.0",    # webpki-roots (CA data)
+]
+
+[bans]
+# Many duplicate versions exist today (base64, thiserror, getrandom, hashbrown...).
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
