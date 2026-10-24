@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792684453857,
+  "lastUpdate": 1792850853893,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -1075,6 +1075,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 11641730,
             "range": "± 564688",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "35351e509dda669cdd69930c51aac64f76246794",
+          "message": "fix(worker): bind loopback by default and enforce request permission policy (#275) (#355)\n\nAdd WorkerConfig/WorkerPolicy (--bind, --allow-fs-root, --max-memory-mb,\n--deny-network); out-of-policy /run and /jobs requests return 403. Warn when\nbinding non-loopback without TLS or running without a policy.\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-24T23:02:28+09:00",
+          "tree_id": "ec161eab6fdd02fed53d969d2c670974694fdd25",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/35351e509dda669cdd69930c51aac64f76246794"
+        },
+        "date": 1792850853525,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1777900,
+            "range": "± 22924",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 49520662,
+            "range": "± 848892",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31030,
+            "range": "± 493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 122713,
+            "range": "± 1510",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 2657340,
+            "range": "± 27876",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5784109,
+            "range": "± 167373",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5812389,
+            "range": "± 103890",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 13154214,
+            "range": "± 603610",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 9167035,
+            "range": "± 183086",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 20185217,
+            "range": "± 265395",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 13457612,
+            "range": "± 396756",
             "unit": "ns/iter"
           }
         ]
