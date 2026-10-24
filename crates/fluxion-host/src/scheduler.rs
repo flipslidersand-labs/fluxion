@@ -121,18 +121,93 @@ pub async fn retry_silent(
     .await
 }
 
+/// Options shared by [`run_with_options`] and [`retry_with_options`].
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// Load-balancing strategy for distributing jobs across remote workers.
+    pub strategy: LbStrategy,
+    /// Print progress to stdout/stderr (`false` for MCP / programmatic use).
+    pub progress: bool,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            strategy: LbStrategy::default(),
+            progress: true,
+        }
+    }
+}
+
+/// Run a workflow from scratch with the given [`RunOptions`].
+pub async fn run_with_options(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    opts: &RunOptions,
+) -> Result<RunResult> {
+    run_inner(
+        wf,
+        workflow_path,
+        host,
+        HashMap::new(),
+        opts.progress,
+        opts.strategy.clone(),
+    )
+    .await
+}
+
+/// Retry a previous run, re-executing `from_job` and its dependents, with the
+/// given [`RunOptions`].
+pub async fn retry_with_options(
+    wf: &Workflow,
+    workflow_path: &Path,
+    host: Arc<FluxionHost>,
+    prev_run_id: &str,
+    from_job: &str,
+    opts: &RunOptions,
+) -> Result<RunResult> {
+    retry_inner(
+        wf,
+        workflow_path,
+        host,
+        prev_run_id,
+        from_job,
+        opts.progress,
+        opts.strategy.clone(),
+    )
+    .await
+}
+
 /// Perform GET /health on each candidate URL concurrently.
 /// Returns the subset that responded successfully, updating the DB health status.
 async fn health_check_workers(candidates: &[String]) -> Vec<String> {
     if candidates.is_empty() {
         return Vec::new();
     }
+    let results = probe_workers(candidates).await;
+
+    let healthy: Vec<String> = results
+        .iter()
+        .filter_map(|(url, ok)| if *ok { Some(url.clone()) } else { None })
+        .collect();
+
+    if let Ok(s) = RunStore::open() {
+        for (url, ok) in &results {
+            let _ = s.update_worker_health(url, *ok);
+        }
+    }
+
+    healthy
+}
+
+/// Concurrently `GET {url}/health` on each candidate; a worker is healthy only
+/// on a 2xx response. Pure network probe (no DB access).
+async fn probe_workers(candidates: &[String]) -> Vec<(String, bool)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("reqwest client");
-
-    let store = RunStore::open().ok();
 
     let checks = candidates.iter().map(|url| {
         let url = url.clone();
@@ -148,20 +223,7 @@ async fn health_check_workers(candidates: &[String]) -> Vec<String> {
             (url, ok)
         }
     });
-    let results = futures::future::join_all(checks).await;
-
-    let healthy: Vec<String> = results
-        .iter()
-        .filter_map(|(url, ok)| if *ok { Some(url.clone()) } else { None })
-        .collect();
-
-    if let Some(s) = &store {
-        for (url, ok) in &results {
-            let _ = s.update_worker_health(url, *ok);
-        }
-    }
-
-    healthy
+    futures::future::join_all(checks).await
 }
 
 /// Resolve the effective worker list for a workflow run.
@@ -199,11 +261,18 @@ fn tls_for(wf: &Workflow, url: &str) -> Option<TlsConfig> {
 /// Resolve effective workers and return them as `WorkerInfo`, preserving TLS config.
 async fn effective_workers_info(wf: &Workflow) -> Vec<WorkerInfo> {
     let healthy_urls = effective_workers(wf).await;
-    healthy_urls
-        .into_iter()
+    worker_infos_for(wf, healthy_urls)
+}
+
+/// Attach TLS config and weight from `wf.workers` (matched by URL) to each URL.
+/// Workers not listed in YAML (SRV/DB-discovered) get no TLS and weight 1.
+fn worker_infos_for(wf: &Workflow, urls: Vec<String>) -> Vec<WorkerInfo> {
+    urls.into_iter()
         .map(|url| {
-            let tls = tls_for(wf, &url);
-            WorkerInfo { url, tls }
+            let cfg = wf.workers.iter().find(|w| w.url() == url.as_str());
+            let tls = cfg.and_then(|w| w.tls().cloned());
+            let weight = cfg.map_or(1, |w| w.weight());
+            WorkerInfo { url, tls, weight }
         })
         .collect()
 }
@@ -476,7 +545,6 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
 
         match &event.status {
             JobStatus::Succeeded { elapsed } => {
-                crate::metrics::ACTIVE_JOBS.dec();
                 crate::metrics::JOBS_TOTAL
                     .with_label_values(&["succeeded", &event.job_id])
                     .inc();
@@ -501,7 +569,6 @@ async fn execute(wf: &Workflow, opts: ExecOpts<'_>) -> Result<RunResult> {
                 }
             }
             JobStatus::Failed { elapsed, reason } => {
-                crate::metrics::ACTIVE_JOBS.dec();
                 crate::metrics::JOBS_TOTAL
                     .with_label_values(&["failed", &event.job_id])
                     .inc();
@@ -881,6 +948,8 @@ struct JobEvent {
 struct WorkerInfo {
     url: String,
     tls: Option<TlsConfig>,
+    /// Load-balancing weight (1 for workers not listed in `wf.workers`).
+    weight: u32,
 }
 
 /// Resolve the ordered list of workers to try for a job, including failover targets.
@@ -898,6 +967,7 @@ async fn resolve_workers(
         return vec![WorkerInfo {
             url: url.clone(),
             tls: tls_for(wf, url),
+            weight: 1,
         }];
     }
     if workers.is_empty() {
@@ -906,23 +976,23 @@ async fn resolve_workers(
     let n = workers.len();
     let start = match strategy {
         LbStrategy::RoundRobin => rr.fetch_add(1, Ordering::Relaxed) % n,
-        LbStrategy::Weighted => pick_weighted(&wf.workers, rr),
-        LbStrategy::LeastConn => pick_least_conn(&wf.workers).await,
+        LbStrategy::Weighted => pick_weighted(workers, rr),
+        LbStrategy::LeastConn => pick_least_conn(workers).await,
     };
     (0..n).map(|i| workers[(start + i) % n].clone()).collect()
 }
 
 /// Weighted round-robin: picks the worker index proportionally to its weight.
 /// Uses a global counter so successive calls cycle through the weight-space evenly.
-fn pick_weighted(workers: &[fluxion_core::workflow::WorkerConfig], rr: &AtomicUsize) -> usize {
-    let total_weight: u32 = workers.iter().map(|w| w.weight()).sum();
+fn pick_weighted(workers: &[WorkerInfo], rr: &AtomicUsize) -> usize {
+    let total_weight: u32 = workers.iter().map(|w| w.weight).sum();
     if total_weight == 0 {
         return rr.fetch_add(1, Ordering::Relaxed) % workers.len();
     }
     let slot = (rr.fetch_add(1, Ordering::Relaxed) as u32) % total_weight;
     let mut acc = 0u32;
     for (i, w) in workers.iter().enumerate() {
-        acc += w.weight();
+        acc += w.weight;
         if slot < acc {
             return i;
         }
@@ -933,11 +1003,11 @@ fn pick_weighted(workers: &[fluxion_core::workflow::WorkerConfig], rr: &AtomicUs
 /// Least-connections: query each worker's `/health` endpoint and return the
 /// index of the worker with the fewest active jobs.
 /// Workers that fail to respond are skipped (treated as having max load).
-async fn pick_least_conn(workers: &[fluxion_core::workflow::WorkerConfig]) -> usize {
+async fn pick_least_conn(workers: &[WorkerInfo]) -> usize {
     let mut best_idx = 0usize;
     let mut best_count = u64::MAX;
     for (i, w) in workers.iter().enumerate() {
-        let url = format!("{}/health", w.url().trim_end_matches('/'));
+        let url = format!("{}/health", w.url.trim_end_matches('/'));
         if let Ok(resp) = reqwest::get(&url).await
             && let Ok(json) = resp.json::<serde_json::Value>().await
         {
@@ -1049,6 +1119,23 @@ async fn run_with_failover_async(
     unreachable!("resolve_workers never returns an empty list here")
 }
 
+/// RAII guard for the `fluxion_active_jobs` gauge: `inc` on creation, `dec` on
+/// drop, so the gauge stays balanced regardless of which path a job exits by.
+struct ActiveJobGuard;
+
+impl ActiveJobGuard {
+    fn new() -> Self {
+        crate::metrics::ACTIVE_JOBS.inc();
+        Self
+    }
+}
+
+impl Drop for ActiveJobGuard {
+    fn drop(&mut self) {
+        crate::metrics::ACTIVE_JOBS.dec();
+    }
+}
+
 fn launch(
     job_id: &str,
     wf: &Workflow,
@@ -1059,7 +1146,8 @@ fn launch(
     // Override input bytes (used for fan-in assembly). If None, falls back to wf.jobs[job_id].input.
     input_override: Option<Vec<u8>>,
 ) {
-    crate::metrics::ACTIVE_JOBS.inc();
+    // Balanced by Drop on every exit path of the spawned task (#296).
+    let active = ActiveJobGuard::new();
     let job_id = job_id.to_string();
     let executor = wf.jobs[&job_id].executor.clone();
     let async_dispatch = wf.jobs[&job_id].async_dispatch;
@@ -1082,6 +1170,7 @@ fn launch(
 
     tokio::spawn(
         async move {
+            let _active = active;
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let start = Instant::now();
 
@@ -1130,7 +1219,6 @@ fn launch(
                                     instantiate_us: 0,
                                     execute_us: 0,
                                 });
-                                crate::metrics::ACTIVE_JOBS.dec();
                                 return;
                             }
                         }
@@ -1148,7 +1236,6 @@ fn launch(
                             instantiate_us: 0,
                             execute_us: 0,
                         });
-                        crate::metrics::ACTIVE_JOBS.dec();
                         return;
                     }
                 }
@@ -1171,7 +1258,6 @@ fn launch(
                     instantiate_us: 0,
                     execute_us: 0,
                 });
-                crate::metrics::ACTIVE_JOBS.dec();
                 return;
             }
 
@@ -1388,6 +1474,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// Serializes tests that mutate the process-wide `HOME` (RunStore location).
+    static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     // Build a Workflow with a single job "j" via JSON so we don't depend on
     // indexmap directly in this crate's tests.
     fn wf(workers: &[&str], job_worker: Option<&str>) -> Workflow {
@@ -1409,6 +1498,7 @@ mod tests {
             .map(|u| WorkerInfo {
                 url: u.to_string(),
                 tls: None,
+                weight: 1,
             })
             .collect()
     }
@@ -1487,14 +1577,26 @@ mod tests {
         serde_json::from_str(&s).unwrap()
     }
 
+    /// Effective-worker list with explicit weights (mirrors `effective_workers_info`).
+    fn weighted_infos(weights: &[(u32, &str)]) -> Vec<WorkerInfo> {
+        weights
+            .iter()
+            .map(|(weight, url)| WorkerInfo {
+                url: url.to_string(),
+                tls: None,
+                weight: *weight,
+            })
+            .collect()
+    }
+
     #[test]
     fn weighted_rr_distributes_proportionally() {
         // Workers with weights [2, 1]: over 30 slots, A should get ~20, B ~10.
-        let w = wf_weighted(&[(2, "http://a"), (1, "http://b")]);
+        let ew = weighted_infos(&[(2, "http://a"), (1, "http://b")]);
         let rr = AtomicUsize::new(0);
         let mut counts = std::collections::HashMap::new();
         for _ in 0..30 {
-            let idx = pick_weighted(&w.workers, &rr);
+            let idx = pick_weighted(&ew, &rr);
             *counts.entry(idx).or_insert(0usize) += 1;
         }
         let a = counts.get(&0).copied().unwrap_or(0);
@@ -1507,11 +1609,11 @@ mod tests {
     #[test]
     fn weighted_rr_equal_weights_acts_like_round_robin() {
         // Both weight=1: should distribute exactly 50/50 over 10 calls.
-        let w = wf_weighted(&[(1, "http://a"), (1, "http://b")]);
+        let ew = weighted_infos(&[(1, "http://a"), (1, "http://b")]);
         let rr = AtomicUsize::new(0);
         let mut counts = [0usize; 2];
         for _ in 0..10 {
-            counts[pick_weighted(&w.workers, &rr)] += 1;
+            counts[pick_weighted(&ew, &rr)] += 1;
         }
         assert_eq!(counts[0], 5);
         assert_eq!(counts[1], 5);
@@ -1519,11 +1621,45 @@ mod tests {
 
     #[test]
     fn weighted_rr_single_worker_always_picked() {
-        let w = wf_weighted(&[(5, "http://only")]);
+        let ew = weighted_infos(&[(5, "http://only")]);
         let rr = AtomicUsize::new(0);
         for _ in 0..10 {
-            assert_eq!(pick_weighted(&w.workers, &rr), 0);
+            assert_eq!(pick_weighted(&ew, &rr), 0);
         }
+    }
+
+    /// #271: `workers_srv:` / DB-registered workers only → `wf.workers` is empty.
+    /// Weighted selection must not panic (previously `% 0`).
+    #[tokio::test]
+    async fn weighted_with_empty_static_workers_does_not_panic() {
+        let w = wf(&[], None);
+        assert!(w.workers.is_empty());
+        let ew = weighted_infos(&[(1, "http://srv-only")]);
+        let rr = AtomicUsize::new(0);
+        assert_eq!(
+            worker_urls(&resolve_workers("j", &w, &ew, &rr, &LbStrategy::Weighted).await),
+            vec!["http://srv-only"]
+        );
+    }
+
+    /// #271: when a static worker is filtered out (unhealthy), the remaining
+    /// workers keep their own weights instead of inheriting by index.
+    #[tokio::test]
+    async fn weighted_applies_weight_to_matching_url_after_filtering() {
+        // YAML: a(w=1), b(w=9), c(w=1). `a` is unhealthy → effective = [b, c].
+        let w = wf_weighted(&[(1, "http://a"), (9, "http://b"), (1, "http://c")]);
+        let ew = worker_infos_for(&w, vec!["http://b".into(), "http://c".into()]);
+        assert_eq!(ew[0].weight, 9);
+        assert_eq!(ew[1].weight, 1);
+        let rr = AtomicUsize::new(0);
+        let mut first_b = 0;
+        for _ in 0..10 {
+            let order = resolve_workers("j", &w, &ew, &rr, &LbStrategy::Weighted).await;
+            if order[0].url == "http://b" {
+                first_b += 1;
+            }
+        }
+        assert_eq!(first_b, 9, "b (weight 9) should lead 9 of 10 times");
     }
 
     // Bind then drop so the port is guaranteed to refuse connections.
@@ -1615,6 +1751,7 @@ mod tests {
             .map(|u| WorkerInfo {
                 url: u.clone(),
                 tls: None,
+                weight: 1,
             })
             .collect()
     }
@@ -1689,6 +1826,51 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(&d1), "error should list {d1}: {msg}");
         assert!(msg.contains(&d2), "error should list {d2}: {msg}");
+    }
+
+    /// Run `run_with_failover` over `workers` with a hang guard; returns the error text.
+    async fn failover_err(workers: &[WorkerInfo]) -> String {
+        let f = tmp_wasm();
+        let path = f.path().to_string_lossy().into_owned();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with_failover(
+                workers,
+                &path,
+                b"in",
+                &fast_timeout_perms(),
+                &HashMap::new(),
+            ),
+        )
+        .await
+        .expect("run_with_failover should not hang (#220)")
+        .expect_err("dispatch should fail")
+        .to_string()
+    }
+
+    /// #285: a worker that answers 5xx is an Execution error — stop immediately,
+    /// never fail over to the (healthy) next worker.
+    #[tokio::test]
+    async fn execution_error_5xx_does_not_fail_over() {
+        let failing = spawn_failing_mock_worker().await;
+        let healthy = spawn_mock_worker(b"ok-output".to_vec()).await;
+        let msg = failover_err(&plain_workers(&[failing.clone(), healthy.clone()])).await;
+        assert!(msg.contains(&failing), "error should name {failing}: {msg}");
+        assert!(
+            !msg.contains(&healthy),
+            "must not have tried the second worker {healthy}: {msg}"
+        );
+    }
+
+    /// #285: HTTP 200 but no `output` field is also an Execution error (no failover).
+    #[tokio::test]
+    async fn missing_output_field_does_not_fail_over() {
+        let bad = spawn_canned_mock_worker("200 OK", "{\"compile_ms\":1}").await;
+        let healthy = spawn_mock_worker(b"ok-output".to_vec()).await;
+        let msg = failover_err(&plain_workers(&[bad.clone(), healthy.clone()])).await;
+        assert!(msg.contains(&bad), "error should name {bad}: {msg}");
+        assert!(msg.contains("missing output field"), "{msg}");
+        assert!(!msg.contains(&healthy), "must not fail over: {msg}");
     }
 
     // ── build_fanin_input reduce mode tests ──────────────────────────────────
@@ -1790,6 +1972,7 @@ mod tests {
         let host = Arc::new(FluxionHost::new().unwrap());
         let wf = wf_with_executor("remote", false);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -1815,6 +1998,7 @@ mod tests {
         let host = Arc::new(FluxionHost::new().unwrap());
         let wf = wf_with_executor("local", false);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -1897,6 +2081,11 @@ mod tests {
     /// Answers every request with `500` immediately, so the job fails fast
     /// without depending on timeout behavior.
     async fn spawn_failing_mock_worker() -> String {
+        spawn_canned_mock_worker("500 Internal Server Error", "{\"error\":\"boom\"}").await
+    }
+
+    /// Answers every request with the given status line and JSON body.
+    async fn spawn_canned_mock_worker(status: &'static str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1931,11 +2120,9 @@ mod tests {
                             break;
                         }
                     }
-                    let body = "{\"error\":\"boom\"}";
                     let resp = format!(
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len(),
-                        body
                     );
                     let _ = sock.write_all(resp.as_bytes()).await;
                     let _ = sock.flush().await;
@@ -1967,6 +2154,7 @@ mod tests {
         .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
         // SAFETY: single-threaded test context.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let store = RunStore::open().unwrap();
@@ -2000,6 +2188,109 @@ mod tests {
             "orphaned in-flight job must be marked Cancelled, got: {:?}",
             jobs.get("slow_ok")
         );
+    }
+
+    /// Counts POST requests (job executions) per worker; `/health` GETs are
+    /// answered but not counted.
+    async fn spawn_counting_mock_worker(hits: Arc<AtomicUsize>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let hits = Arc::clone(&hits);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let mut need = None;
+                    while let Ok(n) = sock.read(&mut tmp).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if need.is_none()
+                            && let Some(p) = find(&buf, b"\r\n\r\n")
+                        {
+                            let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                            let cl = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            need = Some(p + 4 + cl);
+                        }
+                        if need.is_some_and(|n| buf.len() >= n) {
+                            break;
+                        }
+                    }
+                    if buf.starts_with(b"POST") {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let body =
+                        "{\"output\":\"\",\"compile_ms\":0,\"instantiate_ms\":0,\"execute_ms\":0}";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// #317: `retry_with_options` must hand `opts.strategy` to `retry_inner`.
+    /// Workers weighted [2, 1] and two sequential jobs: Weighted sends both
+    /// jobs to worker A (slots 0 and 1), RoundRobin would send the second to B.
+    #[tokio::test]
+    async fn retry_with_options_propagates_weighted_strategy() {
+        let hits_a = Arc::new(AtomicUsize::new(0));
+        let hits_b = Arc::new(AtomicUsize::new(0));
+        let url_a = spawn_counting_mock_worker(Arc::clone(&hits_a)).await;
+        let url_b = spawn_counting_mock_worker(Arc::clone(&hits_b)).await;
+        let wasm = tmp_wasm();
+        let p = wasm.path().to_string_lossy();
+        let wf: Workflow = serde_json::from_str(&format!(
+            r#"{{"name":"t","workers":[{{"url":"{url_a}","weight":2}},{{"url":"{url_b}","weight":1}}],
+                "jobs":{{
+                    "a":{{"component":"{p}","executor":"remote"}},
+                    "b":{{"component":"{p}","executor":"remote","depends_on":["a"]}}
+                }}}}"#
+        ))
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HOME_LOCK.lock().await;
+        // SAFETY: same pattern as the other RunStore-backed tests in this module.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let store = RunStore::open().unwrap();
+        store
+            .create_run("prev-317", "t", Path::new("t.yaml"))
+            .unwrap();
+        let host = Arc::new(FluxionHost::new().unwrap());
+
+        let opts = RunOptions {
+            strategy: LbStrategy::Weighted,
+            progress: false,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            retry_with_options(&wf, Path::new("t.yaml"), host, "prev-317", "a", &opts),
+        )
+        .await
+        .expect("retry must not hang")
+        .expect("retry should succeed");
+        assert!(result.success);
+        assert_eq!(hits_a.load(Ordering::SeqCst), 2);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn run_options_default_is_round_robin_with_progress() {
+        let d = RunOptions::default();
+        assert!(matches!(d.strategy, LbStrategy::RoundRobin));
+        assert!(d.progress);
     }
 
     // ── downstream_inclusive ────────────────────────────────────────────────
@@ -2084,5 +2375,35 @@ mod tests {
     fn eval_when_non_status_attr_defaults_true() {
         let statuses = HashMap::new();
         assert!(eval_when("job.other == 'x'", &statuses));
+    }
+
+    // ── probe_workers (health probe; replaces the removed worker_registry) ──
+
+    async fn spawn_status_server(status_line: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!("HTTP/1.1 {status_line}\r\ncontent-length: 0\r\n\r\n");
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn probe_workers_marks_2xx_healthy_and_5xx_or_closed_unhealthy() {
+        let ok = spawn_status_server("200 OK").await;
+        let err5xx = spawn_status_server("503 Service Unavailable").await;
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            drop(l);
+            format!("http://{addr}")
+        };
+        let results = probe_workers(&[ok.clone(), err5xx.clone(), closed.clone()]).await;
+        assert_eq!(results, vec![(ok, true), (err5xx, false), (closed, false)]);
     }
 }

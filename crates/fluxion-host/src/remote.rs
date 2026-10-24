@@ -377,3 +377,26 @@ fn current_trace_context() -> Option<(String, String)> {
     let tracestate = sc.trace_state().header();
     Some((traceparent, tracestate.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_unreachable_triggers_failover() {
+        assert!(RemoteError::Unreachable(anyhow::anyhow!("refused")).is_failover());
+        assert!(!RemoteError::Execution(anyhow::anyhow!("500")).is_failover());
+    }
+
+    #[test]
+    fn display_distinguishes_error_kinds() {
+        assert_eq!(
+            RemoteError::Unreachable(anyhow::anyhow!("refused")).to_string(),
+            "unreachable: refused"
+        );
+        assert_eq!(
+            RemoteError::Execution(anyhow::anyhow!("boom")).to_string(),
+            "execution failed: boom"
+        );
+    }
+}

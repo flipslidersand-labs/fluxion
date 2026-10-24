@@ -3,7 +3,7 @@ use axum::{
     body::Bytes,
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    routing::{get, head, post, put},
+    routing::{get, head, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+pub mod policy;
+pub use policy::WorkerPolicy;
+
 /// Global counter of jobs currently executing on this worker.
 /// Reported in the `/health` response so the host-side scheduler can
 /// implement least-connections load balancing.
@@ -35,8 +38,21 @@ fn cas_dir() -> PathBuf {
     PathBuf::from(home).join(".fluxion").join("cas")
 }
 
-fn cas_path(sha256: &str) -> PathBuf {
-    cas_dir().join(sha256).with_extension("wasm")
+/// Validate a SHA-256 hex digest (exactly 64 ASCII hex chars) and return it
+/// lower-cased. Anything else (path separators, `..`, wrong length, ...) is
+/// rejected so it can never reach the filesystem.
+fn validate_sha256(s: &str) -> Option<String> {
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(s.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// CAS path for a digest, or `None` if the digest is not a valid SHA-256 hex string.
+fn cas_path(sha256: &str) -> Option<PathBuf> {
+    let h = validate_sha256(sha256)?;
+    Some(cas_dir().join(format!("{h}.wasm")))
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -113,6 +129,11 @@ fn sweep_expired_jobs(jobs: &JobStore, retention: Duration) {
 pub struct WorkerState {
     host: Arc<FluxionHost>,
     jobs: JobStore,
+    policy: Arc<WorkerPolicy>,
+}
+
+fn policy_denied(msg: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::FORBIDDEN, Json(ErrorResponse { error: msg }))
 }
 
 // ── POST /jobs ────────────────────────────────────────────────────────────────
@@ -126,6 +147,10 @@ async fn handle_submit_job(
     State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<(StatusCode, Json<SubmitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    state
+        .policy
+        .check(&req.permissions)
+        .map_err(policy_denied)?;
     let job_id = Uuid::new_v4().to_string();
 
     state.jobs.insert(
@@ -183,7 +208,7 @@ async fn handle_get_job(
 
 async fn run_request_inner(host: &Arc<FluxionHost>, req: RunRequest) -> Result<String, String> {
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
-        let p = cas_path(sha256);
+        let p = cas_path(sha256).ok_or_else(|| "invalid component_sha256".to_string())?;
         if p.exists() {
             CAS_HITS.fetch_add(1, Ordering::Relaxed);
             std::fs::read(&p).map_err(|e| e.to_string())?
@@ -239,10 +264,21 @@ async fn handle_run(
     State(state): State<WorkerState>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .policy
+        .check(&req.permissions)
+        .map_err(policy_denied)?;
     let host = &state.host;
     // Resolve component bytes: try CAS first, fall back to inline bytes.
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
-        let p = cas_path(sha256);
+        let p = cas_path(sha256).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid component_sha256: expected 64 hex characters".to_string(),
+                }),
+            )
+        })?;
         if p.exists() {
             CAS_HITS.fetch_add(1, Ordering::Relaxed);
             std::fs::read(&p).map_err(|e| {
@@ -369,7 +405,10 @@ async fn handle_health() -> Json<serde_json::Value> {
 // ── CAS endpoints ─────────────────────────────────────────────────────────────
 
 async fn handle_cas_head(AxumPath(sha256): AxumPath<String>) -> StatusCode {
-    if cas_path(&sha256).exists() {
+    let Some(path) = cas_path(&sha256) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if path.exists() {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -380,6 +419,14 @@ async fn handle_cas_put(
     AxumPath(sha256): AxumPath<String>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let Some(path) = cas_path(&sha256) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid sha256: expected 64 hex characters".to_string(),
+            }),
+        ));
+    };
     // Verify digest matches the uploaded bytes.
     use sha2::{Digest, Sha256};
     let actual: String = Sha256::digest(&body)
@@ -403,7 +450,6 @@ async fn handle_cas_put(
             }),
         )
     })?;
-    let path = cas_path(&sha256);
     std::fs::write(&path, &body).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -417,15 +463,58 @@ async fn handle_cas_put(
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
+/// Server options beyond port/TLS. `Default` binds loopback only, with no
+/// permission policy.
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    /// Address to bind. Default `127.0.0.1` (#275).
+    pub bind: std::net::IpAddr,
+    pub policy: WorkerPolicy,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            policy: WorkerPolicy::default(),
+        }
+    }
+}
+
+/// Start the worker on loopback with no permission policy.
 pub async fn serve(
     port: u16,
     metrics_port: Option<u16>,
     tls: Option<WorkerTls>,
     async_jobs: bool,
 ) -> Result<()> {
+    serve_with(port, metrics_port, tls, async_jobs, WorkerConfig::default()).await
+}
+
+pub async fn serve_with(
+    port: u16,
+    metrics_port: Option<u16>,
+    tls: Option<WorkerTls>,
+    async_jobs: bool,
+    config: WorkerConfig,
+) -> Result<()> {
+    if tls.is_none() && !config.bind.is_loopback() {
+        tracing::warn!(
+            "worker is listening on non-loopback {} WITHOUT TLS/mTLS: /run, /jobs and \
+             /components accept unauthenticated requests. Use --tls-cert/--tls-key/--ca-cert.",
+            config.bind
+        );
+    }
+    if config.policy.is_unrestricted() {
+        tracing::warn!(
+            "worker has no permission policy: client-supplied PermissionSet is applied as-is \
+             (see --allow-fs-root, --max-memory-mb, --deny-network)"
+        );
+    }
     let state = WorkerState {
         host: Arc::new(FluxionHost::new()?),
         jobs: Arc::new(DashMap::new()),
+        policy: Arc::new(config.policy.normalized()),
     };
 
     if let Some(mp) = metrics_port {
@@ -435,8 +524,11 @@ pub async fn serve(
     let mut app = Router::new()
         .route("/run", post(handle_run))
         .route("/health", get(handle_health))
-        .route("/components/{sha256}", head(handle_cas_head))
-        .route("/components/{sha256}", put(handle_cas_put));
+        // axum 0.7 path syntax is `:param` (`{param}` is only valid in 0.8+).
+        .route(
+            "/components/:sha256",
+            head(handle_cas_head).put(handle_cas_put),
+        );
 
     if async_jobs {
         app = app
@@ -455,7 +547,7 @@ pub async fn serve(
 
     let app = app.with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    let addr = std::net::SocketAddr::new(config.bind, port).to_string();
 
     if let Some(tls) = tls {
         serve_tls(app, &addr, tls).await
@@ -631,5 +723,42 @@ mod tests {
         let jobs: JobStore = Arc::new(DashMap::new());
         sweep_expired_jobs(&jobs, Duration::from_secs(300));
         assert!(jobs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cas_sha256_tests {
+    use super::*;
+
+    #[test]
+    fn validate_sha256_accepts_and_lowercases_hex() {
+        let up = "A".repeat(64);
+        assert_eq!(validate_sha256(&up), Some("a".repeat(64)));
+        assert!(validate_sha256(&"0123456789abcdef".repeat(4)).is_some());
+    }
+
+    #[test]
+    fn validate_sha256_rejects_bad_input() {
+        for bad in [
+            "../etc/passwd",
+            "/tmp/x",
+            "..",
+            "",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &format!("{}g", "a".repeat(63)),
+            &format!("../{}", "a".repeat(61)),
+            &format!("/{}", "a".repeat(63)),
+        ] {
+            assert!(validate_sha256(bad).is_none(), "accepted {bad:?}");
+            assert!(cas_path(bad).is_none(), "cas_path accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn cas_path_stays_inside_cas_dir() {
+        let p = cas_path(&"b".repeat(64)).unwrap();
+        assert_eq!(p.parent().unwrap(), cas_dir());
+        assert_eq!(p.extension().unwrap(), "wasm");
     }
 }

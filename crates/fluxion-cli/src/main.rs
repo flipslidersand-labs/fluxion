@@ -129,6 +129,10 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// Address to bind (default loopback only; the API has no authentication,
+        /// so pass e.g. 0.0.0.0 only on a trusted network)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -239,6 +243,20 @@ enum WorkerCommands {
         /// Enable POST /jobs and GET /jobs/:id async endpoints
         #[arg(long)]
         async_jobs: bool,
+        /// Address to bind (default loopback). A non-loopback address without
+        /// TLS exposes unauthenticated endpoints and logs a warning.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// Restrict request filesystem.{read,write} to paths under this root
+        /// (repeatable). Others are rejected with 403.
+        #[arg(long = "allow-fs-root")]
+        allow_fs_root: Vec<PathBuf>,
+        /// Reject requests with limits.memory_mb above this value (403)
+        #[arg(long)]
+        max_memory_mb: Option<u64>,
+        /// Reject requests that ask for any network.allow entry (403)
+        #[arg(long)]
+        deny_network: bool,
     },
     /// Register a worker URL in the local registry
     Register {
@@ -410,6 +428,10 @@ async fn run(command: Commands) -> Result<()> {
                 tls_key,
                 ca_cert,
                 async_jobs,
+                bind,
+                allow_fs_root,
+                max_memory_mb,
+                deny_network,
             } => {
                 let tls = match (tls_cert, tls_key, ca_cert) {
                     (Some(cert), Some(key), Some(ca)) => {
@@ -417,7 +439,15 @@ async fn run(command: Commands) -> Result<()> {
                     }
                     _ => None,
                 };
-                fluxion_worker::serve(port, metrics_port, tls, async_jobs).await?;
+                let config = fluxion_worker::WorkerConfig {
+                    bind,
+                    policy: fluxion_worker::WorkerPolicy {
+                        allow_fs_roots: allow_fs_root,
+                        max_memory_mb,
+                        deny_network,
+                    },
+                };
+                fluxion_worker::serve_with(port, metrics_port, tls, async_jobs, config).await?;
             }
             WorkerCommands::Register { url } => {
                 validate_worker_url(&url)?;
@@ -463,9 +493,10 @@ async fn run(command: Commands) -> Result<()> {
             cmd_validate(&path, json, skip_wasm_check, strict);
         }
 
-        Commands::Serve { port } => {
-            println!("Starting fluxion API server on http://localhost:{port}");
-            fluxion_host::api::start(port).await?;
+        Commands::Serve { port, bind } => {
+            let addr = std::net::SocketAddr::new(bind, port);
+            println!("Starting fluxion API server on http://{addr}");
+            fluxion_host::api::start(addr).await?;
         }
 
         Commands::McpServe => {
@@ -1192,7 +1223,30 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{fmt_unix, next_run_secs, validate_worker_url};
+    use super::{Cli, Commands, fmt_unix, next_run_secs, validate_worker_url};
+    use clap::Parser;
+    use std::net::IpAddr;
+
+    fn serve_bind(args: &[&str]) -> (u16, IpAddr) {
+        match Cli::try_parse_from(args).unwrap().command {
+            Commands::Serve { port, bind } => (port, bind),
+            _ => panic!("not serve"),
+        }
+    }
+
+    #[test]
+    fn serve_binds_loopback_by_default() {
+        let (port, bind) = serve_bind(&["fluxion", "serve"]);
+        assert_eq!(port, 8080);
+        assert!(bind.is_loopback());
+        assert_eq!(bind.to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn serve_bind_can_be_overridden_explicitly() {
+        let (_, bind) = serve_bind(&["fluxion", "serve", "--bind", "0.0.0.0"]);
+        assert!(bind.is_unspecified());
+    }
 
     #[test]
     fn fmt_unix_includes_date_and_time() {
