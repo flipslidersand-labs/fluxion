@@ -35,8 +35,21 @@ fn cas_dir() -> PathBuf {
     PathBuf::from(home).join(".fluxion").join("cas")
 }
 
-fn cas_path(sha256: &str) -> PathBuf {
-    cas_dir().join(sha256).with_extension("wasm")
+/// Validate a SHA-256 hex digest (exactly 64 ASCII hex chars) and return it
+/// lower-cased. Anything else (path separators, `..`, wrong length, ...) is
+/// rejected so it can never reach the filesystem.
+fn validate_sha256(s: &str) -> Option<String> {
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(s.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// CAS path for a digest, or `None` if the digest is not a valid SHA-256 hex string.
+fn cas_path(sha256: &str) -> Option<PathBuf> {
+    let h = validate_sha256(sha256)?;
+    Some(cas_dir().join(format!("{h}.wasm")))
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -183,7 +196,7 @@ async fn handle_get_job(
 
 async fn run_request_inner(host: &Arc<FluxionHost>, req: RunRequest) -> Result<String, String> {
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
-        let p = cas_path(sha256);
+        let p = cas_path(sha256).ok_or_else(|| "invalid component_sha256".to_string())?;
         if p.exists() {
             CAS_HITS.fetch_add(1, Ordering::Relaxed);
             std::fs::read(&p).map_err(|e| e.to_string())?
@@ -242,7 +255,14 @@ async fn handle_run(
     let host = &state.host;
     // Resolve component bytes: try CAS first, fall back to inline bytes.
     let component_bytes: Vec<u8> = if let Some(sha256) = &req.component_sha256 {
-        let p = cas_path(sha256);
+        let p = cas_path(sha256).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid component_sha256: expected 64 hex characters".to_string(),
+                }),
+            )
+        })?;
         if p.exists() {
             CAS_HITS.fetch_add(1, Ordering::Relaxed);
             std::fs::read(&p).map_err(|e| {
@@ -369,7 +389,10 @@ async fn handle_health() -> Json<serde_json::Value> {
 // ── CAS endpoints ─────────────────────────────────────────────────────────────
 
 async fn handle_cas_head(AxumPath(sha256): AxumPath<String>) -> StatusCode {
-    if cas_path(&sha256).exists() {
+    let Some(path) = cas_path(&sha256) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if path.exists() {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -380,6 +403,14 @@ async fn handle_cas_put(
     AxumPath(sha256): AxumPath<String>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let Some(path) = cas_path(&sha256) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid sha256: expected 64 hex characters".to_string(),
+            }),
+        ));
+    };
     // Verify digest matches the uploaded bytes.
     use sha2::{Digest, Sha256};
     let actual: String = Sha256::digest(&body)
@@ -403,7 +434,6 @@ async fn handle_cas_put(
             }),
         )
     })?;
-    let path = cas_path(&sha256);
     std::fs::write(&path, &body).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -631,5 +661,42 @@ mod tests {
         let jobs: JobStore = Arc::new(DashMap::new());
         sweep_expired_jobs(&jobs, Duration::from_secs(300));
         assert!(jobs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cas_sha256_tests {
+    use super::*;
+
+    #[test]
+    fn validate_sha256_accepts_and_lowercases_hex() {
+        let up = "A".repeat(64);
+        assert_eq!(validate_sha256(&up), Some("a".repeat(64)));
+        assert!(validate_sha256(&"0123456789abcdef".repeat(4)).is_some());
+    }
+
+    #[test]
+    fn validate_sha256_rejects_bad_input() {
+        for bad in [
+            "../etc/passwd",
+            "/tmp/x",
+            "..",
+            "",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &format!("{}g", "a".repeat(63)),
+            &format!("../{}", "a".repeat(61)),
+            &format!("/{}", "a".repeat(63)),
+        ] {
+            assert!(validate_sha256(bad).is_none(), "accepted {bad:?}");
+            assert!(cas_path(bad).is_none(), "cas_path accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn cas_path_stays_inside_cas_dir() {
+        let p = cas_path(&"b".repeat(64)).unwrap();
+        assert_eq!(p.parent().unwrap(), cas_dir());
+        assert_eq!(p.extension().unwrap(), "wasm");
     }
 }
