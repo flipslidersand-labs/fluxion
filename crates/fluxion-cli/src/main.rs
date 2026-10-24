@@ -129,6 +129,10 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// Address to bind (default loopback only; the API has no authentication,
+        /// so pass e.g. 0.0.0.0 only on a trusted network)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
     },
     /// Start the MCP server (stdio transport)
     McpServe,
@@ -463,9 +467,10 @@ async fn run(command: Commands) -> Result<()> {
             cmd_validate(&path, json, skip_wasm_check, strict);
         }
 
-        Commands::Serve { port } => {
-            println!("Starting fluxion API server on http://localhost:{port}");
-            fluxion_host::api::start(port).await?;
+        Commands::Serve { port, bind } => {
+            let addr = std::net::SocketAddr::new(bind, port);
+            println!("Starting fluxion API server on http://{addr}");
+            fluxion_host::api::start(addr).await?;
         }
 
         Commands::McpServe => {
@@ -1192,7 +1197,30 @@ async fn fire_due_schedules(host: Arc<FluxionHost>) {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{fmt_unix, next_run_secs, validate_worker_url};
+    use super::{Cli, Commands, fmt_unix, next_run_secs, validate_worker_url};
+    use clap::Parser;
+    use std::net::IpAddr;
+
+    fn serve_bind(args: &[&str]) -> (u16, IpAddr) {
+        match Cli::try_parse_from(args).unwrap().command {
+            Commands::Serve { port, bind } => (port, bind),
+            _ => panic!("not serve"),
+        }
+    }
+
+    #[test]
+    fn serve_binds_loopback_by_default() {
+        let (port, bind) = serve_bind(&["fluxion", "serve"]);
+        assert_eq!(port, 8080);
+        assert!(bind.is_loopback());
+        assert_eq!(bind.to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn serve_bind_can_be_overridden_explicitly() {
+        let (_, bind) = serve_bind(&["fluxion", "serve", "--bind", "0.0.0.0"]);
+        assert!(bind.is_unspecified());
+    }
 
     #[test]
     fn fmt_unix_includes_date_and_time() {
