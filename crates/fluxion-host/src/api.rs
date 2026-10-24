@@ -36,7 +36,11 @@ async fn list_run_jobs(
     State(s): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = lock_store(&s)?.get_run_jobs(&id)?;
+    let store = lock_store(&s)?;
+    store
+        .get_run(&id)
+        .map_err(|_| ApiError::NotFound(format!("run '{id}' not found")))?;
+    let rows = store.get_run_jobs(&id)?;
     Ok(json_response(&rows))
 }
 
@@ -56,7 +60,7 @@ async fn list_workers(State(s): State<ApiState>) -> Result<impl IntoResponse, Ap
 fn lock_store(s: &ApiState) -> Result<std::sync::MutexGuard<'_, RunStore>, ApiError> {
     s.store
         .lock()
-        .map_err(|_| ApiError(anyhow::anyhow!("store lock poisoned")))
+        .map_err(|_| ApiError::Internal(anyhow::anyhow!("store lock poisoned")))
 }
 
 async fn metrics() -> impl IntoResponse {
@@ -96,17 +100,30 @@ pub async fn start(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct ApiError(anyhow::Error);
+enum ApiError {
+    /// Client-facing 404 with a safe, pre-vetted message (e.g. "run 'x' not found").
+    NotFound(String),
+    /// Any other failure. The `anyhow::Error` detail is logged server-side only;
+    /// clients get a generic message so internal state (SQL errors, file paths,
+    /// etc.) never leaks in the response body.
+    Internal(anyhow::Error),
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+        match self {
+            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
+            Self::Internal(e) => {
+                tracing::error!("{:#}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
+            }
+        }
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
-        Self(e.into())
+        Self::Internal(e.into())
     }
 }
 
@@ -174,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_run_jobs_returns_200_for_unknown_id() {
+    async fn get_run_jobs_returns_404_for_unknown_id() {
         let app = router(test_state());
         let resp = app
             .oneshot(
@@ -186,9 +203,42 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unknown run_id must be distinguishable from an empty job list"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_run_jobs_returns_200_for_known_id() {
+        let state = test_state();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .create_run("run-1", "wf", std::path::Path::new("/tmp/wf.yaml"))
+            .unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/run/run-1/jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_bytes(resp.into_body()).await;
-        assert_eq!(String::from_utf8(body).unwrap(), "[]");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("application/json"));
     }
 
     #[tokio::test]
@@ -279,7 +329,40 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             "poisoned lock must yield a clean 500, not a panic"
         );
+        // #231: the response body must never echo internal error detail (SQL
+        // errors, poison state, file paths, ...) — only a generic message.
         let body = body_bytes(resp.into_body()).await;
-        assert!(String::from_utf8(body).unwrap().contains("poisoned"));
+        let body = String::from_utf8(body).unwrap();
+        assert!(
+            !body.contains("poisoned"),
+            "body must not leak internal detail: {body}"
+        );
+        assert_eq!(body, "internal server error");
+    }
+
+    #[tokio::test]
+    async fn internal_error_body_never_echoes_detail() {
+        // A missing table triggers a rusqlite error inside list_runs — this must
+        // surface as a generic 500 body, not the raw SQL error message (#231).
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let state = ApiState {
+            store: Arc::new(Mutex::new(RunStore::from_conn(conn))),
+        };
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_bytes(resp.into_body()).await;
+        let body = String::from_utf8(body).unwrap();
+        assert_eq!(body, "internal server error");
+        assert!(!body.to_lowercase().contains("sql") && !body.to_lowercase().contains("table"));
     }
 }
