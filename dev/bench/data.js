@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792850853893,
+  "lastUpdate": 1792858162971,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -1165,6 +1165,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 13457612,
             "range": "± 396756",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "79a25a8f10a4c5357f2e0f6866a1727f32e39ade",
+          "message": "fix(scheduler): job.worker ピン留め時も workers: の TLS 設定を引き継ぐ (#279) (#332)\n\nCo-authored-by: flipslidersand <yukihanashopping0212@gmail.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-25T01:05:19+09:00",
+          "tree_id": "5911d879853ed83dd39c6e50595e3e6bee0b4689",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/79a25a8f10a4c5357f2e0f6866a1727f32e39ade"
+        },
+        "date": 1792858162602,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1790244,
+            "range": "± 12321",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 48344403,
+            "range": "± 383533",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31717,
+            "range": "± 92",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 124435,
+            "range": "± 1045",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1819338,
+            "range": "± 12419",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5536225,
+            "range": "± 77607",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5650371,
+            "range": "± 128977",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12400693,
+            "range": "± 128740",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 8842071,
+            "range": "± 79824",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 20040038,
+            "range": "± 293696",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 12881361,
+            "range": "± 292972",
             "unit": "ns/iter"
           }
         ]
