@@ -5,7 +5,6 @@ pub mod oci;
 pub mod remote;
 pub mod scheduler;
 pub mod ui;
-pub mod worker_registry;
 
 use anyhow::{Context, Result};
 use cache::{CacheKey, ComponentCache};
