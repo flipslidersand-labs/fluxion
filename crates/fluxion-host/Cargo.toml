@@ -2,6 +2,7 @@
 name = "fluxion-host"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 rust-version.workspace = true
 
 # #770: lib ターゲットの暗黙ベンチハーネスを無効化する。
