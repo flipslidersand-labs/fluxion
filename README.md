@@ -1,6 +1,6 @@
 # Fluxion
 
-[![CI](https://github.com/flipslidersand/fluxion/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand/fluxion/actions/workflows/ci.yml)
+[![CI](https://github.com/flipslidersand-labs/fluxion/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand-labs/fluxion/actions/workflows/ci.yml)
 ![coverage floor](https://img.shields.io/badge/coverage%20floor-60%25-blue)
 
 Safe Wasm-based job execution engine with capability-controlled sandboxing and DAG scheduling.
@@ -17,7 +17,7 @@ Each job runs as a WebAssembly component — isolated, permission-scoped, and la
 ## Setup & Build
 
 ```bash
-git clone https://github.com/flipslidersand/fluxion
+git clone https://github.com/flipslidersand-labs/fluxion
 cd fluxion
 
 # Build the CLI (use -j2 to avoid OOM — wasmtime is large)
