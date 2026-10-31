@@ -1,0 +1,133 @@
+name: Release
+
+# #424: 事前ビルド済みバイナリ + デモ用 Wasm コンポーネントを配布する。
+#  - タグ(v*) push      : ビルド → 検査 → draft Release を作成(公開は人が行う)
+#  - workflow_dispatch  : ビルド → 検査 → artifact のみ(Release は作らない。タグ無しで検証できる)
+# 手元ビルドは配布しない: バイナリにビルド環境のパス(/home/<user>/...)が埋め込まれるため、
+# CI でビルドし、--remap-path-prefix で消し、残っていれば失敗させる。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 60
+    env:
+      # 実行環境のホーム/ワークスペースのパスを成果物に残さない
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}=.
+        --remap-path-prefix=/home/runner=/home/user
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip1,wasm32-wasip2
+      - name: Install system deps
+        run: |
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            if [ "$i" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+          sudo apt-get install -y build-essential libssl-dev pkg-config
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build
+          cache-bin: true
+      - name: Install cargo-component
+        run: |
+          if ! command -v cargo-component &>/dev/null; then
+            cargo install cargo-component --locked -j2
+          fi
+      - name: Build Wasm components (demo set)
+        # examples/*.yaml が参照するパス(components/<name>/target/wasm32-wasip1/debug/)に合わせて debug ビルド
+        run: |
+          for comp in alloc-bomb file-reader hello pipeline-stage sandbox-probe spin; do
+            (cd components/$comp && cargo component build -j2)
+          done
+          (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
+      - name: Build CLI (release)
+        run: cargo build --release -p fluxion-cli -j2
+      - name: Check no build-environment paths leak into artifacts
+        run: |
+          set -euo pipefail
+          files=(target/release/fluxion)
+          while IFS= read -r f; do files+=("$f"); done < <(find components -name '*.wasm' -path '*/target/*/debug/*' -not -path '*/deps/*')
+          bad=0
+          for f in "${files[@]}"; do
+            n=$(strings -a "$f" | grep -E "/home/|/Users/|${GITHUB_WORKSPACE}" | grep -vc "/home/user" || true)
+            echo "$f: leaked path lines = $n"
+            if [ "$n" -gt 0 ]; then
+              strings -a "$f" | grep -E "/home/|/Users/|${GITHUB_WORKSPACE}" | grep -v "/home/user" | head -5
+              bad=1
+            fi
+          done
+          exit $bad
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then v="${GITHUB_REF_NAME}"; else v="dev-${GITHUB_SHA::7}"; fi
+          d="fluxion-${v}-linux-x86_64"
+          mkdir -p "dist/$d"
+          cp target/release/fluxion LICENSE README.md "dist/$d/"
+          cp -r examples "dist/$d/examples"
+          while IFS= read -r f; do
+            mkdir -p "dist/$d/$(dirname "$f")"
+            cp "$f" "dist/$d/$f"
+          done < <(find components -name '*.wasm' -path '*/target/*/debug/*' -not -path '*/deps/*')
+          tar -C dist -czf "dist/$d.tar.gz" "$d"
+          (cd dist && sha256sum "$d.tar.gz" > "$d.tar.gz.sha256")
+          ls -la dist
+          echo "name=$d" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the packaged binary (resource-limits demo)
+        run: |
+          set -euo pipefail
+          export FLUXION_HOME="$RUNNER_TEMP/fluxion-home"
+          cd "dist/${{ steps.pkg.outputs.name }}"
+          out=$(./fluxion run examples/resource-limits-demo.yaml 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "Timeout: killed after 2s"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # タグ push のときだけ。draft で作るので公開(Publish)は人が行う。
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ${{ vars.GATE_RUNNER }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Prebuilt Linux x86_64 binary + demo Wasm components. Verify with the .sha256 file. Quick start: tar xzf <file> && cd <dir> && ./fluxion run examples/resource-limits-demo.yaml"
