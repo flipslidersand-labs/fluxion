@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793444204620,
+  "lastUpdate": 1793445632528,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -269,6 +269,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 14776102,
             "range": "± 1155369",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2edfdb834a14c128cf87aee8cc8686a6d134de0e",
+          "message": "docs: 事前ビルド済みパッケージの Quick start を追加する (#1) (#5)\n\nRelease 公開後の利用手順(検証・展開・デモ2本)と動作要件を追記。\nRelease が無い間はソースビルドと明記。要件は CI artifact を取得して実測した値\n(glibc 2.39 以上、libssl.so.3)。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T20:16:13+09:00",
+          "tree_id": "89d0912aa8e86d239221bd294a4a606fdd8575a7",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/2edfdb834a14c128cf87aee8cc8686a6d134de0e"
+        },
+        "date": 1793445631953,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1925685,
+            "range": "± 14827",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 53668450,
+            "range": "± 2387470",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 33119,
+            "range": "± 540",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 134488,
+            "range": "± 1137",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 2048249,
+            "range": "± 10361",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 9421368,
+            "range": "± 188262",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 9042795,
+            "range": "± 221482",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 20544544,
+            "range": "± 446347",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 16323035,
+            "range": "± 287505",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 32552793,
+            "range": "± 670772",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 25632455,
+            "range": "± 1529504",
             "unit": "ns/iter"
           }
         ]
