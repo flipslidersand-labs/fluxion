@@ -1419,9 +1419,11 @@ mod helper_tests {
         let missing = home.path().join("missing.yaml");
         {
             let store = RunStore::open_at(&db).unwrap();
-            // next_run_at = 1 (long past) => due immediately.
+            // next_run_at = 1 (long past) => due immediately. Yearly cron: after the claim
+            // next_run_at is months away, so crossing a minute boundary mid-test cannot
+            // make it due again (a per-minute cron made this test flaky).
             store
-                .add_schedule("sched-missing", missing.to_str().unwrap(), "0 * * * * *", 1)
+                .add_schedule("sched-missing", missing.to_str().unwrap(), "0 0 0 1 1 *", 1)
                 .unwrap();
         }
         assert_eq!(
