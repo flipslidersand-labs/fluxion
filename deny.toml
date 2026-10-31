@@ -1,0 +1,40 @@
+# cargo-deny configuration (#291). Run locally: `cargo deny check`
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and yanked crates fail. The CI job is report-only
+# (continue-on-error) for now.
+# `unmaintained = "workspace"` only reports unmaintained crates that are direct
+# dependencies of this workspace. Transitive ones (today: `unsafe-libyaml`,
+# RUSTSEC-2024-0449, via serde_yaml_ng) are deliberately not reported, so there
+# is nothing to `ignore`. If this is ever changed to "all", re-add an ignore
+# entry with a reason and an expiry date for each crate reported.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",                # notify 6 (public-domain dedication)
+    "CDLA-Permissive-2.0",    # webpki-roots (CA data)
+]
+
+[bans]
+# Many duplicate versions exist today (base64, thiserror, getrandom, hashbrown...).
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

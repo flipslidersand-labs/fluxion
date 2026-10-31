@@ -1,0 +1,957 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::Result;
+use rusqlite::{Connection, params};
+
+use crate::state::JobStatus;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS schedules (
+    id            TEXT PRIMARY KEY,
+    workflow_path TEXT NOT NULL,
+    cron_expr     TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    last_run_at   INTEGER,
+    next_run_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runs (
+    id            TEXT PRIMARY KEY,
+    workflow_name TEXT NOT NULL,
+    workflow_path TEXT NOT NULL,
+    started_at    INTEGER NOT NULL,
+    completed_at  INTEGER,
+    status        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS job_states (
+    run_id    TEXT NOT NULL,
+    job_id    TEXT NOT NULL,
+    status    TEXT NOT NULL,
+    elapsed_ms INTEGER,
+    reason    TEXT,
+    PRIMARY KEY (run_id, job_id)
+);
+CREATE TABLE IF NOT EXISTS job_outputs (
+    run_id    TEXT NOT NULL,
+    job_id    TEXT NOT NULL,
+    output    BLOB NOT NULL,
+    size      INTEGER NOT NULL,
+    PRIMARY KEY (run_id, job_id)
+);
+CREATE TABLE IF NOT EXISTS workers (
+    url            TEXT PRIMARY KEY,
+    registered_at  INTEGER NOT NULL,
+    last_health    TEXT
+);
+";
+
+/// Largest single job output kept in the store (bytes). Larger outputs are not
+/// saved (a retry then re-runs that job instead of reusing it). Provisional
+/// value, to be tuned from real output sizes (#387).
+pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Largest total of saved outputs per run (bytes). Provisional (#387).
+pub const MAX_RUN_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Result of [`RunStore::save_output`]. Not saving is not an error: outputs
+/// are an optimisation for `retry`, never a reason to fail a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveOutcome {
+    Saved,
+    /// The output alone exceeds [`MAX_OUTPUT_BYTES`].
+    TooLarge,
+    /// Saving it would push the run past [`MAX_RUN_OUTPUT_BYTES`].
+    RunBudgetExceeded,
+}
+
+pub struct RunStore {
+    conn: Connection,
+}
+
+impl RunStore {
+    /// Construct a `RunStore` from an already-open connection (useful in tests).
+    pub fn from_conn(conn: Connection) -> Self {
+        Self { conn }
+    }
+
+    /// Open (or create) the run store at the default location
+    /// (`<data dir>/runs.db`, see [`crate::paths::data_dir`]).
+    pub fn open() -> Result<Self> {
+        Self::open_at(&Self::default_path()?)
+    }
+
+    /// Open (or create) the run store at `db_path`, creating parent directories.
+    pub fn open_at(db_path: &Path) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(db_path)?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self { conn })
+    }
+
+    /// Default location of the run store DB (`<data dir>/runs.db`).
+    pub fn default_path() -> Result<PathBuf> {
+        Ok(crate::paths::data_dir()?.join("runs.db"))
+    }
+
+    pub fn new_run_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        format!("run-{ms}-{pid}-{seq}")
+    }
+
+    pub fn create_run(
+        &self,
+        run_id: &str,
+        workflow_name: &str,
+        workflow_path: &Path,
+    ) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status)
+             VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![
+                run_id,
+                workflow_name,
+                workflow_path.to_string_lossy().as_ref(),
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_job(&self, run_id: &str, job_id: &str, status: &JobStatus) -> Result<()> {
+        let (label, elapsed_ms, reason) = serialize_status(status);
+        self.conn.execute(
+            "INSERT INTO job_states (run_id, job_id, status, elapsed_ms, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(run_id, job_id) DO UPDATE SET
+               status = excluded.status,
+               elapsed_ms = excluded.elapsed_ms,
+               reason = excluded.reason",
+            params![run_id, job_id, label, elapsed_ms, reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_run(&self, run_id: &str, success: bool) -> Result<()> {
+        let status = if success { "succeeded" } else { "failed" };
+        let now = now_secs();
+        self.conn.execute(
+            "UPDATE runs SET status = ?1, completed_at = ?2 WHERE id = ?3",
+            params![status, now, run_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the workflow path and a map of job_id → JobStatus for a previous run.
+    pub fn load_run(&self, run_id: &str) -> Result<(String, HashMap<String, JobStatus>)> {
+        let workflow_path: String = self
+            .conn
+            .query_row(
+                "SELECT workflow_path FROM runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| anyhow::anyhow!("Run '{}' not found", run_id))?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, status, elapsed_ms, reason FROM job_states WHERE run_id = ?1",
+        )?;
+
+        let jobs = stmt
+            .query_map(params![run_id], |row| {
+                let job_id: String = row.get(0)?;
+                let status: String = row.get(1)?;
+                let elapsed_ms: Option<u64> = row.get(2)?;
+                let reason: Option<String> = row.get(3)?;
+                Ok((job_id, status, elapsed_ms, reason))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(job_id, status, elapsed_ms, reason)| {
+                let elapsed = Duration::from_millis(elapsed_ms.unwrap_or(0));
+                let js = match status.as_str() {
+                    "succeeded" => JobStatus::Succeeded { elapsed },
+                    "failed" => JobStatus::Failed {
+                        elapsed,
+                        reason: reason.unwrap_or_default(),
+                    },
+                    "cancelled" => JobStatus::Cancelled,
+                    "skipped" => JobStatus::Skipped,
+                    _ => JobStatus::Pending,
+                };
+                (job_id, js)
+            })
+            .collect();
+
+        Ok((workflow_path, jobs))
+    }
+
+    /// Fetch metadata for a single run.
+    pub fn get_run(&self, run_id: &str) -> Result<RunDetail> {
+        self.conn
+            .query_row(
+                "SELECT id, workflow_name, workflow_path, started_at, completed_at, status
+                 FROM runs WHERE id = ?1",
+                params![run_id],
+                |row| {
+                    Ok(RunDetail {
+                        id: row.get(0)?,
+                        workflow_name: row.get(1)?,
+                        workflow_path: row.get(2)?,
+                        started_at: row.get(3)?,
+                        completed_at: row.get(4)?,
+                        status: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("Run '{}' not found", run_id))
+    }
+
+    /// Fetch all job records for a run in insertion order.
+    pub fn get_run_jobs(&self, run_id: &str) -> Result<Vec<JobDetail>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, status, elapsed_ms, reason
+             FROM job_states WHERE run_id = ?1 ORDER BY rowid",
+        )?;
+        let jobs = stmt
+            .query_map(params![run_id], |row| {
+                Ok(JobDetail {
+                    job_id: row.get(0)?,
+                    status: row.get(1)?,
+                    elapsed_ms: row.get(2)?,
+                    reason: row.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(jobs)
+    }
+
+    /// Save the output of a finished job so a later `retry` can reuse it.
+    /// Outputs above the size limits are skipped (see [`SaveOutcome`]).
+    /// Saving again for the same `(run_id, job_id)` replaces the earlier output.
+    pub fn save_output(&self, run_id: &str, job_id: &str, output: &[u8]) -> Result<SaveOutcome> {
+        if output.len() > MAX_OUTPUT_BYTES {
+            return Ok(SaveOutcome::TooLarge);
+        }
+        let others: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM job_outputs WHERE run_id = ?1 AND job_id <> ?2",
+            params![run_id, job_id],
+            |row| row.get(0),
+        )?;
+        if others as usize + output.len() > MAX_RUN_OUTPUT_BYTES {
+            return Ok(SaveOutcome::RunBudgetExceeded);
+        }
+        self.conn.execute(
+            "INSERT INTO job_outputs (run_id, job_id, output, size) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(run_id, job_id) DO UPDATE SET
+               output = excluded.output,
+               size = excluded.size",
+            params![run_id, job_id, output, output.len() as i64],
+        )?;
+        Ok(SaveOutcome::Saved)
+    }
+
+    /// All saved outputs of a run, keyed by job id (empty for runs that saved none).
+    pub fn load_outputs(&self, run_id: &str) -> Result<HashMap<String, Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT job_id, output FROM job_outputs WHERE run_id = ?1")?;
+        let rows = stmt
+            .query_map(params![run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<HashMap<String, Vec<u8>>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Delete every saved output of `run_id`. Returns the number of rows deleted.
+    pub fn delete_run_outputs(&self, run_id: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM job_outputs WHERE run_id = ?1", params![run_id])?)
+    }
+
+    /// Delete runs older than `before_days` days, their job records and their
+    /// saved outputs (which may hold sensitive job data). Also removes outputs
+    /// whose run no longer exists. Returns the number of runs deleted.
+    pub fn prune(&self, before_days: u64) -> Result<usize> {
+        let cutoff = now_secs().saturating_sub(before_days * 86400);
+        self.conn.execute(
+            "DELETE FROM job_outputs WHERE run_id IN (
+                SELECT id FROM runs WHERE started_at < ?1
+             )",
+            params![cutoff],
+        )?;
+        // Delete orphaned job_states first (no FK cascade in schema).
+        self.conn.execute(
+            "DELETE FROM job_states WHERE run_id IN (
+                SELECT id FROM runs WHERE started_at < ?1
+             )",
+            params![cutoff],
+        )?;
+        let deleted = self
+            .conn
+            .execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])?;
+        // Orphans (e.g. left behind by a binary that predates job_outputs).
+        self.conn.execute(
+            "DELETE FROM job_outputs WHERE run_id NOT IN (SELECT id FROM runs)",
+            [],
+        )?;
+        Ok(deleted)
+    }
+
+    /// List recent runs, newest first.
+    pub fn list_runs(&self, limit: usize) -> Result<Vec<RunSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_name, started_at, status FROM runs
+             ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(RunSummary {
+                    id: row.get(0)?,
+                    workflow_name: row.get(1)?,
+                    started_at: row.get(2)?,
+                    status: row.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+}
+
+// ── Worker registry ───────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct WorkerEntry {
+    pub url: String,
+    pub registered_at: u64,
+    pub last_health: Option<String>,
+}
+
+impl RunStore {
+    pub fn register_worker(&self, url: &str) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO workers (url, registered_at, last_health)
+             VALUES (?1, ?2, NULL)
+             ON CONFLICT(url) DO NOTHING",
+            params![url, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_worker(&self, url: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM workers WHERE url = ?1", params![url])?;
+        Ok(n)
+    }
+
+    pub fn list_workers(&self) -> Result<Vec<WorkerEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, registered_at, last_health FROM workers ORDER BY registered_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(WorkerEntry {
+                    url: row.get(0)?,
+                    registered_at: row.get(1)?,
+                    last_health: row.get(2)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn update_worker_health(&self, url: &str, healthy: bool) -> Result<()> {
+        let status = if healthy { "healthy" } else { "unreachable" };
+        self.conn.execute(
+            "UPDATE workers SET last_health = ?1 WHERE url = ?2",
+            params![status, url],
+        )?;
+        Ok(())
+    }
+
+    /// Return URLs of all registered workers that are not marked unreachable.
+    pub fn registered_worker_urls(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url FROM workers WHERE last_health IS NULL OR last_health = 'healthy'
+             ORDER BY registered_at",
+        )?;
+        let urls = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(urls)
+    }
+}
+
+// ── Schedule registry ─────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ScheduleEntry {
+    pub id: String,
+    pub workflow_path: String,
+    pub cron_expr: String,
+    pub created_at: u64,
+    pub last_run_at: Option<u64>,
+    pub next_run_at: u64,
+}
+
+impl RunStore {
+    pub fn add_schedule(
+        &self,
+        id: &str,
+        workflow_path: &str,
+        cron_expr: &str,
+        next_run_at: u64,
+    ) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, workflow_path, cron_expr, now, next_run_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_schedule(&self, id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+        Ok(n)
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Return schedules whose `next_run_at` ≤ `now_secs`.
+    pub fn due_schedules(&self) -> Result<Vec<ScheduleEntry>> {
+        let now = now_secs();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workflow_path, cron_expr, created_at, last_run_at, next_run_at
+             FROM schedules WHERE next_run_at <= ?1 ORDER BY next_run_at",
+        )?;
+        let rows = stmt
+            .query_map(params![now], |row| {
+                Ok(ScheduleEntry {
+                    id: row.get(0)?,
+                    workflow_path: row.get(1)?,
+                    cron_expr: row.get(2)?,
+                    created_at: row.get(3)?,
+                    last_run_at: row.get(4)?,
+                    next_run_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Update `last_run_at` and `next_run_at` after a schedule fires.
+    pub fn update_schedule_next(&self, id: &str, last_run_at: u64, next_run_at: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE schedules SET last_run_at = ?1, next_run_at = ?2 WHERE id = ?3",
+            params![last_run_at, next_run_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim a schedule for execution using optimistic locking.
+    ///
+    /// Updates `next_run_at` to `new_next` only if it still equals `old_next`.
+    /// Returns `true` when this process won the claim, `false` when another
+    /// process already advanced `next_run_at` (i.e. duplicate execution avoided).
+    pub fn claim_schedule(&self, id: &str, old_next: u64, new_next: u64) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE schedules SET next_run_at = ?1 WHERE id = ?2 AND next_run_at = ?3",
+            params![new_next, id, old_next],
+        )?;
+        Ok(affected > 0)
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct RunSummary {
+    pub id: String,
+    pub workflow_name: String,
+    pub started_at: u64,
+    pub status: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct RunDetail {
+    pub id: String,
+    pub workflow_name: String,
+    pub workflow_path: String,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
+    pub status: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct JobDetail {
+    pub job_id: String,
+    pub status: String,
+    pub elapsed_ms: Option<u64>,
+    pub reason: Option<String>,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn serialize_status(s: &JobStatus) -> (&'static str, Option<u64>, Option<String>) {
+    match s {
+        JobStatus::Succeeded { elapsed } => ("succeeded", Some(elapsed.as_millis() as u64), None),
+        JobStatus::Failed { elapsed, reason } => (
+            "failed",
+            Some(elapsed.as_millis() as u64),
+            Some(reason.clone()),
+        ),
+        JobStatus::Cancelled => ("cancelled", None, None),
+        JobStatus::Running => ("running", None, None),
+        JobStatus::Skipped => ("skipped", None, None),
+        _ => ("pending", None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── #387: job_outputs ─────────────────────────────────────────────────────
+
+    fn outputs_store() -> (tempfile::TempDir, RunStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::open_at(&dir.path().join("runs.db")).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn job_outputs_roundtrip_and_replace() {
+        let (_d, s) = outputs_store();
+        assert!(s.load_outputs("r1").unwrap().is_empty());
+        assert_eq!(
+            s.save_output("r1", "a", b"one").unwrap(),
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            s.save_output("r1", "b", b"two").unwrap(),
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            s.save_output("r1", "a", b"uno").unwrap(),
+            SaveOutcome::Saved
+        );
+        let got = s.load_outputs("r1").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got["a"], b"uno");
+        assert_eq!(got["b"], b"two");
+        assert!(s.load_outputs("other-run").unwrap().is_empty());
+    }
+
+    #[test]
+    fn job_output_size_limit_boundary() {
+        let (_d, s) = outputs_store();
+        let at_limit = vec![7u8; MAX_OUTPUT_BYTES];
+        let over = vec![7u8; MAX_OUTPUT_BYTES + 1];
+        assert_eq!(
+            s.save_output("r", "ok", &at_limit).unwrap(),
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            s.save_output("r", "big", &over).unwrap(),
+            SaveOutcome::TooLarge
+        );
+        let got = s.load_outputs("r").unwrap();
+        assert!(got.contains_key("ok") && !got.contains_key("big"));
+        // empty outputs are valid
+        assert_eq!(
+            s.save_output("r", "empty", b"").unwrap(),
+            SaveOutcome::Saved
+        );
+    }
+
+    #[test]
+    fn job_output_run_budget_is_enforced_and_replacement_is_not_double_counted() {
+        let (_d, s) = outputs_store();
+        let chunk = vec![1u8; MAX_OUTPUT_BYTES];
+        let fits = MAX_RUN_OUTPUT_BYTES / MAX_OUTPUT_BYTES;
+        for i in 0..fits {
+            assert_eq!(
+                s.save_output("r", &format!("j{i}"), &chunk).unwrap(),
+                SaveOutcome::Saved
+            );
+        }
+        assert_eq!(
+            s.save_output("r", "one-too-many", b"x").unwrap(),
+            SaveOutcome::RunBudgetExceeded
+        );
+        // replacing an existing output with a same-size one stays within budget
+        assert_eq!(
+            s.save_output("r", "j0", &chunk).unwrap(),
+            SaveOutcome::Saved
+        );
+        // another run has its own budget
+        assert_eq!(
+            s.save_output("r2", "j0", &chunk).unwrap(),
+            SaveOutcome::Saved
+        );
+    }
+
+    #[test]
+    fn delete_run_outputs_only_touches_that_run() {
+        let (_d, s) = outputs_store();
+        s.save_output("r1", "a", b"1").unwrap();
+        s.save_output("r1", "b", b"2").unwrap();
+        s.save_output("r2", "a", b"3").unwrap();
+        assert_eq!(s.delete_run_outputs("r1").unwrap(), 2);
+        assert!(s.load_outputs("r1").unwrap().is_empty());
+        assert_eq!(s.load_outputs("r2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_removes_outputs_of_old_runs_and_orphans_but_keeps_recent_ones() {
+        let (_d, s) = outputs_store();
+        s.create_run("old", "wf", Path::new("wf.yaml")).unwrap();
+        s.create_run("new", "wf", Path::new("wf.yaml")).unwrap();
+        s.conn
+            .execute("UPDATE runs SET started_at = 1 WHERE id = 'old'", [])
+            .unwrap();
+        s.save_output("old", "a", b"old-data").unwrap();
+        s.save_output("new", "a", b"new-data").unwrap();
+        s.save_output("ghost", "a", b"orphan").unwrap(); // no such run
+
+        assert_eq!(s.prune(1).unwrap(), 1);
+        assert!(s.load_outputs("old").unwrap().is_empty());
+        assert!(s.load_outputs("ghost").unwrap().is_empty());
+        assert_eq!(s.load_outputs("new").unwrap()["a"], b"new-data");
+    }
+
+    #[test]
+    fn opening_a_db_created_before_job_outputs_is_additive() {
+        // A DB from a binary that predates the job_outputs table.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (
+                    id TEXT PRIMARY KEY, workflow_name TEXT NOT NULL,
+                    workflow_path TEXT NOT NULL, started_at INTEGER NOT NULL,
+                    completed_at INTEGER, status TEXT NOT NULL);
+                 CREATE TABLE job_states (
+                    run_id TEXT NOT NULL, job_id TEXT NOT NULL, status TEXT NOT NULL,
+                    elapsed_ms INTEGER, reason TEXT, PRIMARY KEY (run_id, job_id));
+                 INSERT INTO runs VALUES ('legacy', 'wf', 'wf.yaml', 5, NULL, 'succeeded');
+                 INSERT INTO job_states VALUES ('legacy', 'a', 'succeeded', 3, NULL);",
+            )
+            .unwrap();
+        }
+        let s = RunStore::open_at(&path).unwrap();
+        let (_, states) = s.load_run("legacy").unwrap();
+        assert!(matches!(states.get("a"), Some(JobStatus::Succeeded { .. })));
+        assert!(s.load_outputs("legacy").unwrap().is_empty());
+        assert_eq!(
+            s.save_output("legacy", "a", b"x").unwrap(),
+            SaveOutcome::Saved
+        );
+    }
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn open_at_creates_parent_dirs_and_persists_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("runs.db");
+        {
+            let store = RunStore::open_at(&path).unwrap();
+            store.create_run("r1", "wf", Path::new("wf.yaml")).unwrap();
+        }
+        assert!(path.exists());
+        let reopened = RunStore::open_at(&path).unwrap();
+        assert!(reopened.load_run("r1").is_ok());
+    }
+
+    fn open_tmp() -> RunStore {
+        // Each test gets its own in-file DB via tempfile (rusqlite needs a real file for bundled).
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        // Keep tempfile alive for the duration of the test by leaking it intentionally.
+        // tempfile deletes on drop; we need the file to outlive the connection.
+        std::mem::forget(f);
+        RunStore { conn }
+    }
+
+    // ── #30 prune — before: method does not exist → compile error
+    //               after:  old rows deleted, recent rows kept ───────────────
+
+    // ── #30 prune — before: prune() method does not exist
+    //               after:  old rows deleted, recent rows kept ───────────────
+    //
+    // These tests call store.prune() which is added in the #30 PR.
+    // Enable (remove todo!/panic) once the method is implemented.
+
+    #[test]
+    fn prune_deletes_old_runs_and_keeps_recent() {
+        let store = open_tmp();
+        let old_id = "run-old";
+        let new_id = "run-new";
+
+        let old_ts = now_secs() - 31 * 86400;
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+             VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
+                params![old_id, old_ts],
+            )
+            .unwrap();
+        store
+            .create_run(new_id, "wf", std::path::Path::new("wf.yaml"))
+            .unwrap();
+
+        let deleted = store.prune(30).unwrap();
+        assert_eq!(deleted, 1, "exactly one old run should be pruned");
+
+        let runs = store.list_runs(10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, new_id);
+    }
+
+    #[test]
+    fn prune_also_deletes_orphaned_job_states() {
+        let store = open_tmp();
+        let old_id = "run-orphan";
+        let old_ts = now_secs() - 40 * 86400;
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, workflow_name, workflow_path, started_at, status) \
+             VALUES (?1, 'wf', 'wf.yaml', ?2, 'succeeded')",
+                params![old_id, old_ts],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO job_states (run_id, job_id, status) VALUES (?1, 'fetch', 'succeeded')",
+                params![old_id],
+            )
+            .unwrap();
+
+        store.prune(30).unwrap();
+
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_states WHERE run_id = ?1",
+                params![old_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "orphaned job_states must be deleted with their run"
+        );
+    }
+
+    // ── claim_schedule — optimistic locking ──────────────────────────────────
+
+    fn insert_schedule(store: &RunStore, id: &str, next_run_at: u64) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedules (id, workflow_path, cron_expr, created_at, next_run_at) \
+                 VALUES (?1, 'wf.yaml', '0 * * * * *', 0, ?2)",
+                params![id, next_run_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn claim_schedule_succeeds_when_next_matches() {
+        let store = open_tmp();
+        insert_schedule(&store, "s1", 100);
+        let won = store.claim_schedule("s1", 100, 200).unwrap();
+        assert!(won, "claim should succeed when old_next matches");
+        let row: u64 = store
+            .conn
+            .query_row(
+                "SELECT next_run_at FROM schedules WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, 200, "next_run_at must be advanced to new_next");
+    }
+
+    #[test]
+    fn claim_schedule_fails_when_already_claimed() {
+        let store = open_tmp();
+        insert_schedule(&store, "s2", 100);
+        // First claim advances next_run_at to 200.
+        store.claim_schedule("s2", 100, 200).unwrap();
+        // Second claim with the original old_next should lose.
+        let won = store.claim_schedule("s2", 100, 300).unwrap();
+        assert!(!won, "second claim with stale old_next must return false");
+    }
+
+    #[test]
+    fn claim_schedule_fails_for_missing_id() {
+        let store = open_tmp();
+        let won = store.claim_schedule("nonexistent", 0, 100).unwrap();
+        assert!(!won, "claim on unknown id must return false");
+    }
+
+    // ── worker registry ──────────────────────────────────────────────────────
+
+    #[test]
+    fn register_and_list_workers() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w2:9000").unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers.len(), 2);
+        assert_eq!(workers[0].url, "http://w1:9000");
+        assert!(workers[0].last_health.is_none());
+    }
+
+    #[test]
+    fn register_worker_is_idempotent() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w1:9000").unwrap();
+        assert_eq!(store.list_workers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_worker_deletes_row() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        let removed = store.remove_worker("http://w1:9000").unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.list_workers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_worker_missing_returns_zero() {
+        let store = open_tmp();
+        assert_eq!(store.remove_worker("http://ghost:9000").unwrap(), 0);
+    }
+
+    #[test]
+    fn update_worker_health_sets_status() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.update_worker_health("http://w1:9000", true).unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("healthy"));
+
+        store.update_worker_health("http://w1:9000", false).unwrap();
+        let workers = store.list_workers().unwrap();
+        assert_eq!(workers[0].last_health.as_deref(), Some("unreachable"));
+    }
+
+    #[test]
+    fn registered_worker_urls_excludes_unreachable() {
+        let store = open_tmp();
+        store.register_worker("http://w1:9000").unwrap();
+        store.register_worker("http://w2:9000").unwrap();
+        store.update_worker_health("http://w2:9000", false).unwrap();
+
+        let urls = store.registered_worker_urls().unwrap();
+        assert_eq!(urls, vec!["http://w1:9000".to_string()]);
+    }
+
+    // ── schedule registry ────────────────────────────────────────────────────
+
+    #[test]
+    fn add_list_remove_schedule_roundtrip() {
+        let store = open_tmp();
+        store
+            .add_schedule("sched-1", "wf.yaml", "0 * * * * *", 1000)
+            .unwrap();
+
+        let schedules = store.list_schedules().unwrap();
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].id, "sched-1");
+        assert_eq!(schedules[0].workflow_path, "wf.yaml");
+        assert_eq!(schedules[0].next_run_at, 1000);
+        assert!(schedules[0].last_run_at.is_none());
+
+        let removed = store.remove_schedule("sched-1").unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.list_schedules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_schedule_missing_returns_zero() {
+        let store = open_tmp();
+        assert_eq!(store.remove_schedule("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn due_schedules_filters_by_next_run_at() {
+        let store = open_tmp();
+        let past = now_secs().saturating_sub(60);
+        let future = now_secs() + 3600;
+        store
+            .add_schedule("due", "wf.yaml", "* * * * * *", past)
+            .unwrap();
+        store
+            .add_schedule("not-due", "wf.yaml", "* * * * * *", future)
+            .unwrap();
+
+        let due = store.due_schedules().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "due");
+    }
+
+    #[test]
+    fn update_schedule_next_advances_run_times() {
+        let store = open_tmp();
+        store
+            .add_schedule("s1", "wf.yaml", "* * * * * *", 100)
+            .unwrap();
+        store.update_schedule_next("s1", 100, 200).unwrap();
+
+        let schedules = store.list_schedules().unwrap();
+        assert_eq!(schedules[0].last_run_at, Some(100));
+        assert_eq!(schedules[0].next_run_at, 200);
+    }
+}

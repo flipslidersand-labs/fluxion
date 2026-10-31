@@ -1,0 +1,26 @@
+name: Bug Report
+description: 不具合の報告
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 症状
+      description: 何が起きているか。再現手順があれば記載
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する挙動
+    validations:
+      required: true
+
+  - type: textarea
+    id: cause
+    attributes:
+      label: 原因（わかれば）
+    validations:
+      required: false

@@ -1,0 +1,5 @@
+/target
+components/*/target
+mcp.json
+.mcp.json
+.serena/

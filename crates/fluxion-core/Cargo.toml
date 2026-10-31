@@ -1,0 +1,24 @@
+[package]
+name = "fluxion-core"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+rusqlite   = { workspace = true }
+indexmap         = { version = "2", features = ["serde"] }
+serde_json_path  = { workspace = true }
+
+[[bench]]
+name = "core_bench"
+harness = false
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+indexmap  = { version = "2", features = ["serde"] }

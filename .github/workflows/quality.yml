@@ -1,0 +1,26 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality:
+    # qa-workflows#8: rust-test.yml が PR coverage comment 機能のため
+    # pull-requests: write を要求するようになった。呼び出し元が明示的に
+    # 許可しないと startup_failure になる（default_workflow_permissions が
+    # read のため）。
+    permissions:
+      contents: read
+      pull-requests: write
+    # #241: pinned to a commit SHA (qa-workflows has no tags yet) so a
+    # breaking change on qa-workflows main can't silently break this CI.
+    # Bump deliberately: `gh api repos/flipslidersand-labs/qa-workflows/commits/main --jq .sha`
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@6742b2cd54d0de6387cc1a60d46069518ec331e0
+    with:
+      rust-version: "stable"
+      test-args: "--workspace"
+      clippy-args: "--workspace --all-targets"
+      coverage-threshold: 60

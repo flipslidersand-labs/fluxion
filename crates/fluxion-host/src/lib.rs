@@ -1,0 +1,1682 @@
+pub mod api;
+pub mod cache;
+pub mod metrics;
+pub mod oci;
+pub mod remote;
+pub mod scheduler;
+pub mod ui;
+
+use anyhow::{Context, Result};
+use cache::{CacheKey, ComponentCache};
+use fluxion_core::workflow::PermissionSet;
+use lru::LruCache;
+use oci::OciClient;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+use wasmtime::component::{Component, Linker};
+use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
+use wasmtime_wasi::sockets::SocketAddrUse;
+use wasmtime_wasi::{FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+/// Per-invocation timing breakdown for a single component run.
+#[derive(Debug, Clone, Default)]
+pub struct JobMetrics {
+    /// Time to load and compile the .wasm file via wasmtime.
+    pub compile: Duration,
+    /// Time to link and instantiate the compiled component.
+    pub instantiate: Duration,
+    /// Time spent inside the guest `process()` call.
+    pub execute: Duration,
+}
+
+impl JobMetrics {
+    pub fn total(&self) -> Duration {
+        self.compile + self.instantiate + self.execute
+    }
+}
+
+// Epoch ticker resolution: 10 ticks per second → 100ms granularity.
+const TICKS_PER_SEC: u64 = 10;
+
+wasmtime::component::bindgen!({
+    path: "../../wit/task.wit",
+    world: "task-component",
+});
+
+struct HostState {
+    ctx: WasiCtx,
+    table: ResourceTable,
+    limits: wasmtime::StoreLimits,
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+// Default LRU capacities. Large enough for typical workflows; evicts least-recently-used
+// entries when the limit is reached to prevent unbounded memory growth.
+const MEM_CACHE_CAP: usize = 64;
+const PRE_CACHE_CAP: usize = 64;
+
+pub struct FluxionHost {
+    engine: Engine,
+    /// L2: disk-backed compiled artifact cache (~/.cache/fluxion/components/).
+    disk_cache: ComponentCache,
+    /// L1: LRU cache of compiled components — avoids disk I/O on hot paths.
+    mem_cache: Mutex<LruCache<String, Arc<Component>>>,
+    /// L0: LRU pre-instantiate cache — skips linker setup on repeated calls.
+    pre_cache: Mutex<LruCache<String, Arc<TaskComponentPre<HostState>>>>,
+    /// Signals the epoch ticker thread to stop on drop.
+    ticker_shutdown: Arc<AtomicBool>,
+    /// Optional OCI client for auto-pulling components by registry reference.
+    pub oci_client: Option<Arc<OciClient>>,
+    /// Host-side allowlist for `filesystem.{read,write}` grants (#246).
+    /// `None` = no allowlist (paths are still normalised and checked).
+    fs_allow_roots: Option<Vec<std::path::PathBuf>>,
+}
+
+impl Drop for FluxionHost {
+    fn drop(&mut self) {
+        // The ticker thread wakes every 100ms and exits on the next iteration.
+        self.ticker_shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+impl FluxionHost {
+    /// Returns a weak reference to the ticker shutdown flag.
+    /// Upgrades to None once the ticker thread exits after drop.
+    #[cfg(test)]
+    pub(crate) fn ticker_weak(&self) -> std::sync::Weak<AtomicBool> {
+        Arc::downgrade(&self.ticker_shutdown)
+    }
+
+    pub fn new() -> Result<Self> {
+        Self::with_cache(ComponentCache::try_new()?)
+    }
+
+    /// Like [`FluxionHost::new`], but keeps the on-disk compiled-component cache
+    /// in exactly `dir` instead of the default location (see
+    /// [`ComponentCache::try_new`]). Intended for tests and embedders.
+    pub fn with_cache_dir(dir: impl Into<std::path::PathBuf>) -> Result<Self> {
+        Self::with_cache(ComponentCache::with_dir(dir.into()))
+    }
+
+    fn with_cache(disk_cache: ComponentCache) -> Result<Self> {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        // Epoch interruption allows the host to kill a running Wasm guest at any
+        // loop back-edge or function call — the only way to stop CPU-bound guests.
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config)?;
+
+        // Background thread advances the epoch counter every 100ms.
+        // Exits when ticker_shutdown is set (FluxionHost::drop).
+        let ticker_shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&ticker_shutdown);
+        let ticker_engine = engine.clone();
+        std::thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1000 / TICKS_PER_SEC));
+                if !thread_shutdown.load(Ordering::Relaxed) {
+                    ticker_engine.increment_epoch();
+                }
+            }
+        });
+
+        Ok(Self {
+            engine,
+            disk_cache,
+            mem_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(MEM_CACHE_CAP).expect("MEM_CACHE_CAP is non-zero"),
+            )),
+            pre_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(PRE_CACHE_CAP).expect("PRE_CACHE_CAP is non-zero"),
+            )),
+            ticker_shutdown,
+            oci_client: None,
+            fs_allow_roots: None,
+        })
+    }
+
+    /// Restrict every `filesystem.{read,write}` grant to paths that resolve
+    /// (after `canonicalize`, i.e. with symlinks followed) to somewhere under
+    /// one of `roots`. Grants outside the roots make the run fail.
+    pub fn with_fs_allow_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        self.fs_allow_roots = Some(
+            roots
+                .into_iter()
+                .map(|r| r.canonicalize().unwrap_or(r))
+                .collect(),
+        );
+        self
+    }
+
+    /// Attach an `OciClient` so `run_from_oci()` can auto-pull components.
+    pub fn with_oci_client(mut self, client: OciClient) -> Self {
+        self.oci_client = Some(Arc::new(client));
+        self
+    }
+
+    /// Pull a Wasm component from an OCI registry and execute it.
+    ///
+    /// The pulled bytes are cached in L1 + L2 by digest so repeated calls for
+    /// the same `reference` hit the LRU without re-fetching from the registry.
+    ///
+    /// `repository` and `reference` follow OCI conventions, e.g.
+    /// `("org/hello", "v1.0")`.
+    ///
+    /// Takes `self: Arc<Self>` (matching every other execution call site in
+    /// this crate — scheduler.rs, fluxion-worker) because the actual
+    /// component run happens on `spawn_blocking`: `run_component_with_key` is
+    /// synchronous and CPU-bound, and running it inline on the async task
+    /// would block the tokio worker thread — and every other task scheduled
+    /// on it — until the epoch-interrupt timeout (#233).
+    pub async fn run_from_oci(
+        self: Arc<Self>,
+        repository: &str,
+        reference: &str,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+        env: &HashMap<String, String>,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
+        let client = self
+            .oci_client
+            .as_ref()
+            .context("no OciClient configured — call FluxionHost::with_oci_client() first")?;
+
+        let wasm_bytes = client
+            .pull(repository, reference)
+            .await
+            .with_context(|| format!("OCI pull {repository}:{reference}"))?;
+
+        // Derive the digest key from the pulled bytes so the LRU + disk cache
+        // can be keyed by content hash rather than re-hashing on every call.
+        use sha2::{Digest as _, Sha256};
+        let hex: String = Sha256::digest(&wasm_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let cache_key = CacheKey::Digest(format!("sha256:{hex}"));
+
+        let perms = perms.clone();
+        let env = env.clone();
+        let host = self;
+        tokio::task::spawn_blocking(move || {
+            host.run_component_with_key(&wasm_bytes, cache_key, input, &perms, &env)
+        })
+        .await
+        .context("run_from_oci: blocking task failed")?
+    }
+
+    /// Like `run_component_measured` but accepts raw wasm bytes + an explicit cache key.
+    ///
+    /// Used by `run_from_oci` to avoid re-hashing OCI-pulled bytes and to key
+    /// the LRU by digest rather than the slower path-based hash.
+    pub fn run_component_with_key(
+        &self,
+        wasm_bytes: &[u8],
+        cache_key: CacheKey,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+        env: &HashMap<String, String>,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
+        tracing::info!(
+            target: "fluxion.audit",
+            fs_read  = ?perms.filesystem.read,
+            fs_write = ?perms.filesystem.write,
+            net_allow = ?perms.network.allow,
+            memory_mb = perms.limits.memory_mb,
+            timeout_secs = perms.limits.timeout_secs,
+            "permission_grant"
+        );
+
+        let ctx = build_wasi_ctx(perms, env, self.fs_allow_roots.as_deref())?;
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
+            .build();
+        let state = HostState {
+            ctx,
+            table: ResourceTable::new(),
+            limits,
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+        store.set_epoch_deadline(perms.limits.timeout_secs * TICKS_PER_SEC);
+        store.epoch_deadline_trap();
+
+        let key = cache_key.as_str_key(wasm_bytes);
+
+        let t0 = Instant::now();
+        let component: Arc<Component> = {
+            if let Some(c) = self
+                .mem_cache
+                .lock()
+                .expect("mem_cache lock poisoned")
+                .get(&key)
+            {
+                Arc::clone(c)
+            } else {
+                let c = Arc::new(
+                    match self
+                        .disk_cache
+                        .load_by_key(&self.engine, &cache_key, wasm_bytes)
+                    {
+                        Some(c) => c,
+                        None => {
+                            self.disk_cache
+                                .store_by_key(&self.engine, &cache_key, wasm_bytes)?
+                        }
+                    },
+                );
+                self.mem_cache
+                    .lock()
+                    .expect("mem_cache lock poisoned")
+                    .put(key.clone(), Arc::clone(&c));
+                c
+            }
+        };
+        let compile = t0.elapsed();
+
+        let t1 = Instant::now();
+        let pre: Arc<TaskComponentPre<HostState>> = {
+            if let Some(p) = self
+                .pre_cache
+                .lock()
+                .expect("pre_cache lock poisoned")
+                .get(&key)
+            {
+                Arc::clone(p)
+            } else {
+                let mut linker: Linker<HostState> = Linker::new(&self.engine);
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
+                self.pre_cache
+                    .lock()
+                    .expect("pre_cache lock poisoned")
+                    .put(key, Arc::clone(&p));
+                p
+            }
+        };
+        let instance = pre.instantiate(&mut store).map_err(|e| {
+            let e: anyhow::Error = e.into(); // wasmtime::Error -> anyhow (wasmtime 42+)
+            if is_oom_error(&e) {
+                anyhow::anyhow!(
+                    "OOM: component exceeded memory_mb={} limit ({})",
+                    perms.limits.memory_mb,
+                    e
+                )
+            } else if is_epoch_trap(&e) {
+                // The deadline is set before compilation, which the epoch
+                // cannot interrupt; a slow compile can therefore exhaust it
+                // so the trap fires here rather than in the call (#267).
+                anyhow::anyhow!(
+                    "Timeout: killed after {}s (epoch interrupt)",
+                    perms.limits.timeout_secs
+                )
+            } else {
+                e
+            }
+        })?;
+        let instantiate = t1.elapsed();
+
+        let task_input = exports::fluxion::task::processor::TaskInput {
+            content: input,
+            metadata: vec![],
+        };
+        let t2 = Instant::now();
+        let call_result = instance
+            .fluxion_task_processor()
+            .call_process(&mut store, &task_input)
+            .map_err(anyhow::Error::from);
+        let execute = t2.elapsed();
+
+        let metrics = JobMetrics {
+            compile,
+            instantiate,
+            execute,
+        };
+        match call_result {
+            Ok(Err(e)) => anyhow::bail!("Component error: {}", e),
+            Ok(Ok(output)) => Ok((output.content, metrics)),
+            Err(trap) => {
+                if is_epoch_trap(&trap) {
+                    anyhow::bail!(
+                        "Timeout: killed after {}s (epoch interrupt)",
+                        perms.limits.timeout_secs
+                    )
+                } else {
+                    Err(trap)
+                }
+            }
+        }
+    }
+
+    pub fn run_component(
+        &self,
+        wasm_path: impl AsRef<Path>,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+    ) -> Result<Vec<u8>> {
+        let (output, _) = self.run_component_measured(
+            wasm_path,
+            input,
+            perms,
+            &std::collections::HashMap::new(),
+        )?;
+        Ok(output)
+    }
+
+    /// Like `run_component` but also returns per-phase timing metrics.
+    pub fn run_component_measured(
+        &self,
+        wasm_path: impl AsRef<Path>,
+        input: Vec<u8>,
+        perms: &PermissionSet,
+        env: &std::collections::HashMap<String, String>,
+    ) -> Result<(Vec<u8>, JobMetrics)> {
+        // Emit OTel audit event for the permission set being applied.
+        tracing::info!(
+            target: "fluxion.audit",
+            fs_read  = ?perms.filesystem.read,
+            fs_write = ?perms.filesystem.write,
+            net_allow = ?perms.network.allow,
+            memory_mb = perms.limits.memory_mb,
+            timeout_secs = perms.limits.timeout_secs,
+            "permission_grant"
+        );
+
+        let ctx = build_wasi_ctx(perms, env, self.fs_allow_roots.as_deref())?;
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(perms.limits.memory_mb as usize * 1024 * 1024)
+            .build();
+
+        let state = HostState {
+            ctx,
+            table: ResourceTable::new(),
+            limits,
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+
+        // Set the epoch deadline so CPU-bound guests are killed after timeout_secs.
+        // epoch_deadline_trap() makes the Wasm trap (propagated as Err) when the
+        // deadline fires, which terminates the blocking thread instead of leaking it.
+        store.set_epoch_deadline(perms.limits.timeout_secs * TICKS_PER_SEC);
+        store.epoch_deadline_trap();
+
+        let wasm_bytes = std::fs::read(wasm_path.as_ref())?;
+        let key = cache::wasm_key(&wasm_bytes);
+
+        // ── compile phase (L1 LRU mem → L2 disk → full compile) ─────────────
+        let t0 = Instant::now();
+        let component: Arc<Component> = {
+            if let Some(c) = self
+                .mem_cache
+                .lock()
+                .expect("mem_cache lock poisoned")
+                .get(&key)
+            {
+                Arc::clone(c)
+            } else {
+                let c = Arc::new(match self.disk_cache.load(&self.engine, &wasm_bytes) {
+                    Some(c) => c,
+                    None => self.disk_cache.store(&self.engine, &wasm_bytes)?,
+                });
+                self.mem_cache
+                    .lock()
+                    .expect("mem_cache lock poisoned")
+                    .put(key.clone(), Arc::clone(&c));
+                c
+            }
+        };
+        let compile = t0.elapsed();
+
+        // ── instantiate phase (L0 LRU pre_cache → build once per component) ──
+        let t1 = Instant::now();
+        let pre: Arc<TaskComponentPre<HostState>> = {
+            if let Some(p) = self
+                .pre_cache
+                .lock()
+                .expect("pre_cache lock poisoned")
+                .get(&key)
+            {
+                Arc::clone(p)
+            } else {
+                let mut linker: Linker<HostState> = Linker::new(&self.engine);
+                wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+                let p = Arc::new(TaskComponentPre::new(linker.instantiate_pre(&component)?)?);
+                self.pre_cache
+                    .lock()
+                    .expect("pre_cache lock poisoned")
+                    .put(key, Arc::clone(&p));
+                p
+            }
+        };
+        let instance = pre.instantiate(&mut store).map_err(|e| {
+            let e: anyhow::Error = e.into(); // wasmtime::Error -> anyhow (wasmtime 42+)
+            if is_oom_error(&e) {
+                anyhow::anyhow!(
+                    "OOM: component exceeded memory_mb={} limit ({})",
+                    perms.limits.memory_mb,
+                    e
+                )
+            } else if is_epoch_trap(&e) {
+                // The deadline is set before compilation, which the epoch
+                // cannot interrupt; a slow compile can therefore exhaust it
+                // so the trap fires here rather than in the call (#267).
+                anyhow::anyhow!(
+                    "Timeout: killed after {}s (epoch interrupt)",
+                    perms.limits.timeout_secs
+                )
+            } else {
+                e
+            }
+        })?;
+        let instantiate = t1.elapsed();
+
+        let task_input = exports::fluxion::task::processor::TaskInput {
+            content: input,
+            metadata: vec![],
+        };
+
+        let t2 = Instant::now();
+        let call_result = instance
+            .fluxion_task_processor()
+            .call_process(&mut store, &task_input)
+            .map_err(anyhow::Error::from);
+        let execute = t2.elapsed();
+
+        let metrics = JobMetrics {
+            compile,
+            instantiate,
+            execute,
+        };
+
+        match call_result {
+            // Clean component-level error (returned via Result<_, String>)
+            Ok(Err(e)) => anyhow::bail!("Component error: {}", e),
+            Ok(Ok(output)) => Ok((output.content, metrics)),
+            // Trap from the Wasm runtime — distinguish timeout from other traps
+            Err(trap) => {
+                if is_epoch_trap(&trap) {
+                    anyhow::bail!(
+                        "Timeout: killed after {}s (epoch interrupt)",
+                        perms.limits.timeout_secs
+                    )
+                } else {
+                    Err(trap)
+                }
+            }
+        }
+    }
+}
+
+// Detects whether an error originates from a StoreLimits memory cap.
+fn is_oom_error(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("exceeds memory limits") || s.contains("memory allocation failed")
+}
+
+// Detects whether an anyhow error originates from a wasmtime epoch interrupt trap.
+fn is_epoch_trap(e: &anyhow::Error) -> bool {
+    // wasmtime surfaces the epoch interrupt as Trap::Interrupt in the error chain.
+    for cause in e.chain() {
+        if let Some(trap) = cause.downcast_ref::<wasmtime::Trap>()
+            && *trap == wasmtime::Trap::Interrupt
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// An entry in the network allowlist: either an exact IP:port or all ports on an IP.
+#[derive(Debug)]
+enum NetworkEntry {
+    Exact(SocketAddr),
+    AnyPort(IpAddr),
+}
+
+impl NetworkEntry {
+    fn matches(&self, addr: SocketAddr) -> bool {
+        match self {
+            Self::Exact(a) => *a == addr,
+            Self::AnyPort(ip) => *ip == addr.ip(),
+        }
+    }
+}
+
+fn parse_network_entry(s: &str) -> Option<NetworkEntry> {
+    if let Ok(a) = s.parse::<SocketAddr>() {
+        return Some(NetworkEntry::Exact(a));
+    }
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        return Some(NetworkEntry::AnyPort(ip));
+    }
+    None
+}
+
+/// The implicit ephemeral bind that a `connect` performs in wasmtime-wasi 48
+/// (wildcard address, port 0). It is also indistinguishable from an explicit
+/// guest `bind(0.0.0.0:0)` / `bind([::]:0)`, so those pass too. Listen and
+/// send/receive (`TcpListen`, `UdpSend`, `UdpReceive`) are never exempt.
+fn is_implicit_bind(addr: SocketAddr, use_: SocketAddrUse) -> bool {
+    matches!(use_, SocketAddrUse::TcpBind | SocketAddrUse::UdpBind)
+        && addr.ip().is_unspecified()
+        && addr.port() == 0
+}
+
+/// Pure decision of the `socket_addr_check` callback. An empty allowlist denies
+/// everything (the callback is never installed in that case; default is deny).
+fn addr_allowed(entries: &[NetworkEntry], addr: SocketAddr, use_: SocketAddrUse) -> bool {
+    !entries.is_empty() && (is_implicit_bind(addr, use_) || entries.iter().any(|e| e.matches(addr)))
+}
+
+// DNS resolution cache: maps raw allowlist entry → (resolved IPs, cache timestamp).
+#[allow(clippy::type_complexity)]
+static DNS_CACHE: LazyLock<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Resolve one allowlist entry to IP-based strings.
+///
+/// Pure IP entries (e.g. `"192.0.2.1:443"`, `"192.0.2.1"`) pass through unchanged.
+/// Hostname entries (e.g. `"api.example.com:443"`) are resolved via the OS resolver
+/// and the resolved IPs are cached for [`DNS_CACHE_TTL`].
+///
+/// If resolution fails the entry resolves to an empty list (= deny-all for that entry).
+async fn resolve_entry(s: &str) -> Vec<String> {
+    if parse_network_entry(s).is_some() {
+        return vec![s.to_string()];
+    }
+
+    // Split "hostname:port" or plain "hostname".
+    let (host, port): (String, Option<u16>) = if let Some((h, p)) = s.rsplit_once(':') {
+        match p.parse::<u16>() {
+            Ok(n) => (h.to_string(), Some(n)),
+            Err(_) => (s.to_string(), None),
+        }
+    } else {
+        (s.to_string(), None)
+    };
+
+    // Check TTL cache.
+    {
+        let cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
+        #[allow(clippy::collapsible_if)]
+        if let Some((ips, ts)) = cache.get(s)
+            && ts.elapsed() < DNS_CACHE_TTL
+        {
+            return ips
+                .iter()
+                .map(|ip| match port {
+                    // SocketAddr's Display brackets IPv6 correctly (`[::1]:12345`);
+                    // formatting `IpAddr` + `:port` directly produces the
+                    // ambiguous/invalid `::1:12345` for IPv6 hosts (#220 —
+                    // observed on GitHub Actions runners where "localhost"
+                    // resolves to `::1` before `127.0.0.1`).
+                    Some(p) => SocketAddr::new(*ip, p).to_string(),
+                    None => ip.to_string(),
+                })
+                .collect();
+        }
+    }
+
+    let lookup_target = format!("{}:{}", host, port.unwrap_or(0));
+    match tokio::net::lookup_host(&lookup_target).await {
+        Ok(addrs) => {
+            // Deduplicate IPs across multiple A/AAAA records.
+            let mut seen = std::collections::HashSet::new();
+            let ips: Vec<IpAddr> = addrs
+                .map(|a| a.ip())
+                .filter(|ip| seen.insert(*ip))
+                .collect();
+
+            let result: Vec<String> = ips
+                .iter()
+                .map(|ip| match port {
+                    // SocketAddr's Display brackets IPv6 correctly (`[::1]:12345`);
+                    // formatting `IpAddr` + `:port` directly produces the
+                    // ambiguous/invalid `::1:12345` for IPv6 hosts (#220 —
+                    // observed on GitHub Actions runners where "localhost"
+                    // resolves to `::1` before `127.0.0.1`).
+                    Some(p) => SocketAddr::new(*ip, p).to_string(),
+                    None => ip.to_string(),
+                })
+                .collect();
+
+            DNS_CACHE
+                .lock()
+                .expect("DNS_CACHE lock poisoned")
+                .insert(s.to_string(), (ips, Instant::now()));
+            result
+        }
+        Err(e) => {
+            // DNS failure → no IPs → this entry becomes deny-all (safe default).
+            tracing::warn!(entry = %s, error = %e, "network.allow: DNS resolution failed; entry blocked");
+            vec![]
+        }
+    }
+}
+
+/// Expand all network allowlist entries to IP-based strings.
+///
+/// Pure IP entries pass through unchanged. Hostname entries are resolved via DNS
+/// with a 60-second in-process cache. Unresolvable entries are dropped (safe fail).
+pub async fn resolve_network_allow(allow: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in allow {
+        out.extend(resolve_entry(entry).await);
+    }
+    out
+}
+
+/// Resolve a DNS SRV record to a list of `http://host:port` worker URLs.
+///
+/// Returns an empty `Vec` (not an error) when the SRV query fails, so the
+/// caller can fall back to the static worker list without interruption.
+///
+/// Order (deterministic, #427): priority ascending, then weight descending
+/// (weight 0 last within a priority, RFC 2782), then target and port. URLs always
+/// use `http://`.
+pub async fn resolve_srv_workers(srv_name: &str) -> Vec<String> {
+    use hickory_resolver::Resolver;
+    match Resolver::builder_tokio().and_then(|b| b.build()) {
+        Ok(resolver) => lookup_srv_urls(&resolver, srv_name).await,
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: resolver creation failed, using static workers");
+            vec![]
+        }
+    }
+}
+
+/// Like [`resolve_srv_workers`] but with an explicit resolver configuration
+/// (name servers), so the lookup can be pointed at a specific DNS server.
+pub async fn resolve_srv_workers_with(
+    srv_name: &str,
+    config: hickory_resolver::config::ResolverConfig,
+) -> Vec<String> {
+    use hickory_resolver::{Resolver, net::runtime::TokioRuntimeProvider};
+    match Resolver::builder_with_config(config, TokioRuntimeProvider::default()).build() {
+        Ok(resolver) => lookup_srv_urls(&resolver, srv_name).await,
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: resolver creation failed, using static workers");
+            vec![]
+        }
+    }
+}
+
+async fn lookup_srv_urls<P: hickory_resolver::net::runtime::RuntimeProvider>(
+    resolver: &hickory_resolver::Resolver<P>,
+    srv_name: &str,
+) -> Vec<String> {
+    use hickory_resolver::proto::rr::RData;
+    match resolver.srv_lookup(srv_name).await {
+        Ok(lookup) => {
+            // (priority, weight, target, port)
+            let mut recs: Vec<(u16, u16, String, u16)> = Vec::new();
+            for record in lookup.answers() {
+                let RData::SRV(record) = &record.data else {
+                    continue;
+                };
+                let target = record.target.to_utf8();
+                let target = target.trim_end_matches('.').to_string();
+                recs.push((record.priority, record.weight, target, record.port));
+            }
+            // Deterministic stand-in for RFC 2782's weighted random selection:
+            // a lower priority value is preferred; within a priority a higher
+            // weight comes first, so weight 0 ("very small chance") is last.
+            recs.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(b.1.cmp(&a.1))
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then(a.3.cmp(&b.3))
+            });
+            let urls: Vec<String> = recs
+                .into_iter()
+                .map(|(_, _, target, port)| format!("http://{target}:{port}"))
+                .collect();
+            tracing::info!(%srv_name, count = urls.len(), "DNS SRV: resolved workers");
+            urls
+        }
+        Err(e) => {
+            tracing::warn!(%srv_name, error = %e, "DNS SRV: query failed, using static workers");
+            vec![]
+        }
+    }
+}
+
+/// Verify that `wasm_path` matches the expected SHA-256 hex digest.
+///
+/// Returns `Ok(())` when digest matches or `expected` is `None`.
+/// Returns `Err` when the file cannot be read or the digest does not match.
+pub fn verify_component_digest(wasm_path: impl AsRef<Path>, expected: Option<&str>) -> Result<()> {
+    let Some(expected_hex) = expected else {
+        return Ok(());
+    };
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(wasm_path.as_ref())
+        .with_context(|| format!("failed to read {:?} for digest check", wasm_path.as_ref()))?;
+    let hash = Sha256::digest(&bytes);
+    let actual: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    anyhow::ensure!(
+        actual.eq_ignore_ascii_case(expected_hex),
+        "SHA-256 mismatch for {:?}: expected {}, got {}",
+        wasm_path.as_ref(),
+        expected_hex,
+        actual
+    );
+    Ok(())
+}
+
+/// Validate and resolve a filesystem grant to the real host path to preopen (#246).
+///
+/// Rejects relative paths, `..` components and the filesystem root, resolves
+/// symlinks via `canonicalize`, and (when `allow_roots` is set) requires the
+/// resolved path to be under an allowed root. With `create`, missing
+/// directories are created only after the nearest existing ancestor has been
+/// checked, and the final path is re-checked. Returns `Ok(None)` for a
+/// non-existent read path (nothing to preopen).
+fn resolve_fs_grant(
+    path: &Path,
+    allow_roots: Option<&[std::path::PathBuf]>,
+    create: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    if let Some(reason) = fluxion_core::workflow::lexical_path_violation(path) {
+        anyhow::bail!("invalid filesystem permission {:?}: {}", path, reason);
+    }
+    let check = |real: &Path| -> Result<()> {
+        anyhow::ensure!(
+            real.parent().is_some(),
+            "filesystem permission {:?} resolves to the filesystem root",
+            path
+        );
+        if let Some(roots) = allow_roots {
+            anyhow::ensure!(
+                roots.iter().any(|r| real.starts_with(r)),
+                "filesystem permission {:?} (resolves to {:?}) is outside the allowed roots",
+                path,
+                real
+            );
+        }
+        Ok(())
+    };
+
+    if create {
+        // Resolve the deepest existing ancestor and check it before creating anything.
+        let mut existing = path;
+        let mut tail = Vec::new();
+        while !existing.exists() {
+            tail.push(existing.file_name().context("invalid filesystem path")?);
+            existing = existing.parent().context("invalid filesystem path")?;
+        }
+        let mut projected = existing.canonicalize()?;
+        for part in tail.iter().rev() {
+            projected.push(part);
+        }
+        check(&projected)?;
+        std::fs::create_dir_all(&projected)
+            .with_context(|| format!("Failed to create write dir {:?}", path))?;
+    } else if !path.exists() {
+        return Ok(None);
+    }
+    let real = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve filesystem permission {:?}", path))?;
+    check(&real)?;
+    Ok(Some(real))
+}
+
+fn build_wasi_ctx(
+    perms: &PermissionSet,
+    env: &std::collections::HashMap<String, String>,
+    fs_allow_roots: Option<&[std::path::PathBuf]>,
+) -> Result<WasiCtx> {
+    let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdout().inherit_stderr();
+    for (k, v) in env {
+        builder.env(k, v);
+    }
+
+    // Filesystem: preopen read dirs. The guest-visible path stays as requested;
+    // the host side preopens the canonical (symlink-resolved) path (#246).
+    for path in &perms.filesystem.read {
+        if let Some(real) = resolve_fs_grant(path, fs_allow_roots, false)? {
+            let guest = path.to_string_lossy().to_string();
+            builder.preopened_dir(&real, &guest, FsPerms::ReadOnly)?;
+        }
+    }
+
+    // Filesystem: preopen read-write dirs (created on demand, after validation)
+    for path in &perms.filesystem.write {
+        let real = resolve_fs_grant(path, fs_allow_roots, true)?
+            .with_context(|| format!("write dir {:?} could not be resolved", path))?;
+        let guest = path.to_string_lossy().to_string();
+        builder.preopened_dir(&real, &guest, FsPerms::ReadWrite)?;
+    }
+
+    // Network capability gate.
+    // SocketAddrCheck::default() already returns false for every address, so
+    // deny-all requires no extra work. We only install a check when an explicit
+    // allowlist is provided.
+    if !perms.network.allow.is_empty() {
+        let entries: Vec<NetworkEntry> = perms
+            .network
+            .allow
+            .iter()
+            .filter_map(|s| parse_network_entry(s))
+            .collect();
+
+        anyhow::ensure!(
+            !entries.is_empty(),
+            "network.allow has entries but none resolved to a valid IP address. \
+             Pass the allow list through resolve_network_allow() before calling this function."
+        );
+
+        // wasmtime-wasi 48 denies creating TCP/UDP sockets by default (#13936), so
+        // enable them explicitly; the allowlist check below still gates every address.
+        builder.allow_tcp(true).allow_udp(true);
+        // All entries at this point are IP-based (resolved by resolve_network_allow).
+        builder.socket_addr_check(move |addr, use_| {
+            let implicit_bind = is_implicit_bind(addr, use_);
+            let ok = addr_allowed(&entries, addr, use_);
+            if implicit_bind {
+                // Not a destination, so not an audit event; record it for debugging.
+                tracing::debug!(target: "fluxion.audit", %addr, kind = ?use_, "wildcard_bind_exempt");
+            } else if ok {
+                tracing::info!(target: "fluxion.audit", %addr, "network_allow");
+            } else {
+                tracing::warn!(target: "fluxion.audit", %addr, "network_deny");
+            }
+            Box::pin(async move { ok })
+        });
+    }
+
+    Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── #403 cache directory injection ───────────────────────────────────────
+
+    #[test]
+    fn with_cache_dir_keeps_the_disk_cache_in_the_given_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cwasm");
+        let host = FluxionHost::with_cache_dir(&dir).unwrap();
+        assert_eq!(host.disk_cache.dir, dir);
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn new_still_uses_the_default_cache_directory() {
+        // `new()` delegates to `with_cache(ComponentCache::try_new())`, so it
+        // must land exactly where `ComponentCache::try_new()` resolves.
+        let host = FluxionHost::new().unwrap();
+        assert_eq!(host.disk_cache.dir, ComponentCache::try_new().unwrap().dir);
+    }
+
+    // ── #246 filesystem grant validation ─────────────────────────────────────
+
+    fn fs_perms(read: &[&Path], write: &[&Path]) -> PermissionSet {
+        let mut p = PermissionSet::default();
+        p.filesystem.read = read.iter().map(|x| x.to_path_buf()).collect();
+        p.filesystem.write = write.iter().map(|x| x.to_path_buf()).collect();
+        p
+    }
+
+    fn ctx_for(p: &PermissionSet, roots: Option<&[std::path::PathBuf]>) -> Result<WasiCtx> {
+        build_wasi_ctx(p, &HashMap::new(), roots)
+    }
+
+    #[test]
+    fn fs_grant_rejects_root_relative_and_parent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dotdot = tmp.path().join("..");
+        for bad in [Path::new("/"), Path::new("rel/dir"), dotdot.as_path()] {
+            assert!(
+                ctx_for(&fs_perms(&[bad], &[]), None).is_err(),
+                "read {bad:?}"
+            );
+            assert!(
+                ctx_for(&fs_perms(&[], &[bad]), None).is_err(),
+                "write {bad:?}"
+            );
+        }
+        // Nothing was created for rejected write grants.
+        assert!(!Path::new("rel/dir").exists());
+    }
+
+    #[test]
+    fn fs_grant_allowlist_enforced() {
+        let base = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let roots = vec![base.path().canonicalize().unwrap()];
+        let inside = base.path().join("work/sub");
+        assert!(ctx_for(&fs_perms(&[], &[&inside]), Some(&roots)).is_ok());
+        assert!(inside.is_dir());
+
+        let outside = other.path().join("new-dir");
+        assert!(ctx_for(&fs_perms(&[], &[&outside]), Some(&roots)).is_err());
+        assert!(!outside.exists(), "must not create dirs outside the roots");
+        assert!(ctx_for(&fs_perms(&[other.path()], &[]), Some(&roots)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_grant_symlink_escape_rejected() {
+        let base = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let roots = vec![base.path().canonicalize().unwrap()];
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(other.path(), &link).unwrap();
+
+        // Existing symlink pointing outside.
+        assert!(ctx_for(&fs_perms(&[&link], &[]), Some(&roots)).is_err());
+        assert!(ctx_for(&fs_perms(&[], &[&link]), Some(&roots)).is_err());
+        // New directory below an escaping symlink must not be created.
+        let via = link.join("created");
+        assert!(ctx_for(&fs_perms(&[], &[&via]), Some(&roots)).is_err());
+        assert!(!other.path().join("created").exists());
+
+        // Symlink to the filesystem root is rejected even without an allowlist.
+        let rootlink = base.path().join("rootlink");
+        std::os::unix::fs::symlink("/", &rootlink).unwrap();
+        assert!(ctx_for(&fs_perms(&[&rootlink], &[]), None).is_err());
+    }
+
+    // ── #67 SHA-256 component digest verification ─────────────────────────────
+
+    #[test]
+    fn verify_digest_passes_when_none() {
+        // No expected hash → verification always passes.
+        assert!(verify_component_digest("/nonexistent/path.wasm", None).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_missing_file() {
+        let result = verify_component_digest("/nonexistent/missing.wasm", Some("deadbeef"));
+        assert!(result.is_err(), "missing file must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("failed to read"),
+            "error should mention read failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_digest_passes_on_correct_hash() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let hash = Sha256::digest(b"hello wasm");
+        let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+        assert!(verify_component_digest(f.path(), Some(&hex)).is_ok());
+    }
+
+    #[test]
+    fn verify_digest_fails_on_wrong_hash() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello wasm").unwrap();
+        let result = verify_component_digest(
+            f.path(),
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        );
+        assert!(result.is_err(), "wrong hash must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("mismatch"),
+            "error must mention mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_digest_is_case_insensitive() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"case test").unwrap();
+        let hash = Sha256::digest(b"case test");
+        let upper_hex: String = hash.iter().map(|b| format!("{:02X}", b)).collect();
+        assert!(
+            verify_component_digest(f.path(), Some(&upper_hex)).is_ok(),
+            "uppercase hex must match"
+        );
+    }
+
+    #[test]
+    fn parse_exact_addr() {
+        let e = parse_network_entry("93.184.216.34:443").unwrap();
+        assert!(matches!(e, NetworkEntry::Exact(_)));
+    }
+
+    #[test]
+    fn parse_ip_only() {
+        let e = parse_network_entry("93.184.216.34").unwrap();
+        assert!(matches!(e, NetworkEntry::AnyPort(_)));
+    }
+
+    #[test]
+    fn parse_invalid_returns_none() {
+        assert!(parse_network_entry("example.com:443").is_none());
+        assert!(parse_network_entry("not-an-addr").is_none());
+    }
+
+    #[test]
+    fn exact_entry_matches_only_same_port() {
+        let e = NetworkEntry::Exact("93.184.216.34:443".parse().unwrap());
+        assert!(e.matches("93.184.216.34:443".parse().unwrap()));
+        assert!(!e.matches("93.184.216.34:80".parse().unwrap()));
+        assert!(!e.matches("1.2.3.4:443".parse().unwrap()));
+    }
+
+    #[test]
+    fn any_port_entry_matches_all_ports() {
+        let e = NetworkEntry::AnyPort("93.184.216.34".parse().unwrap());
+        assert!(e.matches("93.184.216.34:443".parse().unwrap()));
+        assert!(e.matches("93.184.216.34:80".parse().unwrap()));
+        assert!(!e.matches("1.2.3.4:443".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_exact_entry() {
+        let e = parse_network_entry("[::1]:8080").unwrap();
+        assert!(matches!(e, NetworkEntry::Exact(_)));
+        assert!(e.matches("[::1]:8080".parse().unwrap()));
+        assert!(!e.matches("[::1]:9090".parse().unwrap()));
+    }
+
+    // ── #417 socket_addr_check decision (use x address x allowlist) ──────────
+
+    const ALL_USES: [SocketAddrUse; 7] = [
+        SocketAddrUse::TcpBind,
+        SocketAddrUse::TcpListen,
+        SocketAddrUse::TcpAccept,
+        SocketAddrUse::TcpConnect,
+        SocketAddrUse::UdpBind,
+        SocketAddrUse::UdpSend,
+        SocketAddrUse::UdpReceive,
+    ];
+
+    fn allow(list: &[&str]) -> Vec<NetworkEntry> {
+        list.iter()
+            .map(|s| parse_network_entry(s).unwrap())
+            .collect()
+    }
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn empty_allowlist_denies_every_use() {
+        for u in ALL_USES {
+            for a in ["1.2.3.4:443", "0.0.0.0:0", "[::]:0", "127.0.0.1:80"] {
+                assert!(!addr_allowed(&[], sa(a), u), "{u:?} {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn listen_and_accept_denied_even_with_allowlist() {
+        let e = allow(&["93.184.216.34:443", "10.0.0.1"]);
+        for u in [SocketAddrUse::TcpListen, SocketAddrUse::TcpAccept] {
+            for a in [
+                "0.0.0.0:0",
+                "[::]:0",
+                "0.0.0.0:8080",
+                "127.0.0.1:8080",
+                "1.2.3.4:1",
+            ] {
+                assert!(!addr_allowed(&e, sa(a), u), "{u:?} {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_bind_with_nonzero_port_denied() {
+        let e = allow(&["93.184.216.34:443"]);
+        for u in [SocketAddrUse::TcpBind, SocketAddrUse::UdpBind] {
+            for a in ["0.0.0.0:8080", "[::]:8080", "127.0.0.1:0", "127.0.0.1:8080"] {
+                assert!(!addr_allowed(&e, sa(a), u), "{u:?} {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn udp_send_receive_outside_allowlist_denied_and_inside_allowed() {
+        let e = allow(&["93.184.216.34:53"]);
+        for u in [SocketAddrUse::UdpSend, SocketAddrUse::UdpReceive] {
+            assert!(!addr_allowed(&e, sa("1.2.3.4:53"), u));
+            assert!(!addr_allowed(&e, sa("93.184.216.34:54"), u));
+            assert!(!addr_allowed(&e, sa("0.0.0.0:0"), u));
+            assert!(addr_allowed(&e, sa("93.184.216.34:53"), u));
+        }
+    }
+
+    #[test]
+    fn tcp_connect_outside_allowlist_denied() {
+        let e = allow(&["93.184.216.34:443"]);
+        assert!(addr_allowed(
+            &e,
+            sa("93.184.216.34:443"),
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!addr_allowed(
+            &e,
+            sa("93.184.216.34:80"),
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!addr_allowed(
+            &e,
+            sa("0.0.0.0:0"),
+            SocketAddrUse::TcpConnect
+        ));
+    }
+
+    // Wildcard + port 0 is exempt for Bind only; this includes an explicit guest
+    // bind to the same address (current behaviour, pinned).
+    #[test]
+    fn wildcard_port0_bind_is_exempt_including_explicit_bind() {
+        let e = allow(&["93.184.216.34:443"]);
+        for u in [SocketAddrUse::TcpBind, SocketAddrUse::UdpBind] {
+            assert!(addr_allowed(&e, sa("0.0.0.0:0"), u), "{u:?} v4");
+            assert!(addr_allowed(&e, sa("[::]:0"), u), "{u:?} v6");
+        }
+    }
+
+    // IPv4-mapped wildcard `::ffff:0.0.0.0` is NOT `is_unspecified()` in std, so
+    // it is not exempt: pinned as denied.
+    #[test]
+    fn ipv4_mapped_wildcard_is_not_exempt() {
+        let e = allow(&["93.184.216.34:443"]);
+        for u in [SocketAddrUse::TcpBind, SocketAddrUse::UdpBind] {
+            assert!(!addr_allowed(&e, sa("[::ffff:0.0.0.0]:0"), u), "{u:?}");
+        }
+    }
+
+    // An allowlisted wildcard address is allowed on its own entry (any use).
+    #[test]
+    fn allowlisted_entry_matches_regardless_of_use() {
+        let e = allow(&["93.184.216.34"]);
+        for u in ALL_USES {
+            assert!(addr_allowed(&e, sa("93.184.216.34:1"), u), "{u:?}");
+        }
+    }
+
+    // ── #412 SRV resolution against a local UDP DNS stub ─────────────────────
+
+    enum Reply {
+        Srv(Vec<(u16, u16, u16, &'static str)>),
+        NxDomain,
+        Garbage,
+    }
+
+    /// Start a UDP DNS stub on 127.0.0.1 (ephemeral port) and return a resolver
+    /// config that points at it.
+    async fn dns_stub(reply: Reply) -> hickory_resolver::config::ResolverConfig {
+        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+        use hickory_resolver::proto::op::{Message, OpCode, ResponseCode};
+        use hickory_resolver::proto::rr::{Name, RData, Record, rdata::SRV};
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let Ok(q) = Message::from_vec(&buf[..n]) else {
+                    continue;
+                };
+                let name = q.queries[0].name().clone();
+                let mut r = Message::response(q.metadata.id, OpCode::Query);
+                r.metadata.recursion_desired = true;
+                r.metadata.recursion_available = true;
+                r.add_queries(q.queries.clone());
+                match &reply {
+                    Reply::Srv(recs) => {
+                        for (pri, w, p, t) in recs {
+                            let target = Name::from_ascii(t).unwrap();
+                            r.add_answer(Record::from_rdata(
+                                name.clone(),
+                                60,
+                                RData::SRV(SRV::new(*pri, *w, *p, target)),
+                            ));
+                        }
+                    }
+                    Reply::NxDomain => r.metadata.response_code = ResponseCode::NXDomain,
+                    Reply::Garbage => {
+                        let _ = sock.send_to(b"\x00not a dns message", from).await;
+                        continue;
+                    }
+                }
+                let _ = sock.send_to(&r.to_vec().unwrap(), from).await;
+            }
+        });
+        let mut ns = NameServerConfig::udp(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        for c in ns.connections.iter_mut() {
+            c.port = port;
+        }
+        ResolverConfig::from_name_servers(vec![ns])
+    }
+
+    // URLs are http://, trailing dot is stripped, priority ascending (10 before 20
+    // although the DNS answer lists 20 first) (#427).
+    #[tokio::test]
+    async fn srv_records_become_http_host_port_urls_ordered_by_priority() {
+        let cfg = dns_stub(Reply::Srv(vec![
+            (20, 1, 8082, "w2.test."),
+            (10, 5, 8081, "w1.test."),
+        ]))
+        .await;
+        let urls = resolve_srv_workers_with("_fluxion._tcp.test.", cfg).await;
+        assert_eq!(urls, ["http://w1.test:8081", "http://w2.test:8082"]);
+    }
+
+    // Same priority: weight descending, weight 0 last (RFC 2782), then target,
+    // then port, so the result is deterministic whatever order DNS answers in.
+    #[tokio::test]
+    async fn srv_same_priority_orders_by_weight_desc_then_target_then_port() {
+        let cfg = dns_stub(Reply::Srv(vec![
+            (10, 0, 80, "zero.test."),
+            (10, 5, 81, "b.test."),
+            (5, 0, 82, "p5.test."),
+            (10, 5, 83, "a.test."),
+            (10, 5, 80, "a.test."),
+            (10, 9, 84, "heavy.test."),
+        ]))
+        .await;
+        let urls = resolve_srv_workers_with("_fluxion._tcp.test.", cfg).await;
+        assert_eq!(
+            urls,
+            [
+                "http://p5.test:82",
+                "http://heavy.test:84",
+                "http://a.test:80",
+                "http://a.test:83",
+                "http://b.test:81",
+                "http://zero.test:80",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn srv_nxdomain_yields_empty_list() {
+        let cfg = dns_stub(Reply::NxDomain).await;
+        assert!(
+            resolve_srv_workers_with("_fluxion._tcp.test.", cfg)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn srv_empty_answer_yields_empty_list() {
+        let cfg = dns_stub(Reply::Srv(vec![])).await;
+        assert!(
+            resolve_srv_workers_with("_fluxion._tcp.test.", cfg)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn srv_malformed_reply_does_not_panic_and_yields_empty_list() {
+        let cfg = dns_stub(Reply::Garbage).await;
+        // Short timeout/attempts so the (expected) failure is quick.
+        use hickory_resolver::{Resolver, net::runtime::TokioRuntimeProvider};
+        let mut b = Resolver::builder_with_config(cfg, TokioRuntimeProvider::default());
+        b.options_mut().timeout = Duration::from_secs(1);
+        b.options_mut().attempts = 1;
+        let resolver = b.build().unwrap();
+        let r = tokio::time::timeout(
+            Duration::from_secs(30),
+            lookup_srv_urls(&resolver, "_fluxion._tcp.test."),
+        )
+        .await
+        .expect("must not hang");
+        assert!(r.is_empty());
+    }
+
+    // Verify that the epoch ticker thread exits after FluxionHost is dropped.
+    // Previously the ticker ran forever (detached), causing thread accumulation
+    // when tests created multiple hosts.
+    #[test]
+    fn ticker_thread_stops_after_host_drop() {
+        let cache = tempfile::tempdir().unwrap();
+        let host = FluxionHost::with_cache_dir(cache.path()).expect("host");
+        let weak = host.ticker_weak();
+
+        // Ticker should be alive while the host is alive.
+        assert!(weak.upgrade().is_some(), "ticker not running before drop");
+
+        drop(host);
+
+        // Give the ticker thread up to 500ms (5 ticks) to notice the shutdown
+        // flag and exit. The thread sleeps 100ms per iteration, so this is
+        // generous even under load.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        panic!("epoch ticker thread is still alive 500ms after FluxionHost drop");
+    }
+
+    // LRU mem_cache eviction: inserting more than MEM_CACHE_CAP entries must
+    // not panic and must keep the cache at exactly MEM_CACHE_CAP capacity.
+    #[test]
+    fn lru_mem_cache_evicts_at_capacity() {
+        use lru::LruCache;
+        use std::num::NonZeroUsize;
+
+        let cap = 4usize;
+        let mut cache: LruCache<String, u32> = LruCache::new(NonZeroUsize::new(cap).unwrap());
+
+        for i in 0u32..10 {
+            cache.put(format!("key-{i}"), i);
+        }
+
+        // Cache should never exceed its capacity.
+        assert_eq!(cache.len(), cap, "cache must be capped at {cap}");
+
+        // The 4 most recently inserted entries must be present.
+        for i in 6u32..10 {
+            assert!(
+                cache.contains(&format!("key-{i}")),
+                "key-{i} should be in cache"
+            );
+        }
+        // Older entries should have been evicted.
+        for i in 0u32..6 {
+            assert!(
+                !cache.contains(&format!("key-{i}")),
+                "key-{i} should be evicted"
+            );
+        }
+    }
+
+    // Confirm that creating and dropping multiple hosts does not accumulate
+    // threads indefinitely (the regression from issue #18).
+    #[test]
+    fn multiple_hosts_do_not_accumulate_tickers() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut weaks = Vec::new();
+        for _ in 0..5 {
+            let host = FluxionHost::with_cache_dir(cache.path()).expect("host");
+            weaks.push(host.ticker_weak());
+            drop(host);
+        }
+
+        // All tickers must stop within 500ms of the last drop.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if weaks.iter().all(|w| w.upgrade().is_none()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let still_alive = weaks.iter().filter(|w| w.upgrade().is_some()).count();
+        panic!("{still_alive}/5 ticker threads still alive 500ms after all hosts dropped");
+    }
+
+    // ── resolve_network_allow tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_ip_entries_pass_through() {
+        let allow = vec!["192.0.2.1:443".to_string(), "192.0.2.2".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert_eq!(
+            resolved, allow,
+            "pure IP entries must pass through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_localhost_hostname() {
+        // "localhost" is guaranteed to resolve in any normal OS environment.
+        let allow = vec!["localhost:8080".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
+        // All returned entries must end in ":8080".
+        assert!(
+            resolved.iter().all(|e| e.ends_with(":8080")),
+            "port must be preserved: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP:port.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_unresolvable_hostname_returns_empty() {
+        // This domain is guaranteed to not exist.
+        let allow = vec!["this.hostname.does.not.exist.invalid:443".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(
+            resolved.is_empty(),
+            "unresolvable hostname must yield empty list (safe deny-all)"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_cache_hit_is_faster_than_miss() {
+        let allow = vec!["localhost:9999".to_string()];
+
+        // Warm up cache (first call = DNS lookup).
+        let t0 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let miss_us = t0.elapsed().as_micros();
+
+        // Second call should hit the in-process TTL cache.
+        let t1 = Instant::now();
+        let _ = resolve_network_allow(&allow).await;
+        let hit_us = t1.elapsed().as_micros();
+
+        println!("DNS miss: {miss_us}µs  cache hit: {hit_us}µs");
+        assert!(
+            hit_us < miss_us,
+            "cache hit ({hit_us}µs) should be faster than DNS miss ({miss_us}µs)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_mixed_ip_and_hostname() {
+        let allow = vec!["192.0.2.1:443".to_string(), "localhost:8080".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        // Must contain the original IP entry.
+        assert!(resolved.contains(&"192.0.2.1:443".to_string()));
+        // Must also contain at least one resolved localhost IP.
+        assert!(
+            resolved.len() > 1,
+            "should have IP + resolved localhost: {resolved:?}"
+        );
+    }
+
+    // ── Phase 1: アドレス形式の基本解決 (#78) ────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_hostname_without_port() {
+        // "localhost" without a port should resolve to IP-only strings (no ":port" suffix).
+        let allow = vec!["localhost".to_string()];
+        let resolved = resolve_network_allow(&allow).await;
+        assert!(
+            !resolved.is_empty(),
+            "localhost must resolve to at least one IP"
+        );
+        for entry in &resolved {
+            // Must parse as a valid IP (AnyPort variant, no port suffix).
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "resolved entry must be a valid IP string: {entry}"
+            );
+            // Must NOT contain a colon that would indicate an IP:port (IPv4 case).
+            // IPv6 addresses may contain colons but parse_network_entry handles them.
+            if let Ok(ip) = entry.parse::<IpAddr>() {
+                // Plain IP — correct.
+                let _ = ip;
+            } else if entry.starts_with('[') {
+                // IPv6 with brackets — also acceptable as AnyPort.
+            } else {
+                panic!("unexpected format for port-less entry: {entry}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ipv6_entries_pass_through() {
+        let cases = vec!["[::1]:8080".to_string(), "::1".to_string()];
+        for input in &cases {
+            let resolved = resolve_network_allow(std::slice::from_ref(input)).await;
+            assert_eq!(
+                resolved,
+                vec![input.clone()],
+                "IPv6 entry {input:?} must pass through unchanged"
+            );
+            assert!(
+                parse_network_entry(input).is_some(),
+                "IPv6 entry must be parseable by parse_network_entry: {input}"
+            );
+        }
+    }
+
+    // ── Phase 2: 失敗・混在エントリの安全 fallback (#79) ─────────────────────
+
+    #[tokio::test]
+    async fn resolve_mixed_entries_with_failure() {
+        let allow = vec![
+            "192.0.2.1:443".to_string(),
+            "localhost:8080".to_string(),
+            "this.invalid.host.example:443".to_string(),
+        ];
+        let resolved = resolve_network_allow(&allow).await;
+
+        // IP entry must be present unchanged.
+        assert!(
+            resolved.contains(&"192.0.2.1:443".to_string()),
+            "IP entry must survive: {resolved:?}"
+        );
+        // At least one localhost IP:8080 must be present.
+        assert!(
+            resolved.iter().any(|e| e.ends_with(":8080")),
+            "resolved localhost entry must be present: {resolved:?}"
+        );
+        // Unresolvable entry must NOT appear in any form.
+        assert!(
+            !resolved.iter().any(|e| e.contains("invalid.host")),
+            "unresolvable hostname must be excluded: {resolved:?}"
+        );
+        // All returned entries must parse as valid IP addresses.
+        for entry in &resolved {
+            assert!(
+                parse_network_entry(entry).is_some(),
+                "every entry in result must be a valid IP string: {entry}"
+            );
+        }
+    }
+
+    // ── Phase 3: TTL キャッシュ期限切れ後の再解決 (#80) ──────────────────────
+
+    #[tokio::test]
+    async fn dns_cache_expires_after_ttl() {
+        let key = "localhost:19191".to_string();
+        let allow = vec![key.clone()];
+
+        // First call — populates cache.
+        let first = resolve_network_allow(&allow).await;
+        assert!(!first.is_empty(), "first resolution must succeed");
+
+        // Backdate the cache entry to simulate TTL expiry.
+        {
+            let mut cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
+            if let Some(entry) = cache.get_mut(&key) {
+                entry.1 = Instant::now() - DNS_CACHE_TTL - Duration::from_millis(1);
+            }
+        }
+
+        // Second call must re-resolve (not serve stale data).
+        let second = resolve_network_allow(&allow).await;
+        assert!(
+            !second.is_empty(),
+            "re-resolution after TTL expiry must succeed"
+        );
+
+        // Verify the cache timestamp was refreshed.
+        {
+            let cache = DNS_CACHE.lock().expect("DNS_CACHE lock poisoned");
+            let age = cache
+                .get(&key)
+                .map(|(_, ts)| ts.elapsed())
+                .unwrap_or(Duration::MAX);
+            assert!(
+                age < Duration::from_secs(5),
+                "cache timestamp must be refreshed after TTL expiry, age={age:?}"
+            );
+        }
+    }
+
+    // ── Phase 4: 並行解決の Mutex 安全性 (#81) ───────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_concurrent_same_host() {
+        let allow = vec!["localhost:12345".to_string()];
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let a = allow.clone();
+                tokio::spawn(async move { resolve_network_allow(&a).await })
+            })
+            .collect();
+
+        let results = futures::future::join_all(handles).await;
+        for (i, r) in results.iter().enumerate() {
+            let resolved = r.as_ref().expect("task must not panic");
+            assert!(
+                !resolved.is_empty(),
+                "task {i} returned empty result — concurrent resolution failed"
+            );
+            // All entries must be valid IP:port strings.
+            for entry in resolved {
+                assert!(
+                    parse_network_entry(entry).is_some(),
+                    "task {i} returned invalid entry: {entry}"
+                );
+            }
+        }
+
+        // All tasks must agree on the same IP set.
+        let first_set: std::collections::HashSet<_> =
+            results[0].as_ref().unwrap().iter().cloned().collect();
+        for (i, r) in results.iter().enumerate().skip(1) {
+            let set: std::collections::HashSet<_> = r.as_ref().unwrap().iter().cloned().collect();
+            assert_eq!(
+                first_set, set,
+                "task {i} returned different IPs than task 0: {set:?} vs {first_set:?}"
+            );
+        }
+    }
+}

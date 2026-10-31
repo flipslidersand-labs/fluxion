@@ -1,0 +1,62 @@
+name: vehicle-pipeline
+version: "1.0"
+
+jobs:
+  fetch:
+    component: components/pipeline-stage/target/wasm32-wasip1/debug/pipeline_stage.wasm
+    input: "fetch:/tmp/fluxion-pipeline"
+    permissions:
+      filesystem:
+        write:
+          - /tmp/fluxion-pipeline
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 10
+
+  normalize:
+    component: components/pipeline-stage/target/wasm32-wasip1/debug/pipeline_stage.wasm
+    input: "normalize:/tmp/fluxion-pipeline"
+    depends_on: [fetch]
+    permissions:
+      filesystem:
+        read:
+          - /tmp/fluxion-pipeline
+        write:
+          - /tmp/fluxion-pipeline
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 10
+
+  validate:
+    component: components/pipeline-stage/target/wasm32-wasip1/debug/pipeline_stage.wasm
+    input: "validate:/tmp/fluxion-pipeline"
+    depends_on: [normalize]
+    permissions:
+      filesystem:
+        read:
+          - /tmp/fluxion-pipeline
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 10
+
+  export:
+    component: components/pipeline-stage/target/wasm32-wasip1/debug/pipeline_stage.wasm
+    input: "export:/tmp/fluxion-pipeline:/tmp/fluxion-output"
+    depends_on: [validate]
+    permissions:
+      filesystem:
+        read:
+          - /tmp/fluxion-pipeline
+        write:
+          - /tmp/fluxion-output
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 10

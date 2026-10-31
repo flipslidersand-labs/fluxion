@@ -1,0 +1,22 @@
+name: network-sandbox
+
+jobs:
+  # Step 1 — SUCCEED: 127.0.0.1:19999 is in the allowlist.
+  # Connection is refused (no server) but SocketAddrCheck passed → SUCCESS.
+  connect-allowed:
+    component: components/network-probe/target/wasm32-wasip2/debug/network_probe.wasm
+    input: "127.0.0.1:19999"
+    permissions:
+      network:
+        allow: ["127.0.0.1:19999"]
+      limits:
+        timeout_secs: 5
+
+  # Step 2 — FAIL: empty allowlist → SocketAddrCheck denies the address.
+  connect-denied:
+    component: components/network-probe/target/wasm32-wasip2/debug/network_probe.wasm
+    input: "127.0.0.1:19999"
+    depends_on: [connect-allowed]
+    permissions:
+      limits:
+        timeout_secs: 5

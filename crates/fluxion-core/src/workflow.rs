@@ -1,0 +1,1354 @@
+use anyhow::{Context, Result};
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workflow {
+    pub name: String,
+    pub jobs: IndexMap<String, JobDefinition>,
+    /// Remote worker configs for distributed execution (round-robin if job has no explicit worker).
+    #[serde(default)]
+    pub workers: Vec<WorkerConfig>,
+    /// Maximum number of jobs that may execute concurrently. None = unbounded.
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
+    /// DNS SRV record name for automatic worker discovery (e.g. "_fluxion._tcp.internal").
+    /// Resolved at startup and merged with the static `workers:` list.
+    /// On SRV query failure, the static list is used as-is.
+    /// SRV-resolved workers get no TLS (plain `http://`), so this cannot be
+    /// combined with static workers that have `tls:` (rejected, #412).
+    #[serde(default)]
+    pub workers_srv: Option<String>,
+}
+
+/// Shared by `validate` and the scheduler's run-time check (#412).
+pub const SRV_WITH_TLS_MSG: &str = "`workers_srv` cannot be combined with workers that have `tls:`: \
+workers resolved via SRV get no TLS (they are contacted over plaintext http://), so SRV and mTLS \
+cannot be used together. List all workers statically under `workers:`, or remove `tls:`";
+
+/// Per-worker configuration. Supports both a plain URL string and an extended
+/// form with optional mTLS certificate paths and load-balancing weight.
+///
+/// ```yaml
+/// workers:
+///   - http://worker-a:7777          # plain form (no TLS, weight=1)
+///   - url: https://worker-b:7778    # extended form
+///     weight: 3                     # receives 3x the traffic of weight-1 workers
+///     tls:
+///       cert: /etc/fluxion/client.crt
+///       key:  /etc/fluxion/client.key
+///       ca:   /etc/fluxion/ca.crt
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkerConfig {
+    Simple(String),
+    Full {
+        url: String,
+        #[serde(default)]
+        tls: Option<TlsConfig>,
+        /// Load-balancing weight for weighted round-robin. Defaults to 1.
+        #[serde(default = "default_weight")]
+        weight: u32,
+    },
+}
+
+/// Whether `url` starts with the `https://` scheme (case-insensitive).
+pub fn url_is_https(url: &str) -> bool {
+    url.trim_start()
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+impl WorkerConfig {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Simple(s) => s,
+            Self::Full { url, .. } => url,
+        }
+    }
+
+    pub fn tls(&self) -> Option<&TlsConfig> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Full { tls, .. } => tls.as_ref(),
+        }
+    }
+
+    /// True when `tls` is configured but the URL scheme is not `https`
+    /// (case-insensitive). Such a worker would be contacted in plaintext.
+    pub fn tls_without_https(&self) -> bool {
+        self.tls().is_some() && !url_is_https(self.url())
+    }
+
+    /// Load-balancing weight. Plain-form workers always have weight 1.
+    pub fn weight(&self) -> u32 {
+        match self {
+            Self::Simple(_) => 1,
+            Self::Full { weight, .. } => *weight,
+        }
+    }
+}
+
+/// mTLS certificate paths used by the scheduler when connecting to a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the PEM-encoded client certificate.
+    pub cert: PathBuf,
+    /// Path to the PEM-encoded client private key.
+    pub key: PathBuf,
+    /// Path to the PEM-encoded CA certificate used to verify the server.
+    pub ca: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobDefinition {
+    pub component: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub permissions: PermissionSet,
+    /// Pin this job to a specific worker URL. Overrides round-robin assignment.
+    #[serde(default)]
+    pub worker: Option<String>,
+    /// Environment variables injected into the Wasm component via WASI.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Optional conditional expression. If present and evaluates to false, the job is SKIPPED.
+    /// Example: `"validate.status == 'SUCCESS'"`
+    #[serde(default)]
+    pub when: Option<String>,
+    /// JSONPath expression. Expands input JSON array to fan-out child jobs
+    /// named `<job_id>.0`, `<job_id>.1`, …
+    #[serde(default)]
+    pub foreach: Option<String>,
+    /// Fan-in: collect all outputs from the named foreach job as a JSON array
+    /// and pass it as this job's input.
+    #[serde(default)]
+    pub input_from: Option<String>,
+    /// Per-job parallelism cap (overrides workflow-level max_parallel).
+    #[serde(default)]
+    pub max_parallel: Option<usize>,
+    /// Maximum allowed output size in megabytes. Defaults to 64 MB.
+    /// Outputs exceeding this limit cause the job to fail with a clear error.
+    #[serde(default)]
+    pub output_size_limit_mb: Option<u64>,
+    /// When `true`, any foreach child failure immediately cancels remaining siblings.
+    /// When `false` (default), siblings run to completion before the fan-in is cancelled.
+    #[serde(default)]
+    pub fail_fast: bool,
+    /// Optional SHA-256 hex digest of the component `.wasm` file.
+    /// When present, the file is verified before execution; mismatch causes the job to fail.
+    #[serde(default)]
+    pub component_sha256: Option<String>,
+    /// Aggregation mode for fan-in jobs. Must be used together with `input_from`.
+    #[serde(default)]
+    pub reduce: Option<ReduceMode>,
+    /// Execution backend for this job.
+    /// `local` (default) runs the Wasm component in-process via wasmtime.
+    /// `remote` dispatches the job to an HTTP worker via fluxion-worker.
+    #[serde(default)]
+    pub executor: ExecutorKind,
+    /// When `true` and `executor: remote`, uses POST /jobs (fire-and-poll)
+    /// instead of the synchronous POST /run.
+    #[serde(default)]
+    pub async_dispatch: bool,
+    /// OCI reference (`registry/repo:tag` or `registry/repo@sha256:…`).
+    /// When set, the component is pulled from the OCI registry at runtime
+    /// and the `component` field is ignored.
+    #[serde(default)]
+    pub oci_ref: Option<String>,
+}
+
+// ── ExecutorKind ──────────────────────────────────────────────────────────────
+
+/// Execution backend for a job.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorKind {
+    /// Run the Wasm component in-process via wasmtime (default).
+    #[default]
+    Local,
+    /// Dispatch to an HTTP remote worker (fluxion-worker).
+    Remote,
+}
+
+// ── ReduceMode ────────────────────────────────────────────────────────────────
+
+/// How a fan-in job aggregates outputs from its foreach source.
+/// Only valid when `input_from` is set.
+///
+/// YAML examples:
+/// ```yaml
+/// reduce: json_array
+/// reduce:
+///   custom: /path/to/reducer.wasm
+/// ```
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReduceMode {
+    /// Concatenate raw bytes from all child outputs.
+    Concat,
+    /// Wrap each child output as an element of a JSON array.
+    JsonArray,
+    /// Deep-merge child outputs as JSON objects (last-write-wins on key conflict).
+    JsonMerge,
+    /// Pass outputs to an external Wasm component for custom reduction.
+    /// The value is the path to the `.wasm` component.
+    Custom(String),
+}
+
+// serde_yaml(_ng) 0.9/0.10 cannot deserialize externally-tagged enums with non-unit
+// variants from YAML mappings; implement manually to handle both forms:
+//   reduce: json_array          (string → unit variant)
+//   reduce:
+//     custom: /path/to/r.wasm  (map → Custom newtype)
+impl<'de> serde::Deserialize<'de> for ReduceMode {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct RMVisitor;
+        impl<'de> Visitor<'de> for RMVisitor {
+            type Value = ReduceMode;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    f,
+                    r#""concat", "json_array", "json_merge", or {{custom: <path>}}"#
+                )
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "concat" => Ok(ReduceMode::Concat),
+                    "json_array" => Ok(ReduceMode::JsonArray),
+                    "json_merge" => Ok(ReduceMode::JsonMerge),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["concat", "json_array", "json_merge", "custom"],
+                    )),
+                }
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| de::Error::custom("empty map for reduce mode"))?;
+                match key.as_str() {
+                    "custom" => {
+                        let component: String = map.next_value()?;
+                        while map.next_key::<de::IgnoredAny>()?.is_some() {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                        Ok(ReduceMode::Custom(component))
+                    }
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["concat", "json_array", "json_merge", "custom"],
+                    )),
+                }
+            }
+        }
+        de.deserialize_any(RMVisitor)
+    }
+}
+
+// ── Permission types ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermissionSet {
+    #[serde(default)]
+    pub filesystem: FilesystemPermission,
+    #[serde(default)]
+    pub network: NetworkPermission,
+    #[serde(default)]
+    pub limits: ResourceLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesystemPermission {
+    /// Directories the component may read from (guest path = host path).
+    #[serde(default)]
+    pub read: Vec<PathBuf>,
+    /// Directories the component may read and write.
+    #[serde(default)]
+    pub write: Vec<PathBuf>,
+}
+
+impl FilesystemPermission {
+    /// Lexical check of every granted path (#246). Each path must be absolute,
+    /// must not contain `..` components, and must not be the filesystem root.
+    /// Returns `(path, reason)` for each offending entry. Symlink resolution and
+    /// allowlist enforcement happen on the host at preopen time.
+    pub fn lexical_violations(&self) -> Vec<(PathBuf, &'static str)> {
+        self.read
+            .iter()
+            .chain(self.write.iter())
+            .filter_map(|p| lexical_path_violation(p).map(|r| (p.clone(), r)))
+            .collect()
+    }
+}
+
+/// Returns the reason `path` is unacceptable as a filesystem grant, if any.
+pub fn lexical_path_violation(path: &std::path::Path) -> Option<&'static str> {
+    use std::path::Component;
+    if !path.is_absolute() {
+        return Some("must be an absolute path");
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Some("must not contain `..`");
+    }
+    if !path.components().any(|c| matches!(c, Component::Normal(_))) {
+        return Some("must not be the filesystem root");
+    }
+    None
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkPermission {
+    /// Allowlist of host:port strings. Empty = deny all.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl NetworkPermission {
+    pub fn allows(&self, addr: &str) -> bool {
+        self.allow
+            .iter()
+            .any(|entry| Self::entry_matches(entry, addr))
+    }
+
+    /// Strict match: `entry` must equal `addr` exactly as a socket address, or
+    /// — if `entry` is a bare IP with no port — match any port on that IP.
+    /// A plain string-prefix match here would let an allowlist entry of
+    /// `"10.0.0.1"` wrongly permit `"10.0.0.100:80"` (#236).
+    fn entry_matches(entry: &str, addr: &str) -> bool {
+        if let (Ok(entry_addr), Ok(addr)) = (
+            entry.parse::<std::net::SocketAddr>(),
+            addr.parse::<std::net::SocketAddr>(),
+        ) {
+            return entry_addr == addr;
+        }
+        if let (Ok(entry_ip), Ok(addr)) = (
+            entry.parse::<std::net::IpAddr>(),
+            addr.parse::<std::net::SocketAddr>(),
+        ) {
+            return entry_ip == addr.ip();
+        }
+        entry == addr
+    }
+
+    pub fn is_deny_all(&self) -> bool {
+        self.allow.is_empty()
+    }
+}
+
+fn default_memory_mb() -> u64 {
+    256
+}
+fn default_timeout_secs() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    #[serde(default = "default_memory_mb")]
+    pub memory_mb: u64,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            memory_mb: 256,
+            timeout_secs: 60,
+        }
+    }
+}
+
+// ── Validation types ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    UnknownDependency {
+        job: String,
+        dep: String,
+    },
+    UnknownInputFrom {
+        job: String,
+        src: String,
+    },
+    InputFromNotForeach {
+        job: String,
+        src: String,
+    },
+    CyclicDependency,
+    ComponentNotFound {
+        job: String,
+        path: String,
+    },
+    ReduceWithoutInputFrom {
+        job: String,
+    },
+    /// A dynamic foreach (`foreach` without `input`) must have exactly one
+    /// dependency: it is expanded from that dependency's output (#316).
+    DynamicForeachDependencies {
+        job: String,
+        count: usize,
+    },
+    /// A dynamic foreach cannot also use `input_from` (not supported yet, #316).
+    DynamicForeachInputFrom {
+        job: String,
+    },
+    /// A `when` that waits for another job to be FAILED. Failure handlers are
+    /// not supported (#392): the dependents of a failed job are cancelled and a
+    /// failure elsewhere stops the run, so such a job could never run.
+    FailedStatusInWhen {
+        job: String,
+        expr: String,
+    },
+    /// A worker has `tls:` configured but its URL is not `https://`, so mTLS
+    /// would silently not be used and data would be sent in plaintext (#299).
+    TlsWithoutHttps {
+        url: String,
+    },
+    /// `workers_srv` is set together with a `tls:` static worker. SRV-resolved
+    /// workers get no TLS config (and an `http://` URL), so they would receive
+    /// data in plaintext while the static workers use mTLS (#412).
+    SrvWithTls,
+    InvalidFilesystemPath {
+        job: String,
+        path: String,
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownDependency { job, dep } => {
+                write!(f, "Job '{job}' depends on unknown job '{dep}'")
+            }
+            Self::UnknownInputFrom { job, src } => {
+                write!(f, "Job '{job}' has input_from '{src}' which does not exist")
+            }
+            Self::InputFromNotForeach { job, src } => {
+                write!(
+                    f,
+                    "Job '{job}' has input_from '{src}' but '{src}' does not have foreach"
+                )
+            }
+            Self::CyclicDependency => write!(f, "Workflow contains a circular dependency"),
+            Self::ComponentNotFound { job, path } => {
+                write!(f, "Job '{job}': component not found at '{path}'")
+            }
+            Self::ReduceWithoutInputFrom { job } => {
+                write!(f, "Job '{job}': `reduce` requires `input_from`")
+            }
+            Self::DynamicForeachDependencies { job, count } => write!(
+                f,
+                "Job '{job}': a dynamic foreach (foreach without input) needs exactly one dependency, found {count}"
+            ),
+            Self::DynamicForeachInputFrom { job } => write!(
+                f,
+                "Job '{job}': a dynamic foreach (foreach without input) cannot use `input_from` (nested dynamic foreach is not supported)"
+            ),
+            Self::FailedStatusInWhen { job, expr } => write!(
+                f,
+                "Job '{job}': `when: {expr}` waits for a job to be FAILED, but failure handlers are not supported (a failure cancels what depends on the failed job and stops the run), so this job could never run"
+            ),
+            Self::TlsWithoutHttps { url } => {
+                write!(
+                    f,
+                    "Worker '{url}': `tls` is configured but the URL is not https:// (mTLS would be silently disabled)"
+                )
+            }
+            Self::SrvWithTls => write!(f, "{SRV_WITH_TLS_MSG}"),
+            Self::InvalidFilesystemPath { job, path, reason } => {
+                write!(f, "Job '{job}': filesystem path '{path}' {reason}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ValidationWarning {
+    /// `limits:` written at the job top level instead of under `permissions:`.
+    LimitsAtTopLevel { job: String },
+}
+
+impl std::fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LimitsAtTopLevel { job } => write!(
+                f,
+                "job \"{job}\": `limits:` at top level (ignored) — move it under `permissions:`",
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ValidationReport {
+    pub errors: Vec<ValidationError>,
+    pub warnings: Vec<ValidationWarning>,
+}
+
+impl ValidationReport {
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    pub fn into_result(self) -> Result<()> {
+        if self.errors.is_empty() {
+            return Ok(());
+        }
+        let msgs: Vec<String> = self.errors.iter().map(|e| e.to_string()).collect();
+        Err(anyhow::anyhow!("{}", msgs.join("\n")))
+    }
+}
+
+impl std::fmt::Display for ValidationReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.errors.is_empty() {
+            return write!(f, "Validation passed");
+        }
+        writeln!(f, "Validation failed ({} error(s)):", self.errors.len())?;
+        for err in &self.errors {
+            writeln!(f, "  - {err}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Check for common YAML structural mistakes that parse successfully but are silently
+/// wrong — e.g. `limits:` at job top level instead of under `permissions:`.
+/// Takes the raw YAML source so it can inspect keys that serde would drop.
+pub fn check_yaml_warnings(src: &str) -> Vec<ValidationWarning> {
+    let mut warnings = Vec::new();
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(src) else {
+        return warnings;
+    };
+    let Some(jobs) = doc.get("jobs").and_then(|v| v.as_mapping()) else {
+        return warnings;
+    };
+    for (job_key, job_val) in jobs {
+        let job_name = job_key.as_str().unwrap_or("?");
+        if job_val.get("limits").is_some() {
+            warnings.push(ValidationWarning::LimitsAtTopLevel {
+                job: job_name.to_string(),
+            });
+        }
+    }
+    warnings
+}
+
+/// A parsed `when` condition: `<job>.status <op> <value>` (the same grammar the
+/// scheduler evaluates: three space-separated parts, single quotes trimmed
+/// from the value). Anything else is not a status condition.
+struct WhenCondition<'a> {
+    job: &'a str,
+    op: &'a str,
+    value: &'a str,
+}
+
+fn parse_when(expr: &str) -> Option<WhenCondition<'_>> {
+    let parts: Vec<&str> = expr.splitn(3, ' ').collect();
+    let [lhs, op, rhs] = parts.as_slice() else {
+        return None;
+    };
+    let (job, attr) = lhs.rsplit_once('.')?;
+    (attr == "status").then_some(WhenCondition {
+        job,
+        op,
+        value: rhs.trim_matches('\''),
+    })
+}
+
+/// True for `<job>.status == 'FAILED'` (see [`ValidationError::FailedStatusInWhen`]).
+fn when_waits_for_failed(expr: &str) -> bool {
+    parse_when(expr).is_some_and(|c| !c.job.is_empty() && c.op == "==" && c.value == "FAILED")
+}
+
+// DFS cycle detection — kept in workflow.rs to avoid a circular import with dag.rs.
+fn has_cycle(jobs: &IndexMap<String, JobDefinition>) -> bool {
+    use std::collections::HashSet;
+
+    fn dfs<'a>(
+        node: &'a str,
+        jobs: &'a IndexMap<String, JobDefinition>,
+        visited: &mut HashSet<&'a str>,
+        stack: &mut HashSet<&'a str>,
+    ) -> bool {
+        if stack.contains(node) {
+            return true;
+        }
+        if visited.contains(node) {
+            return false;
+        }
+        visited.insert(node);
+        stack.insert(node);
+        if let Some(def) = jobs.get(node) {
+            for dep in &def.depends_on {
+                if dfs(dep.as_str(), jobs, visited, stack) {
+                    return true;
+                }
+            }
+        }
+        stack.remove(node);
+        false
+    }
+
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = std::collections::HashSet::new();
+    jobs.keys()
+        .any(|id| dfs(id.as_str(), jobs, &mut visited, &mut stack))
+}
+
+// ── Workflow impl ─────────────────────────────────────────────────────────────
+
+impl Workflow {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let src = std::fs::read_to_string(path.as_ref())
+            .with_context(|| format!("Failed to read {:?}", path.as_ref()))?;
+        let wf: Self =
+            serde_yaml::from_str(&src).with_context(|| "Failed to parse workflow YAML")?;
+        wf.validate().into_result()?;
+        Ok(wf)
+    }
+
+    /// Check that every `component:` path exists on disk.
+    /// Not called by `from_file` — only used by the `validate` CLI subcommand.
+    pub fn check_component_paths(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        for (job_id, def) in &self.jobs {
+            if std::fs::metadata(&def.component).is_err() {
+                report.errors.push(ValidationError::ComponentNotFound {
+                    job: job_id.clone(),
+                    path: def.component.clone(),
+                });
+            }
+        }
+        report
+    }
+
+    /// True when `workers_srv` is set and any static worker has `tls:` (#412).
+    pub fn srv_with_tls(&self) -> bool {
+        self.workers_srv.is_some() && self.workers.iter().any(|w| w.tls().is_some())
+    }
+
+    pub fn validate(&self) -> ValidationReport {
+        let mut report = ValidationReport::default();
+
+        for (job_id, def) in &self.jobs {
+            for dep in &def.depends_on {
+                if !self.jobs.contains_key(dep) {
+                    report.errors.push(ValidationError::UnknownDependency {
+                        job: job_id.clone(),
+                        dep: dep.clone(),
+                    });
+                }
+            }
+            if let Some(src) = &def.input_from {
+                match self.jobs.get(src.as_str()) {
+                    None => report.errors.push(ValidationError::UnknownInputFrom {
+                        job: job_id.clone(),
+                        src: src.clone(),
+                    }),
+                    Some(src_def) if src_def.foreach.is_none() => {
+                        report.errors.push(ValidationError::InputFromNotForeach {
+                            job: job_id.clone(),
+                            src: src.clone(),
+                        })
+                    }
+                    _ => {}
+                }
+            }
+            for (path, reason) in def.permissions.filesystem.lexical_violations() {
+                report.errors.push(ValidationError::InvalidFilesystemPath {
+                    job: job_id.clone(),
+                    path: path.display().to_string(),
+                    reason,
+                });
+            }
+            if crate::expand::is_dynamic_foreach(def) {
+                if def.depends_on.len() != 1 {
+                    report
+                        .errors
+                        .push(ValidationError::DynamicForeachDependencies {
+                            job: job_id.clone(),
+                            count: def.depends_on.len(),
+                        });
+                }
+                if def.input_from.is_some() {
+                    report
+                        .errors
+                        .push(ValidationError::DynamicForeachInputFrom {
+                            job: job_id.clone(),
+                        });
+                }
+            }
+            if let Some(expr) = &def.when
+                && when_waits_for_failed(expr)
+            {
+                report.errors.push(ValidationError::FailedStatusInWhen {
+                    job: job_id.clone(),
+                    expr: expr.clone(),
+                });
+            }
+            if def.reduce.is_some() && def.input_from.is_none() {
+                report.errors.push(ValidationError::ReduceWithoutInputFrom {
+                    job: job_id.clone(),
+                });
+            }
+        }
+
+        for w in &self.workers {
+            if w.tls_without_https() {
+                report.errors.push(ValidationError::TlsWithoutHttps {
+                    url: w.url().to_string(),
+                });
+            }
+        }
+
+        if self.srv_with_tls() {
+            report.errors.push(ValidationError::SrvWithTls);
+        }
+
+        if has_cycle(&self.jobs) {
+            report.errors.push(ValidationError::CyclicDependency);
+        }
+
+        report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_network_sandbox_yaml() {
+        let src = r#"
+name: network-sandbox
+jobs:
+  connect-allowed:
+    component: foo.wasm
+    input: "127.0.0.1:19999"
+    permissions:
+      network:
+        allow: ["127.0.0.1:19999"]
+      limits:
+        timeout_secs: 5
+  connect-denied:
+    component: foo.wasm
+    input: "127.0.0.1:19999"
+    depends_on: [connect-allowed]
+"#;
+        let result: Result<Workflow, _> = serde_yaml::from_str(src);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lexical_path_violation_cases() {
+        use std::path::Path;
+        assert!(lexical_path_violation(Path::new("/tmp/work")).is_none());
+        assert!(lexical_path_violation(Path::new("relative/dir")).is_some());
+        assert!(lexical_path_violation(Path::new("/tmp/../etc")).is_some());
+        assert!(lexical_path_violation(Path::new("/")).is_some());
+    }
+
+    #[test]
+    fn validate_rejects_bad_filesystem_paths() {
+        let src = r#"
+name: bad-fs
+jobs:
+  a:
+    component: foo.wasm
+    permissions:
+      filesystem:
+        read: ["/tmp/ok"]
+        write: ["/", "/tmp/../etc", "rel"]
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        let report = wf.validate();
+        let n = report
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InvalidFilesystemPath { .. }))
+            .count();
+        assert_eq!(n, 3, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn network_allows_exact_host_port_match() {
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1:80".to_string()],
+        };
+        assert!(perm.allows("10.0.0.1:80"));
+    }
+
+    #[test]
+    fn network_allows_rejects_prefix_match_bypass() {
+        // #236: a plain string-prefix match would wrongly let "10.0.0.1"
+        // permit "10.0.0.100:80". Strict matching must reject this.
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1".to_string()],
+        };
+        assert!(!perm.allows("10.0.0.100:80"));
+    }
+
+    #[test]
+    fn network_allows_bare_ip_matches_any_port() {
+        let perm = NetworkPermission {
+            allow: vec!["10.0.0.1".to_string()],
+        };
+        assert!(perm.allows("10.0.0.1:80"));
+        assert!(perm.allows("10.0.0.1:443"));
+        assert!(!perm.allows("10.0.0.2:80"));
+    }
+
+    #[test]
+    fn network_allows_exact_hostname_port_match() {
+        let perm = NetworkPermission {
+            allow: vec!["db.internal:5432".to_string()],
+        };
+        assert!(perm.allows("db.internal:5432"));
+        assert!(!perm.allows("evil.example.com:1234"));
+        assert!(!perm.allows("db.internal.evil.com:5432"));
+    }
+
+    #[test]
+    fn network_allows_empty_allowlist_denies_all() {
+        let perm = NetworkPermission::default();
+        assert!(!perm.allows("10.0.0.1:80"));
+        assert!(perm.is_deny_all());
+    }
+
+    #[test]
+    fn parse_foreach_yaml() {
+        let src = r#"
+name: fanout-test
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+    max_parallel: 4
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert!(wf.jobs["process"].foreach.is_some());
+        assert_eq!(wf.jobs["aggregate"].input_from.as_deref(), Some("process"));
+    }
+
+    fn make_wf(yaml: &str) -> Workflow {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn validate_ok_simple() {
+        let wf = make_wf(
+            r#"
+name: ok
+jobs:
+  a:
+    component: a.wasm
+  b:
+    component: b.wasm
+    depends_on: [a]
+"#,
+        );
+        let report = wf.validate();
+        assert!(report.is_ok(), "{report}");
+    }
+
+    fn tls_wf(url: &str) -> Workflow {
+        make_wf(&format!(
+            "name: t\njobs:\n  a:\n    component: a.wasm\nworkers:\n  - url: \"{url}\"\n    tls:\n      cert: c.crt\n      key: c.key\n      ca: ca.crt\n"
+        ))
+    }
+
+    fn has_tls_err(wf: &Workflow) -> bool {
+        wf.validate()
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::TlsWithoutHttps { .. }))
+    }
+
+    #[test]
+    fn validate_tls_with_https_is_ok() {
+        assert!(!has_tls_err(&tls_wf("https://w:7778")));
+        assert!(!has_tls_err(&tls_wf("HTTPS://w:7778")));
+    }
+
+    #[test]
+    fn validate_tls_with_http_is_error() {
+        let wf = tls_wf("http://w:7778");
+        assert!(has_tls_err(&wf));
+        assert!(wf.validate().to_string().contains("not https://"));
+    }
+
+    // ── #412 workers_srv + tls ───────────────────────────────────────────────
+
+    fn srv_wf(srv: bool, tls: bool) -> Workflow {
+        let srv = if srv {
+            "workers_srv: _f._tcp.example\n"
+        } else {
+            ""
+        };
+        let tls = if tls {
+            "    tls:\n      cert: c.crt\n      key: c.key\n      ca: ca.crt\n"
+        } else {
+            ""
+        };
+        make_wf(&format!(
+            "name: t\njobs:\n  a:\n    component: a.wasm\n{srv}workers:\n  - url: \"https://w:7778\"\n{tls}"
+        ))
+    }
+
+    #[test]
+    fn validate_rejects_workers_srv_with_tls_worker() {
+        let wf = srv_wf(true, true);
+        assert!(wf.srv_with_tls());
+        let report = wf.validate();
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::SrvWithTls)),
+            "{report}"
+        );
+        assert!(
+            report
+                .to_string()
+                .contains("SRV and mTLS cannot be used together")
+        );
+    }
+
+    #[test]
+    fn validate_allows_workers_srv_without_tls() {
+        let wf = srv_wf(true, false);
+        assert!(!wf.srv_with_tls());
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_tls_workers_without_workers_srv() {
+        let wf = srv_wf(false, true);
+        assert!(!wf.srv_with_tls());
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_http_without_tls_is_ok() {
+        let wf = make_wf(
+            "name: t\njobs:\n  a:\n    component: a.wasm\nworkers:\n  - http://w:7777\n  - url: http://w2:7777\n",
+        );
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn url_is_https_boundaries() {
+        assert!(!url_is_https(""));
+        assert!(!url_is_https("https:/"));
+        assert!(!url_is_https("httpsx://w"));
+        assert!(!url_is_https("w:7777"));
+        assert!(url_is_https("https://w"));
+    }
+
+    #[test]
+    fn validate_dynamic_foreach_needs_exactly_one_dependency() {
+        let ok = make_wf(
+            r#"
+name: t
+jobs:
+  fetch:
+    component: a.wasm
+  p:
+    component: a.wasm
+    foreach: "$.items"
+    depends_on: [fetch]
+  agg:
+    component: a.wasm
+    depends_on: [p]
+    input_from: p
+"#,
+        );
+        assert!(ok.validate().is_ok(), "{}", ok.validate());
+
+        for deps in ["[]", "[fetch, fetch2]"] {
+            let wf = make_wf(&format!(
+                "name: t\njobs:\n  fetch:\n    component: a.wasm\n  fetch2:\n    component: a.wasm\n  p:\n    component: a.wasm\n    foreach: \"$.items\"\n    depends_on: {deps}\n"
+            ));
+            assert!(
+                wf.validate()
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::DynamicForeachDependencies { .. })),
+                "deps={deps}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_dynamic_foreach_rejects_input_from() {
+        let wf = make_wf(
+            r#"
+name: t
+jobs:
+  fetch:
+    component: a.wasm
+  p:
+    component: a.wasm
+    foreach: "$.items"
+    depends_on: [fetch]
+  q:
+    component: a.wasm
+    foreach: "$[*]"
+    depends_on: [p]
+    input_from: p
+"#,
+        );
+        assert!(
+            wf.validate()
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DynamicForeachInputFrom { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_when_that_waits_for_failed() {
+        for when in ["a.status == 'FAILED'", "a.status == FAILED"] {
+            let wf = make_wf(&format!(
+                "name: t\njobs:\n  a:\n    component: a.wasm\n  h:\n    component: h.wasm\n    depends_on: [a]\n    when: \"{when}\"\n"
+            ));
+            let report = wf.validate();
+            assert!(
+                report.errors.iter().any(
+                    |e| matches!(e, ValidationError::FailedStatusInWhen { job, .. } if job == "h")
+                ),
+                "when={when}: {report}"
+            );
+            assert!(
+                report
+                    .to_string()
+                    .contains("failure handlers are not supported")
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_other_status_conditions() {
+        for when in [
+            "a.status == 'SUCCESS'",
+            "a.status != 'FAILED'",
+            "a.status == 'SKIPPED'",
+            "a.status != 'SUCCESS'",
+            "not-a-condition",
+            "a.output == 'FAILED'",
+        ] {
+            let wf = make_wf(&format!(
+                "name: t\njobs:\n  a:\n    component: a.wasm\n  h:\n    component: h.wasm\n    depends_on: [a]\n    when: \"{when}\"\n"
+            ));
+            assert!(wf.validate().is_ok(), "when={when}: {}", wf.validate());
+        }
+    }
+
+    #[test]
+    fn validate_unknown_dep() {
+        let wf = make_wf(
+            r#"
+name: bad
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [nonexistent]
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::UnknownDependency { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_unknown_input_from() {
+        let wf = make_wf(
+            r#"
+name: bad
+jobs:
+  a:
+    component: a.wasm
+    input_from: ghost
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::UnknownInputFrom { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_input_from_not_foreach() {
+        let wf = make_wf(
+            r#"
+name: bad
+jobs:
+  producer:
+    component: p.wasm
+  consumer:
+    component: c.wasm
+    input_from: producer
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(
+            report.errors[0],
+            ValidationError::InputFromNotForeach { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_cycle_detected() {
+        let wf = make_wf(
+            r#"
+name: cycle
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [b]
+  b:
+    component: b.wasm
+    depends_on: [a]
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(matches!(
+            report.errors.last(),
+            Some(ValidationError::CyclicDependency)
+        ));
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let wf = make_wf(
+            r#"
+name: multi-error
+jobs:
+  a:
+    component: a.wasm
+    depends_on: [missing1]
+  b:
+    component: b.wasm
+    depends_on: [missing2]
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert_eq!(report.errors.len(), 2);
+    }
+
+    #[test]
+    fn validation_report_display_ok() {
+        let report = ValidationReport::default();
+        assert_eq!(report.to_string(), "Validation passed");
+    }
+
+    #[test]
+    fn validation_report_display_errors() {
+        let mut report = ValidationReport::default();
+        report.errors.push(ValidationError::CyclicDependency);
+        assert!(report.to_string().contains("1 error(s)"));
+    }
+
+    #[test]
+    fn into_result_ok() {
+        assert!(ValidationReport::default().into_result().is_ok());
+    }
+
+    #[test]
+    fn into_result_err() {
+        let mut report = ValidationReport::default();
+        report.errors.push(ValidationError::CyclicDependency);
+        assert!(report.into_result().is_err());
+    }
+
+    #[test]
+    fn parse_reduce_yaml() {
+        let src = r#"
+name: reduce-test
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+    reduce: json_array
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert_eq!(wf.jobs["aggregate"].reduce, Some(ReduceMode::JsonArray));
+    }
+
+    #[test]
+    fn parse_reduce_custom_yaml() {
+        let src = r#"
+name: reduce-custom
+jobs:
+  process:
+    component: transform.wasm
+    foreach: "$.items"
+  aggregate:
+    component: merge.wasm
+    depends_on: [process]
+    input_from: process
+    reduce:
+      custom: /path/to/reducer.wasm
+"#;
+        let wf: Workflow = serde_yaml::from_str(src).unwrap();
+        assert_eq!(
+            wf.jobs["aggregate"].reduce,
+            Some(ReduceMode::Custom("/path/to/reducer.wasm".to_string()))
+        );
+    }
+
+    #[test]
+    fn validate_reduce_without_input_from() {
+        let wf = make_wf(
+            r#"
+name: bad-reduce
+jobs:
+  a:
+    component: a.wasm
+    reduce: concat
+"#,
+        );
+        let report = wf.validate();
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ReduceWithoutInputFrom { .. }))
+        );
+    }
+
+    #[test]
+    fn validate_reduce_with_input_from_is_ok() {
+        let wf = make_wf(
+            r#"
+name: good-reduce
+jobs:
+  source:
+    component: a.wasm
+    foreach: "$.items"
+    input: '{"items": [1, 2]}'
+  sink:
+    component: b.wasm
+    depends_on: [source]
+    input_from: source
+    reduce: json_merge
+"#,
+        );
+        assert!(wf.validate().is_ok());
+    }
+
+    // ── ExecutorKind ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn executor_kind_defaults_to_local() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: test
+jobs:
+  step:
+    component: x.wasm
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["step"].executor, ExecutorKind::Local);
+    }
+
+    #[test]
+    fn executor_kind_parses_remote() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: test
+jobs:
+  step:
+    component: x.wasm
+    executor: remote
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["step"].executor, ExecutorKind::Remote);
+    }
+
+    #[test]
+    fn executor_kind_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ExecutorKind::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExecutorKind::Remote).unwrap(),
+            "\"remote\""
+        );
+    }
+
+    // #290: guard YAML-parser behaviour across the serde_yaml -> serde_yaml_ng swap.
+    #[test]
+    fn yaml_reduce_both_forms_and_flow_sequences() {
+        let wf: Workflow = serde_yaml::from_str(
+            r#"
+name: compat
+jobs:
+  a:
+    component: a.wasm
+    reduce: json_array
+  b:
+    component: b.wasm
+    depends_on: [a]
+    reduce:
+      custom: /path/to/r.wasm
+"#,
+        )
+        .expect("parse");
+        assert_eq!(wf.jobs["a"].reduce, Some(ReduceMode::JsonArray));
+        assert_eq!(
+            wf.jobs["b"].reduce,
+            Some(ReduceMode::Custom("/path/to/r.wasm".into()))
+        );
+    }
+
+    #[test]
+    fn yaml_error_messages_keep_location_and_cause() {
+        let err = serde_yaml::from_str::<Workflow>(
+            "name: t\njobs:\n  a:\n    component: a.wasm\n    reduce: bogus\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown variant `bogus`"), "{err}");
+        assert!(err.contains("line 5"), "{err}");
+        let syntax = serde_yaml::from_str::<Workflow>("name: [unclosed\n")
+            .unwrap_err()
+            .to_string();
+        assert!(syntax.contains("line"), "{syntax}");
+    }
+}

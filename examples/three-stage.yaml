@@ -1,0 +1,18 @@
+name: three-stage
+
+jobs:
+  fetch:
+    component: target/wasm32-wasip1/debug/hello.wasm
+    input: "fetching data..."
+
+  normalize:
+    component: target/wasm32-wasip1/debug/hello.wasm
+    input: "normalizing..."
+    depends_on:
+      - fetch
+
+  export:
+    component: target/wasm32-wasip1/debug/hello.wasm
+    input: "exporting..."
+    depends_on:
+      - normalize

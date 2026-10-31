@@ -1,0 +1,1460 @@
+mod build;
+mod mcp;
+mod registry;
+mod telemetry;
+mod watch;
+
+use anyhow::Result;
+use chrono::Utc;
+use clap::{Parser, Subcommand, ValueEnum};
+use fluxion_core::{
+    dag::Dag,
+    store::RunStore,
+    workflow::{PermissionSet, Workflow, check_yaml_warnings},
+};
+use fluxion_host::{
+    FluxionHost, scheduler,
+    scheduler::{LbStrategy, RunOptions},
+};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Parser)]
+#[command(name = "fluxion", about = "Safe Wasm-based job execution engine")]
+struct Cli {
+    /// Emit OpenTelemetry spans to stdout
+    #[arg(long, global = true)]
+    trace: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run a YAML workflow (DAG of Wasm components)
+    Run {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Print per-job compile/instantiate/execute breakdown after the run
+        #[arg(long)]
+        metrics: bool,
+        /// Parse the workflow and show execution order without running anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Expose Prometheus /metrics on this port while the workflow runs
+        #[arg(long)]
+        metrics_port: Option<u16>,
+        /// Load-balancing strategy for distributing jobs across remote workers
+        #[arg(long, value_enum, default_value_t = LbStrategyArg::RoundRobin)]
+        lb_strategy: LbStrategyArg,
+    },
+    /// Retry a previous run from a specific job
+    Retry {
+        /// Run ID from the previous execution
+        run_id: String,
+        /// Re-execute this job and all its downstream dependents
+        #[arg(long)]
+        from: String,
+        /// Load-balancing strategy for distributing jobs across remote workers
+        #[arg(long, value_enum, default_value_t = LbStrategyArg::RoundRobin)]
+        lb_strategy: LbStrategyArg,
+    },
+    /// Show detailed status of a previous run
+    Status { run_id: String },
+    /// Show job timeline and failure reasons for a previous run
+    Logs {
+        run_id: String,
+        /// Output structured JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show interface and capability requirements of a Wasm component
+    Inspect {
+        /// Path to the .wasm component file
+        path: String,
+    },
+    /// Execute a single Wasm component
+    Component {
+        #[command(subcommand)]
+        action: ComponentCommands,
+    },
+    /// Manage run history
+    Runs {
+        #[command(subcommand)]
+        action: RunsCommands,
+    },
+    /// Benchmark a Wasm component — compile / instantiate / execute breakdown
+    Bench {
+        /// Path to the .wasm component file
+        path: String,
+        /// Number of timed runs
+        #[arg(long, default_value = "50")]
+        runs: usize,
+        /// Number of warmup runs (excluded from stats)
+        #[arg(long, default_value = "3")]
+        warmup: usize,
+        /// Input payload passed to the component
+        #[arg(long, default_value = "")]
+        input: String,
+    },
+    /// Emit a Graphviz DOT graph of a workflow's job dependency DAG
+    Dot {
+        /// Path to the workflow YAML file
+        path: String,
+    },
+    /// Start a remote worker HTTP server
+    Worker {
+        #[command(subcommand)]
+        action: WorkerCommands,
+    },
+    /// Watch a YAML workflow file and re-run on every save
+    Watch {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Debounce delay in milliseconds before re-running after a change
+        #[arg(long, default_value = "500")]
+        debounce: u64,
+    },
+    /// Validate a YAML workflow without executing it
+    Validate {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Output structured JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+        /// Skip checking whether component .wasm files exist on disk
+        #[arg(long)]
+        skip_wasm_check: bool,
+        /// Treat warnings as errors (exit code 1 if any warnings exist)
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Start the REST API + Prometheus server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+        /// Address to bind (default loopback only; the API has no authentication,
+        /// so pass e.g. 0.0.0.0 only on a trusted network)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+    },
+    /// Start the MCP server (stdio transport)
+    McpServe,
+    /// Manage workflow schedules (cron-based recurring execution)
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleCommands,
+    },
+    /// OCI registry operations — pull, push, and list Wasm components
+    Registry {
+        #[command(subcommand)]
+        action: RegistryCommands,
+    },
+    /// Build a Wasm component from source
+    Build {
+        #[command(subcommand)]
+        action: BuildCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuildCommands {
+    /// Compile a Python script into a Wasm component using componentize-py
+    Python {
+        /// Path to the Python script (e.g. task.py)
+        script: PathBuf,
+        /// Output .wasm path
+        #[arg(short, long, default_value = "component.wasm")]
+        out: PathBuf,
+        /// Path to the WIT directory (default: ./wit)
+        #[arg(long)]
+        wit_path: Option<PathBuf>,
+        /// Generate a task.py stub from wit/task.wit instead of building
+        #[arg(long)]
+        stub: bool,
+        /// With --stub: overwrite the script file even if it already has content
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Pull a Wasm component from an OCI registry and save locally
+    Pull {
+        /// OCI reference (e.g. localhost:5000/myapp:v1)
+        oci_ref: String,
+        /// Save to this path (default: derived from ref)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Push a Wasm component to an OCI registry
+    Push {
+        /// Path to the .wasm file
+        path: PathBuf,
+        /// OCI reference (e.g. localhost:5000/myapp:v1)
+        oci_ref: String,
+    },
+    /// List locally registered components
+    List,
+    /// Remove a locally registered component by ID
+    Rm {
+        /// Entry ID (from `fluxion registry list`)
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    /// Register a workflow to run on a cron schedule
+    Add {
+        /// Path to the workflow YAML file
+        path: String,
+        /// Cron expression (6 fields: sec min hour day month weekday), e.g. "0 0 * * * *" (every hour)
+        #[arg(long)]
+        cron: String,
+    },
+    /// List all registered schedules with their next run time
+    List,
+    /// Remove a schedule by its ID
+    Remove {
+        /// Schedule ID (from `fluxion schedule list`)
+        id: String,
+    },
+    /// Run the schedule daemon — fires due workflows in a loop
+    Daemon,
+}
+
+#[derive(Subcommand)]
+enum WorkerCommands {
+    /// Listen for remote job dispatch requests
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "7777")]
+        port: u16,
+        /// Expose Prometheus /metrics on this port
+        #[arg(long)]
+        metrics_port: Option<u16>,
+        /// Path to the PEM-encoded server TLS certificate (enables TLS/mTLS)
+        #[arg(long, requires = "tls_key", requires = "ca_cert")]
+        tls_cert: Option<PathBuf>,
+        /// Path to the PEM-encoded server TLS private key
+        #[arg(long, requires = "tls_cert", requires = "ca_cert")]
+        tls_key: Option<PathBuf>,
+        /// Path to the PEM-encoded CA certificate used to verify clients (mTLS)
+        #[arg(long, requires = "tls_cert", requires = "tls_key")]
+        ca_cert: Option<PathBuf>,
+        /// Enable POST /jobs and GET /jobs/:id async endpoints
+        #[arg(long)]
+        async_jobs: bool,
+        /// Address to bind (default loopback). A non-loopback address without
+        /// TLS exposes unauthenticated endpoints and logs a warning.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// Restrict request filesystem.{read,write} to paths under this root
+        /// (repeatable). Others are rejected with 403.
+        #[arg(long = "allow-fs-root")]
+        allow_fs_root: Vec<PathBuf>,
+        /// Reject requests with limits.memory_mb above this value (403)
+        #[arg(long)]
+        max_memory_mb: Option<u64>,
+        /// Reject requests that ask for any network.allow entry (403)
+        #[arg(long)]
+        deny_network: bool,
+    },
+    /// Register a worker URL in the local registry
+    Register {
+        /// Worker URL (e.g. http://host:7777)
+        url: String,
+    },
+    /// Remove a worker URL from the local registry
+    Remove {
+        /// Worker URL to deregister
+        url: String,
+    },
+    /// List registered workers and their health status
+    List,
+}
+
+#[derive(Subcommand)]
+enum ComponentCommands {
+    /// Run a Wasm component with optional input
+    Run {
+        /// Path to the .wasm component file
+        path: String,
+        /// Input string passed to the component (mutually exclusive with --input-file)
+        #[arg(long, conflicts_with = "input_file")]
+        input: Option<String>,
+        /// Read input from a file (mutually exclusive with --input)
+        #[arg(long, conflicts_with = "input")]
+        input_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunsCommands {
+    /// List recent runs
+    List {
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Delete runs older than N days
+    Prune {
+        /// Delete runs older than this many days (default: 30)
+        #[arg(long, default_value = "30")]
+        before: u64,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // MCP server must not init tracing (stdout is used for the protocol)
+    let provider = if matches!(cli.command, Commands::McpServe) {
+        None
+    } else {
+        telemetry::init(cli.trace)
+    };
+
+    let result = run(cli.command).await;
+
+    telemetry::shutdown(provider);
+    result
+}
+
+/// CLI-side mirror of [`LbStrategy`] so `fluxion-host` needs no clap dependency.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LbStrategyArg {
+    RoundRobin,
+    Weighted,
+    LeastConn,
+}
+
+impl From<LbStrategyArg> for LbStrategy {
+    fn from(a: LbStrategyArg) -> Self {
+        match a {
+            LbStrategyArg::RoundRobin => LbStrategy::RoundRobin,
+            LbStrategyArg::Weighted => LbStrategy::Weighted,
+            LbStrategyArg::LeastConn => LbStrategy::LeastConn,
+        }
+    }
+}
+
+async fn run(command: Commands) -> Result<()> {
+    match command {
+        Commands::Run {
+            path,
+            metrics,
+            dry_run,
+            metrics_port,
+            lb_strategy,
+        } => {
+            let wf = Workflow::from_file(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+            if dry_run {
+                cmd_dry_run(&wf)?;
+                return Ok(());
+            }
+            if let Some(port) = metrics_port {
+                tokio::spawn(fluxion_host::metrics::serve(port));
+            }
+            let workflow_path = PathBuf::from(&path)
+                .canonicalize()
+                .unwrap_or(PathBuf::from(&path));
+            let host = Arc::new(FluxionHost::new()?);
+            let opts = RunOptions {
+                strategy: lb_strategy.into(),
+                progress: true,
+            };
+            let result = scheduler::run_with_options(&wf, &workflow_path, host, &opts).await?;
+            if metrics {
+                print_metrics_table(&result.jobs);
+            }
+        }
+
+        Commands::Retry {
+            run_id,
+            from,
+            lb_strategy,
+        } => {
+            let store = RunStore::open()?;
+            let (workflow_path, _) = store.load_run(&run_id)?;
+            let wf = Workflow::from_file(&workflow_path).map_err(|e| {
+                anyhow::anyhow!("Failed to load workflow '{}': {}", workflow_path, e)
+            })?;
+            let wp = PathBuf::from(&workflow_path);
+            let host = Arc::new(FluxionHost::new()?);
+            let opts = RunOptions {
+                strategy: lb_strategy.into(),
+                progress: true,
+            };
+            scheduler::retry_with_options(&wf, &wp, host, &run_id, &from, &opts).await?;
+        }
+
+        Commands::Status { run_id } => {
+            cmd_status(&run_id)?;
+        }
+
+        Commands::Logs { run_id, json } => {
+            cmd_logs(&run_id, json)?;
+        }
+
+        Commands::Inspect { path } => {
+            cmd_inspect(&path)?;
+        }
+
+        Commands::Component { action } => match action {
+            ComponentCommands::Run {
+                path,
+                input,
+                input_file,
+            } => {
+                let input_bytes = resolve_input(input, input_file)?;
+                let host = FluxionHost::new()?;
+                let output = host
+                    .run_component(&path, input_bytes, &PermissionSet::default())
+                    .map_err(|e| anyhow::anyhow!("Failed to run '{}': {}", path, e))?;
+                println!("{}", String::from_utf8_lossy(&output));
+            }
+        },
+
+        Commands::Runs { action } => match action {
+            RunsCommands::List { limit } => {
+                let store = RunStore::open()?;
+                let runs = store.list_runs(limit)?;
+                if runs.is_empty() {
+                    println!("No runs found.");
+                } else {
+                    println!("{:<28}  {:<20}  STATUS", "RUN ID", "WORKFLOW");
+                    println!("{}", "-".repeat(60));
+                    for r in runs {
+                        println!("{:<28}  {:<20}  {}", r.id, r.workflow_name, r.status);
+                    }
+                }
+            }
+            RunsCommands::Prune { before } => {
+                let store = RunStore::open()?;
+                let deleted = store.prune(before)?;
+                println!("Pruned {} run(s) older than {} days.", deleted, before);
+            }
+        },
+
+        Commands::Bench {
+            path,
+            runs,
+            warmup,
+            input,
+        } => {
+            cmd_bench(&path, runs, warmup, &input)?;
+        }
+
+        Commands::Dot { path } => {
+            cmd_dot(&path)?;
+        }
+
+        Commands::Worker { action } => match action {
+            WorkerCommands::Serve {
+                port,
+                metrics_port,
+                tls_cert,
+                tls_key,
+                ca_cert,
+                async_jobs,
+                bind,
+                allow_fs_root,
+                max_memory_mb,
+                deny_network,
+            } => {
+                let tls = match (tls_cert, tls_key, ca_cert) {
+                    (Some(cert), Some(key), Some(ca)) => {
+                        Some(fluxion_worker::WorkerTls { cert, key, ca })
+                    }
+                    _ => None,
+                };
+                let config = fluxion_worker::WorkerConfig {
+                    bind,
+                    policy: fluxion_worker::WorkerPolicy {
+                        allow_fs_roots: allow_fs_root,
+                        max_memory_mb,
+                        deny_network,
+                    },
+                    cas_dir: None,
+                };
+                fluxion_worker::serve_with(port, metrics_port, tls, async_jobs, config).await?;
+            }
+            WorkerCommands::Register { url } => {
+                validate_worker_url(&url)?;
+                let store = RunStore::open()?;
+                store.register_worker(&url)?;
+                println!("Registered: {url}");
+            }
+            WorkerCommands::Remove { url } => {
+                let store = RunStore::open()?;
+                let n = store.remove_worker(&url)?;
+                if n == 0 {
+                    println!("Not found: {url}");
+                } else {
+                    println!("Removed: {url}");
+                }
+            }
+            WorkerCommands::List => {
+                let store = RunStore::open()?;
+                let workers = store.list_workers()?;
+                if workers.is_empty() {
+                    println!("No workers registered.");
+                } else {
+                    println!("{:<40}  STATUS", "URL");
+                    println!("{}", "-".repeat(52));
+                    for w in workers {
+                        let status = w.last_health.as_deref().unwrap_or("unknown");
+                        println!("{:<40}  {}", w.url, status.to_uppercase());
+                    }
+                }
+            }
+        },
+
+        Commands::Watch { path, debounce } => {
+            watch::watch_and_run(PathBuf::from(&path), debounce).await?;
+        }
+
+        Commands::Validate {
+            path,
+            json,
+            skip_wasm_check,
+            strict,
+        } => {
+            cmd_validate(&path, json, skip_wasm_check, strict);
+        }
+
+        Commands::Serve { port, bind } => {
+            let addr = std::net::SocketAddr::new(bind, port);
+            println!("Starting fluxion API server on http://{addr}");
+            fluxion_host::api::start(addr).await?;
+        }
+
+        Commands::McpServe => {
+            mcp::serve().await?;
+        }
+
+        Commands::Schedule { action } => match action {
+            ScheduleCommands::Add { path, cron } => {
+                cmd_schedule_add(&path, &cron)?;
+            }
+            ScheduleCommands::List => {
+                cmd_schedule_list()?;
+            }
+            ScheduleCommands::Remove { id } => {
+                cmd_schedule_remove(&id)?;
+            }
+            ScheduleCommands::Daemon => {
+                cmd_schedule_daemon().await?;
+            }
+        },
+
+        Commands::Registry { action } => match action {
+            RegistryCommands::Pull { oci_ref, output } => {
+                registry::pull(&oci_ref, output).await?;
+            }
+            RegistryCommands::Push { path, oci_ref } => {
+                registry::push(&path, &oci_ref).await?;
+            }
+            RegistryCommands::List => {
+                registry::local_list()?;
+            }
+            RegistryCommands::Rm { id } => {
+                registry::rm(&id)?;
+            }
+        },
+
+        Commands::Build { action } => match action {
+            BuildCommands::Python {
+                script,
+                out,
+                wit_path,
+                stub,
+                force,
+            } => {
+                let wit = build::resolve_wit_path(wit_path);
+                if stub {
+                    let stub_out = script.with_extension("py");
+                    build::generate_stub(&wit.join("task.wit"), &stub_out, force)?;
+                } else {
+                    build::build_python(&script, &out, &wit)?;
+                }
+            }
+        },
+    }
+
+    Ok(())
+}
+
+// ── input resolution (#33 --input-file / #37 stdin) ──────────────────────────
+
+fn resolve_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<Vec<u8>> {
+    if let Some(s) = input {
+        return Ok(s.into_bytes());
+    }
+    if let Some(path) = input_file {
+        return std::fs::read(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", path.display(), e));
+    }
+    // Neither flag given: read stdin if it is a pipe/redirect, otherwise return empty.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+        return Ok(buf);
+    }
+    Ok(vec![])
+}
+
+// ── fluxion run --dry-run (#29) ───────────────────────────────────────────────
+
+fn cmd_dry_run(wf: &Workflow) -> Result<()> {
+    let dag = Dag::build(wf)?;
+    println!("Workflow: {} ({} jobs)\n", wf.name, dag.topo_order.len());
+    println!("Execution order:");
+    for (i, job_id) in dag.topo_order.iter().enumerate() {
+        let deps = &dag.deps[job_id];
+        if deps.is_empty() {
+            println!("  {}. {}  (no deps)", i + 1, job_id);
+        } else {
+            println!("  {}. {}  (depends: {})", i + 1, job_id, deps.join(", "));
+        }
+    }
+    Ok(())
+}
+
+// ── fluxion dot ───────────────────────────────────────────────────────────────
+
+fn cmd_dot(path: &str) -> Result<()> {
+    let wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load '{}': {}", path, e))?;
+    let dag = Dag::build(&wf)?;
+
+    println!("digraph {} {{", dot_id(&wf.name));
+    for job_id in &dag.topo_order {
+        println!("  {};", dot_id(job_id));
+    }
+    for (job_id, deps) in &dag.deps {
+        for dep in deps {
+            println!("  {} -> {};", dot_id(dep), dot_id(job_id));
+        }
+    }
+    println!("}}");
+    Ok(())
+}
+
+// ── fluxion validate ──────────────────────────────────────────────────────────
+
+fn cmd_validate(path: &str, json: bool, skip_wasm_check: bool, strict: bool) {
+    // Step 1: read file
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("Cannot read '{path}': {e}");
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"ok": false, "errors": [msg], "warnings": []})
+                );
+            } else {
+                eprintln!("✗ {msg}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Step 2: parse YAML
+    let wf: Workflow = match serde_yaml::from_str(&src) {
+        Ok(w) => w,
+        Err(e) => {
+            let msg = format!("YAML parse error: {e}");
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"ok": false, "errors": [msg], "warnings": []})
+                );
+            } else {
+                eprintln!("✗ YAML parse error: {e}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    if !json {
+        println!("✓ YAML syntax OK");
+    }
+
+    // Step 3: structural validation (deps, cycles, input_from, reduce)
+    let mut report = wf.validate();
+
+    // Step 4: warnings from raw YAML (e.g. limits: at top level)
+    report.warnings.extend(check_yaml_warnings(&src));
+
+    // Step 5: component path existence check (opt-out with --skip-wasm-check)
+    if !skip_wasm_check {
+        let path_report = wf.check_component_paths();
+        report.errors.extend(path_report.errors);
+    }
+
+    let job_count = wf.jobs.len();
+    let error_count = report.errors.len();
+    let warn_count = report.warnings.len();
+
+    if json {
+        let out = serde_json::json!({
+            "ok": report.is_ok() && !(strict && warn_count > 0),
+            "errors": report.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+            "warnings": report.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        // DAG summary
+        if report
+            .errors
+            .iter()
+            .any(|e| matches!(e, fluxion_core::workflow::ValidationError::CyclicDependency))
+        {
+            eprintln!("✗ DAG: circular dependency detected ({job_count} jobs)");
+        } else {
+            println!("✓ DAG: no cycles ({job_count} jobs)");
+        }
+
+        // Component paths
+        let missing: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    fluxion_core::workflow::ValidationError::ComponentNotFound { .. }
+                )
+            })
+            .collect();
+        if missing.is_empty() && !skip_wasm_check {
+            println!("✓ Components: all {job_count} paths exist");
+        } else if !missing.is_empty() {
+            for m in &missing {
+                eprintln!("✗ component not found: {m}");
+            }
+        }
+
+        // Remaining structural errors
+        for err in &report.errors {
+            if !matches!(
+                err,
+                fluxion_core::workflow::ValidationError::CyclicDependency
+                    | fluxion_core::workflow::ValidationError::ComponentNotFound { .. }
+            ) {
+                eprintln!("✗ {err}");
+            }
+        }
+
+        // Warnings
+        for w in &report.warnings {
+            eprintln!("⚠ {w}");
+        }
+
+        // Summary
+        if error_count == 0 && warn_count == 0 {
+            println!("\nValidation passed");
+        } else if error_count == 0 && !strict {
+            println!("\nValidation passed ({warn_count} warning(s))");
+        } else {
+            eprintln!("\nValidation failed ({error_count} error(s), {warn_count} warning(s))");
+        }
+    }
+
+    let fail = !report.is_ok() || (strict && warn_count > 0);
+    if fail {
+        std::process::exit(1);
+    }
+}
+
+fn dot_id(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
+}
+
+// ── fluxion run --metrics ─────────────────────────────────────────────────────
+
+fn print_metrics_table(jobs: &[fluxion_core::runner::JobResult]) {
+    let measured: Vec<_> = jobs.iter().filter(|j| !j.skipped).collect();
+    if measured.is_empty() {
+        return;
+    }
+
+    let pad = measured.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+
+    println!();
+    println!(
+        "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "job",
+        "compile",
+        "instantiate",
+        "execute",
+        "total",
+        pad = pad
+    );
+    println!("  {}", "-".repeat(pad + 46));
+
+    for j in &measured {
+        let total_us = j.compile_us + j.instantiate_us + j.execute_us;
+        println!(
+            "  {:<pad$}  {:>10}  {:>10}  {:>10}  {:>10}",
+            j.job_id,
+            fmt_us(j.compile_us),
+            fmt_us(j.instantiate_us),
+            fmt_us(j.execute_us),
+            fmt_us(total_us),
+            pad = pad
+        );
+    }
+}
+
+// ── fluxion bench ─────────────────────────────────────────────────────────────
+
+fn cmd_bench(path: &str, runs: usize, warmup: usize, input: &str) -> Result<()> {
+    anyhow::ensure!(runs > 0, "--runs must be at least 1");
+
+    let host = FluxionHost::new()?;
+    let perms = PermissionSet::default();
+    let input_bytes = input.as_bytes().to_vec();
+
+    println!(
+        "Benchmarking: {}  ({} runs, {} warmup)\n",
+        path, runs, warmup
+    );
+
+    for i in 0..warmup {
+        print!("\r  warmup {}/{} ...", i + 1, warmup);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        host.run_component_measured(path, input_bytes.clone(), &perms, &Default::default())
+            .map_err(|e| anyhow::anyhow!("warmup run failed: {}", e))?;
+    }
+    if warmup > 0 {
+        println!("\r  warmup done           ");
+    }
+
+    let mut compile_us: Vec<u64> = Vec::with_capacity(runs);
+    let mut instantiate_us: Vec<u64> = Vec::with_capacity(runs);
+    let mut execute_us: Vec<u64> = Vec::with_capacity(runs);
+
+    for i in 0..runs {
+        print!("\r  run {}/{} ...", i + 1, runs);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let (_, m) = host
+            .run_component_measured(path, input_bytes.clone(), &perms, &Default::default())
+            .map_err(|e| anyhow::anyhow!("run {} failed: {}", i + 1, e))?;
+        compile_us.push(m.compile.as_micros() as u64);
+        instantiate_us.push(m.instantiate.as_micros() as u64);
+        execute_us.push(m.execute.as_micros() as u64);
+    }
+    println!("\r  done ({} runs)         \n", runs);
+
+    let total_us: Vec<u64> = compile_us
+        .iter()
+        .zip(&instantiate_us)
+        .zip(&execute_us)
+        .map(|((c, i), e)| c + i + e)
+        .collect();
+
+    // Header
+    println!(
+        "{:<12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "phase", "avg", "p50", "p95", "p99", "min", "max"
+    );
+    println!("{}", "-".repeat(72));
+    print_bench_row("compile", &compile_us);
+    print_bench_row("instantiate", &instantiate_us);
+    print_bench_row("execute", &execute_us);
+    println!("{}", "-".repeat(72));
+    print_bench_row("total", &total_us);
+
+    Ok(())
+}
+
+fn print_bench_row(label: &str, us_values: &[u64]) {
+    let mut sorted = us_values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+
+    let avg = sorted.iter().sum::<u64>() / n as u64;
+    let p50 = sorted[n / 2];
+    let p95 = sorted[(n * 95 / 100).min(n - 1)];
+    let p99 = sorted[(n * 99 / 100).min(n - 1)];
+    let min = sorted[0];
+    let max = sorted[n - 1];
+
+    println!(
+        "{:<12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        label,
+        fmt_us(avg),
+        fmt_us(p50),
+        fmt_us(p95),
+        fmt_us(p99),
+        fmt_us(min),
+        fmt_us(max),
+    );
+}
+
+fn fmt_us(us: u64) -> String {
+    if us >= 1_000_000 {
+        format!("{:.2}s", us as f64 / 1_000_000.0)
+    } else if us >= 1_000 {
+        format!("{:.2}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{}µs", us)
+    }
+}
+
+// ── fluxion status ────────────────────────────────────────────────────────────
+
+fn cmd_status(run_id: &str) -> Result<()> {
+    let store = RunStore::open()?;
+    let run = store.get_run(run_id)?;
+    let jobs = store.get_run_jobs(run_id)?;
+
+    let elapsed_s = run
+        .completed_at
+        .map(|end| (end - run.started_at) as f64)
+        .unwrap_or(0.0);
+
+    println!("Run:      {}", run.id);
+    println!("Workflow: {}", run.workflow_name);
+    println!("Started:  {}", fmt_unix(run.started_at));
+    println!("Elapsed:  {:.2}s", elapsed_s);
+    println!("Status:   {}", run.status.to_uppercase());
+
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    let pad = jobs.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+    println!();
+    println!("  {:<pad$}  STATUS   ELAPSED", "JOB", pad = pad);
+    println!("  {}", "-".repeat(pad + 20));
+    for j in &jobs {
+        let elapsed = j
+            .elapsed_ms
+            .map(|ms| format!("{:.2}s", ms as f64 / 1000.0))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {:<pad$}  {:<8} {}",
+            j.job_id,
+            j.status.to_uppercase(),
+            elapsed,
+            pad = pad
+        );
+        if let Some(ref reason) = j.reason {
+            println!("    Reason: {}", reason);
+        }
+    }
+    Ok(())
+}
+
+// ── fluxion logs ──────────────────────────────────────────────────────────────
+
+fn cmd_logs(run_id: &str, json: bool) -> Result<()> {
+    let store = RunStore::open()?;
+    let run = store.get_run(run_id)?;
+    let jobs = store.get_run_jobs(run_id)?;
+
+    if json {
+        use serde_json::json;
+        let out = json!({
+            "run": {
+                "id": run.id,
+                "workflow_name": run.workflow_name,
+                "workflow_path": run.workflow_path,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "status": run.status,
+            },
+            "jobs": jobs.iter().map(|j| json!({
+                "job_id": j.job_id,
+                "status": j.status,
+                "elapsed_ms": j.elapsed_ms,
+                "reason": j.reason,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let pad = jobs.iter().map(|j| j.job_id.len()).max().unwrap_or(0);
+
+    // Reconstruct a timeline by accumulating elapsed from run start.
+    let mut cursor = run.started_at;
+    for j in &jobs {
+        let elapsed_ms = j.elapsed_ms.unwrap_or(0);
+        println!(
+            "[{}] {:<pad$}  RUNNING",
+            fmt_unix(cursor),
+            j.job_id,
+            pad = pad
+        );
+        cursor += elapsed_ms / 1000;
+        let elapsed_s = elapsed_ms as f64 / 1000.0;
+        println!(
+            "[{}] {:<pad$}  {}  {:.2}s",
+            fmt_unix(cursor),
+            j.job_id,
+            j.status.to_uppercase(),
+            elapsed_s,
+            pad = pad,
+        );
+        if let Some(ref reason) = j.reason {
+            println!("  {}", reason);
+        }
+    }
+    Ok(())
+}
+
+// ── fluxion inspect ───────────────────────────────────────────────────────────
+
+fn cmd_inspect(path: &str) -> Result<()> {
+    use wasmtime::component::Component;
+    use wasmtime::{Config, Engine};
+
+    let meta =
+        std::fs::metadata(path).map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", path, e))?;
+
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    let engine = Engine::new(&config)?;
+
+    let component = Component::from_file(&engine, path)
+        .map_err(|e| anyhow::anyhow!("Not a valid Wasm component '{}': {}", path, e))?;
+
+    let ct = component.component_type();
+
+    println!("Path:  {}", path);
+    println!(
+        "Size:  {} bytes ({:.1} KB)",
+        meta.len(),
+        meta.len() as f64 / 1024.0
+    );
+
+    let exports: Vec<_> = ct.exports(&engine).collect();
+    println!();
+    println!("Exports ({}):", exports.len());
+    for (name, item) in &exports {
+        println!("  {}  [{}]", name, component_item_kind(&item.ty));
+    }
+
+    let imports: Vec<_> = ct.imports(&engine).collect();
+    if !imports.is_empty() {
+        println!();
+        println!("Imports ({}):", imports.len());
+        for (name, item) in &imports {
+            println!("  {}  [{}]", name, component_item_kind(&item.ty));
+        }
+    }
+    Ok(())
+}
+
+fn component_item_kind(item: &wasmtime::component::types::ComponentItem) -> &'static str {
+    use wasmtime::component::types::ComponentItem;
+    match item {
+        ComponentItem::ComponentFunc(_) => "func",
+        ComponentItem::CoreFunc(_) => "core-func",
+        ComponentItem::Module(_) => "module",
+        ComponentItem::Component(_) => "component",
+        ComponentItem::ComponentInstance(_) => "instance",
+        ComponentItem::Type(_) => "type",
+        ComponentItem::Resource(_) => "resource",
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Validate a worker URL before registering it. Rejects anything that isn't a
+/// well-formed http(s) URL, so a typo surfaces immediately instead of as an
+/// opaque connection error deep in the scheduler/worker dispatch path.
+fn validate_worker_url(url: &str) -> Result<()> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow::anyhow!("'{url}' is not a valid URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        anyhow::bail!(
+            "'{url}' has unsupported scheme '{}' — expected http or https",
+            parsed.scheme()
+        );
+    }
+    Ok(())
+}
+
+fn fmt_unix(secs: u64) -> String {
+    chrono::DateTime::<Utc>::from_timestamp(secs as i64, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "invalid timestamp".to_string())
+}
+
+// ── fluxion schedule ──────────────────────────────────────────────────────────
+
+fn next_run_secs(cron_expr: &str) -> Result<u64> {
+    use std::str::FromStr;
+    let schedule = cron::Schedule::from_str(cron_expr)
+        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expr, e))?;
+    let next = schedule.upcoming(Utc).next().ok_or_else(|| {
+        anyhow::anyhow!("Cron expression '{}' has no future occurrences", cron_expr)
+    })?;
+    Ok(next.timestamp() as u64)
+}
+
+fn cmd_schedule_add(path: &str, cron_expr: &str) -> Result<()> {
+    // Validate the workflow can be parsed.
+    let _wf = Workflow::from_file(path)
+        .map_err(|e| anyhow::anyhow!("Cannot load workflow '{}': {}", path, e))?;
+    let abs_path = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Cannot resolve '{}': {}", path, e))?;
+    let next = next_run_secs(cron_expr)?;
+    let id = format!(
+        "sched-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let store = RunStore::open()?;
+    store.add_schedule(&id, abs_path.to_string_lossy().as_ref(), cron_expr, next)?;
+    let next_dt = chrono::DateTime::<Utc>::from_timestamp(next as i64, 0)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_else(|| next.to_string());
+    println!("Schedule added: {id}");
+    println!("  workflow : {}", abs_path.display());
+    println!("  cron     : {cron_expr}");
+    println!("  next run : {next_dt}");
+    Ok(())
+}
+
+fn cmd_schedule_list() -> Result<()> {
+    let store = RunStore::open()?;
+    let schedules = store.list_schedules()?;
+    if schedules.is_empty() {
+        println!("No schedules registered.");
+        return Ok(());
+    }
+    println!("{:<28}  {:<20}  NEXT RUN", "ID", "CRON");
+    println!("{}", "-".repeat(72));
+    for s in schedules {
+        let next_dt = chrono::DateTime::<Utc>::from_timestamp(s.next_run_at as i64, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| s.next_run_at.to_string());
+        println!("{:<28}  {:<20}  {}", s.id, s.cron_expr, next_dt);
+        println!("    {}", s.workflow_path);
+    }
+    Ok(())
+}
+
+fn cmd_schedule_remove(id: &str) -> Result<()> {
+    let store = RunStore::open()?;
+    let n = store.remove_schedule(id)?;
+    if n == 0 {
+        println!("Not found: {id}");
+    } else {
+        println!("Removed: {id}");
+    }
+    Ok(())
+}
+
+async fn cmd_schedule_daemon() -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    println!("fluxion schedule daemon starting (press Ctrl-C or send SIGTERM to stop)");
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let host = Arc::new(FluxionHost::new()?);
+
+    loop {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                println!("Received SIGTERM — shutting down daemon");
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received SIGINT — shutting down daemon");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                fire_due_schedules(Arc::clone(&host)).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn fire_due_schedules(host: Arc<FluxionHost>) {
+    match RunStore::default_path() {
+        Ok(db) => fire_due_schedules_at(host, &db).await,
+        Err(e) => tracing::error!("store path unavailable: {e}"),
+    }
+}
+
+/// Fire every due schedule recorded in the run store at `db`.
+async fn fire_due_schedules_at(host: Arc<FluxionHost>, db: &Path) {
+    // Collect due schedules then drop the store (rusqlite::Connection is !Send).
+    let due = {
+        let store = match RunStore::open_at(db) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("store open failed: {e}");
+                return;
+            }
+        };
+        match store.due_schedules() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("due_schedules failed: {e}");
+                return;
+            }
+        }
+    };
+    for sched in due {
+        let cron_expr = sched.cron_expr.clone();
+        let sched_id = sched.id.clone();
+
+        // Optimistic lock: advance next_run_at before execution.
+        // If another process already updated next_run_at, skip this schedule.
+        let next = match next_run_secs(&cron_expr) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(id = %sched_id, "invalid cron: {e}");
+                continue;
+            }
+        };
+        let claimed = {
+            let store = match RunStore::open_at(db) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("store open failed: {e}");
+                    continue;
+                }
+            };
+            store
+                .claim_schedule(&sched_id, sched.next_run_at, next)
+                .unwrap_or(false)
+        };
+        if !claimed {
+            tracing::debug!(id = %sched_id, "schedule already claimed by another process, skipping");
+            continue;
+        }
+
+        let wf = match Workflow::from_file(&sched.workflow_path) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!(id = %sched_id, "failed to load workflow: {e}");
+                continue;
+            }
+        };
+        let wf_path = PathBuf::from(&sched.workflow_path);
+        tracing::info!(schedule = %sched_id, "firing scheduled workflow");
+        if let Ok(store) = RunStore::open_at(db) {
+            let _ = scheduler::run_with_store(
+                &wf,
+                &wf_path,
+                Arc::clone(&host),
+                &RunOptions::default(),
+                &store,
+            )
+            .await;
+        }
+
+        // Record last_run_at (next_run_at is already updated by claim_schedule).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(s) = RunStore::open_at(db) {
+            let _ = s.update_schedule_next(&sched_id, now, next);
+        }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::{Cli, Commands, fmt_unix, next_run_secs, validate_worker_url};
+    use clap::Parser;
+    use std::net::IpAddr;
+
+    fn serve_bind(args: &[&str]) -> (u16, IpAddr) {
+        match Cli::try_parse_from(args).unwrap().command {
+            Commands::Serve { port, bind } => (port, bind),
+            _ => panic!("not serve"),
+        }
+    }
+
+    fn retry_lb_strategy(args: &[&str]) -> fluxion_host::scheduler::LbStrategy {
+        let s: super::LbStrategyArg = retry_lb_arg(args);
+        s.into()
+    }
+
+    fn retry_lb_arg(args: &[&str]) -> super::LbStrategyArg {
+        match Cli::try_parse_from(args).unwrap().command {
+            Commands::Retry { lb_strategy, .. } => lb_strategy,
+            _ => panic!("not retry"),
+        }
+    }
+
+    #[test]
+    fn retry_accepts_lb_strategy_weighted() {
+        let s = retry_lb_strategy(&[
+            "fluxion",
+            "retry",
+            "run-1",
+            "--from",
+            "a",
+            "--lb-strategy",
+            "weighted",
+        ]);
+        assert!(matches!(s, fluxion_host::scheduler::LbStrategy::Weighted));
+    }
+
+    #[test]
+    fn retry_accepts_lb_strategy_least_conn() {
+        let s = retry_lb_strategy(&[
+            "fluxion",
+            "retry",
+            "run-1",
+            "--from",
+            "a",
+            "--lb-strategy",
+            "least-conn",
+        ]);
+        assert!(matches!(s, fluxion_host::scheduler::LbStrategy::LeastConn));
+    }
+
+    #[test]
+    fn retry_rejects_unknown_lb_strategy() {
+        assert!(
+            Cli::try_parse_from(["fluxion", "retry", "r", "--from", "a", "--lb-strategy", "x"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retry_lb_strategy_defaults_to_round_robin() {
+        let s = retry_lb_strategy(&["fluxion", "retry", "run-1", "--from", "a"]);
+        assert!(matches!(s, fluxion_host::scheduler::LbStrategy::RoundRobin));
+    }
+
+    #[test]
+    fn serve_binds_loopback_by_default() {
+        let (port, bind) = serve_bind(&["fluxion", "serve"]);
+        assert_eq!(port, 8080);
+        assert!(bind.is_loopback());
+        assert_eq!(bind.to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn serve_bind_can_be_overridden_explicitly() {
+        let (_, bind) = serve_bind(&["fluxion", "serve", "--bind", "0.0.0.0"]);
+        assert!(bind.is_unspecified());
+    }
+
+    #[test]
+    fn fmt_unix_includes_date_and_time() {
+        // 2024-01-15T03:04:05Z
+        let formatted = fmt_unix(1705287845);
+        assert_eq!(formatted, "2024-01-15 03:04:05");
+    }
+
+    #[test]
+    fn fmt_unix_epoch_zero() {
+        assert_eq!(fmt_unix(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn validate_worker_url_accepts_http_and_https() {
+        assert!(validate_worker_url("http://worker-1:7777").is_ok());
+        assert!(validate_worker_url("https://worker-1:7777").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_malformed_url() {
+        let err = validate_worker_url("not a url").unwrap_err();
+        assert!(err.to_string().contains("not a valid URL"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_unsupported_scheme() {
+        let err = validate_worker_url("ftp://worker-1:7777").unwrap_err();
+        assert!(err.to_string().contains("unsupported scheme"));
+    }
+
+    #[test]
+    fn validate_worker_url_rejects_missing_scheme() {
+        let err = validate_worker_url("worker-1:7777").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn next_run_secs_valid_expr_is_in_the_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next = next_run_secs("0 * * * * *").unwrap();
+        assert!(next > now, "next={next} now={now}");
+        assert!(next <= now + 61);
+    }
+
+    #[test]
+    fn next_run_secs_rejects_invalid_expr() {
+        let err = next_run_secs("not a cron").unwrap_err();
+        assert!(err.to_string().contains("Invalid cron expression"));
+    }
+
+    #[tokio::test]
+    async fn fire_due_schedules_claims_even_when_workflow_is_missing() {
+        use super::fire_due_schedules_at;
+        use fluxion_core::store::RunStore;
+        use fluxion_host::FluxionHost;
+        use std::sync::Arc;
+
+        let home = tempfile::tempdir().unwrap();
+        let db = home.path().join("runs.db");
+
+        let missing = home.path().join("missing.yaml");
+        {
+            let store = RunStore::open_at(&db).unwrap();
+            // next_run_at = 1 (long past) => due immediately.
+            store
+                .add_schedule("sched-missing", missing.to_str().unwrap(), "0 * * * * *", 1)
+                .unwrap();
+        }
+        assert_eq!(
+            RunStore::open_at(&db)
+                .unwrap()
+                .due_schedules()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let host = Arc::new(FluxionHost::with_cache_dir(home.path().join("cache")).unwrap());
+        // Must not panic even though the workflow file cannot be loaded.
+        fire_due_schedules_at(Arc::clone(&host), &db).await;
+
+        // Claim happened before the load failure: next_run_at advanced into the
+        // future, last_run_at stays unset (the run was skipped).
+        let list = RunStore::open_at(&db).unwrap().list_schedules().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].next_run_at > 1);
+        assert_eq!(list[0].last_run_at, None);
+        let advanced = list[0].next_run_at;
+
+        // Second call: no longer due, nothing changes.
+        assert!(
+            RunStore::open_at(&db)
+                .unwrap()
+                .due_schedules()
+                .unwrap()
+                .is_empty()
+        );
+        fire_due_schedules_at(host, &db).await;
+        let list = RunStore::open_at(&db).unwrap().list_schedules().unwrap();
+        assert_eq!(list[0].next_run_at, advanced);
+    }
+}

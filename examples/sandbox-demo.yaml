@@ -1,0 +1,19 @@
+name: sandbox-demo
+
+jobs:
+  # Step 1 — SUCCEED: /tmp granted as read-only
+  read-allowed:
+    component: components/file-reader/target/wasm32-wasip1/debug/file_reader.wasm
+    input: "/tmp/fluxion-test.txt"
+    permissions:
+      filesystem:
+        read: [/tmp]
+      limits:
+        memory_mb: 64
+        timeout_secs: 10
+
+  # Step 2 — FAIL: no permission — /tmp is invisible to the component
+  read-denied:
+    component: components/file-reader/target/wasm32-wasip1/debug/file_reader.wasm
+    input: "/tmp/fluxion-test.txt"
+    depends_on: [read-allowed]

@@ -1,0 +1,60 @@
+[package]
+name = "fluxion-host"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+# #770: lib ターゲットの暗黙ベンチハーネスを無効化する。
+# 無効化しないと `cargo bench -p fluxion-host` が実 bench (host_bench, harness=false)
+# より先にこの空のハーネスを実行し、`--output-format bencher` を認識できず
+# 「error: Unrecognized option: 'output-format'」で失敗する。CI 側は
+# `| tee bench-output.txt` の終了コードがマスクされるためこれに気づけなかった
+# （bench-output.txt が空のまま "Store benchmark results" ステップだけが落ちる）。
+[lib]
+bench = false
+
+[dependencies]
+anyhow        = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+wasmtime      = { workspace = true }
+wasmtime-wasi = { workspace = true }
+sha2          = { workspace = true }
+lru           = { workspace = true }
+reqwest       = { workspace = true }
+bytes         = { workspace = true }
+base64        = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+axum          = { workspace = true }
+prometheus    = { workspace = true }
+futures              = { workspace = true }
+opentelemetry        = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+hickory-resolver     = { workspace = true }
+fluxion-core  = { path = "../fluxion-core" }
+tempfile      = "3"
+
+[[bench]]
+name    = "host_bench"
+harness = false
+
+[features]
+ci = []
+ui-metrics = []
+
+[dev-dependencies]
+criterion        = { workspace = true }
+wasmtime         = { workspace = true }
+indexmap         = { version = "2", features = ["serde"] }
+tempfile         = "3"
+reqwest          = { workspace = true }
+tokio            = { workspace = true }
+rusqlite         = { workspace = true }
+tower            = { workspace = true }
+rcgen            = "0.13"
+tokio-rustls     = { workspace = true }
+rustls           = { workspace = true }
+http-body-util   = "0.1"
+serde_yaml       = { workspace = true }

@@ -1,0 +1,38 @@
+name: resource-limits-demo
+version: "1.0"
+
+# Demonstrates timeout_secs enforcement via wasmtime epoch interruption.
+# 'spin-forever' loops over u64::MAX iterations — without the epoch mechanism
+# it would run indefinitely. With timeout_secs: 2 it is killed after ~2 seconds.
+#
+# 'fast-sum' completes within the timeout to show a succeeding sibling.
+# It depends on nothing, so both jobs run in parallel.
+
+jobs:
+  spin-forever:
+    component: components/spin/target/wasm32-wasip1/debug/spin.wasm
+    # u64::MAX iterations — will never finish naturally
+    input: "18446744073709551615"
+    permissions:
+      filesystem:
+        read: []
+        write: []
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 2
+
+  fast-sum:
+    component: components/spin/target/wasm32-wasip1/debug/spin.wasm
+    # 1 million iterations — finishes in milliseconds
+    input: "1000000"
+    permissions:
+      filesystem:
+        read: []
+        write: []
+      network:
+        allow: []
+      limits:
+        memory_mb: 64
+        timeout_secs: 10
