@@ -7,6 +7,27 @@ Safe Wasm-based job execution engine with capability-controlled sandboxing and D
 
 Each job runs as a WebAssembly component — isolated, permission-scoped, and language-agnostic.
 
+## Quick start (prebuilt package)
+
+> Available from the first tagged release (see the Releases page). Until then, build from source below.
+
+Each release attaches `fluxion-<version>-linux-x86_64.tar.gz` (the CLI, `examples/`, and the demo Wasm
+components laid out where the examples expect them) and a `.sha256` file.
+
+```bash
+sha256sum -c fluxion-<version>-linux-x86_64.tar.gz.sha256
+tar xzf fluxion-<version>-linux-x86_64.tar.gz && cd fluxion-<version>-linux-x86_64
+
+# An infinite loop is killed after 2 s (epoch interruption)
+./fluxion run examples/resource-limits-demo.yaml
+# A component that asks for more memory than its limit is rejected before its code runs
+./fluxion run examples/memory-limits-demo.yaml
+```
+
+Requirements: Linux x86_64, glibc 2.39 or newer (built on Ubuntu 24.04), OpenSSL 3 (`libssl.so.3`).
+No Rust toolchain is needed to run the package. Run history is written to `~/.fluxion`
+(set `FLUXION_HOME` to use another directory).
+
 ## Required Tools
 
 - Rust 1.95+(edition 2024 のクレートを含むため。fluxion-worker のみ edition 2021)
