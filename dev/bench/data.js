@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793445632528,
+  "lastUpdate": 1793446070470,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -359,6 +359,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 25632455,
             "range": "± 1529504",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "82d309ee237fa8412e26aceeedc433108e240207",
+          "message": "ci: no-ai-artifacts を追加する(AI 作業副産物の追跡を検出) (#6)\n\n.claude/ 配下と .mcp.json の追跡を CI で検出する。共通ジョブは qa-workflows\n(SHA 固定)。public リポへの混入事故の再発防止。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T20:23:53+09:00",
+          "tree_id": "033016855afabe9f6b7b060356c56c009c124ec3",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/82d309ee237fa8412e26aceeedc433108e240207"
+        },
+        "date": 1793446069911,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1308371,
+            "range": "± 16254",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 31888828,
+            "range": "± 1872336",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 21397,
+            "range": "± 1157",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 85597,
+            "range": "± 7874",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1311565,
+            "range": "± 29849",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5673758,
+            "range": "± 231403",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5397472,
+            "range": "± 268682",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 13431607,
+            "range": "± 394191",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 10892742,
+            "range": "± 687514",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 21710413,
+            "range": "± 1355464",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 16291718,
+            "range": "± 679168",
             "unit": "ns/iter"
           }
         ]
