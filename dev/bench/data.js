@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793442130040,
+  "lastUpdate": 1793443294908,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -89,6 +89,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 15671744,
             "range": "± 587801",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ba1cdcbd4a43d6d190ad923c4fa7882c1047240f",
+          "message": "test: fire_due_schedules の claim テストを分の境界で不安定にしない (#3) (#4)\n\ncron を毎分(\"0 * * * * *\")から毎年 1 月 1 日(\"0 0 0 1 1 *\")に変える。\nclaim 後の next_run_at が数か月先になり、テスト中に分を跨いでも再び due にならない。\nCI で 10:22:00.08Z(分の境界)に失敗したことが根拠。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T19:37:30+09:00",
+          "tree_id": "8c5b691698649b150c05c4d85adda2ddc5dc78b4",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/ba1cdcbd4a43d6d190ad923c4fa7882c1047240f"
+        },
+        "date": 1793443294122,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 2103478,
+            "range": "± 10427",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 53196091,
+            "range": "± 1004284",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 32695,
+            "range": "± 155",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 130625,
+            "range": "± 1380",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 2203703,
+            "range": "± 10026",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5973118,
+            "range": "± 106350",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6010940,
+            "range": "± 153041",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 14636761,
+            "range": "± 355899",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 10702759,
+            "range": "± 478836",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 24733948,
+            "range": "± 592149",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 15785175,
+            "range": "± 376374",
             "unit": "ns/iter"
           }
         ]
