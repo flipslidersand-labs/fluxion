@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793443294908,
+  "lastUpdate": 1793444204620,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -179,6 +179,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 15785175,
             "range": "± 376374",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5d3888095832a3401f5bc983dfaf7f9a59e9f941",
+          "message": "feat: Release workflow を追加する(事前ビルド済みバイナリ + デモ用 Wasm) (#1) (#2)\n\nタグ(v*) push で CI ビルド → パス混入検査 → draft Release を作成。\nworkflow_dispatch は artifact のみ(Release は作らない)。\n手元ビルドは /home/<user> が 1,000 箇所超埋め込まれるため、CI で\n--remap-path-prefix を付けてビルドし、残っていれば失敗させる。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T19:52:53+09:00",
+          "tree_id": "008ed60cbc7fdec1ea535d5065d306bb0e74d20f",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/5d3888095832a3401f5bc983dfaf7f9a59e9f941"
+        },
+        "date": 1793444203967,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1245789,
+            "range": "± 16760",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 27739138,
+            "range": "± 831081",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 20043,
+            "range": "± 240",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 81364,
+            "range": "± 1134",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1245593,
+            "range": "± 16784",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5205310,
+            "range": "± 288592",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5151520,
+            "range": "± 873563",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 12191404,
+            "range": "± 606594",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 9600907,
+            "range": "± 325794",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 19256892,
+            "range": "± 1346857",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 14776102,
+            "range": "± 1155369",
             "unit": "ns/iter"
           }
         ]
