@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793520351916,
+  "lastUpdate": 1793521050830,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -539,6 +539,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 28423444,
             "range": "± 4418190",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f1b399dcf9eb45cf68ad0fcb52ec46aae5520e97",
+          "message": "ci(release): キャッシュを OS イメージごとに分け、cargo-component は実行できるかで判定する (#8)\n\nubuntu-22.04 の試走(run 41287183581)が、24.04 の試走でキャッシュされた cargo-component\n(GLIBC_2.39 を要求)の復元で失敗した。glibc 要件を下げるための 22.04 化が、キャッシュ経由で\n24.04 の成果物を持ち込むと打ち消される。キャッシュ鍵に OS イメージを含め、cargo-component は\n--version を実行して判定し、動かなければ再インストールする。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-01T17:13:17+09:00",
+          "tree_id": "523abf7f4b05d3e3fd8543a5a84e25dc72bdcfc5",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/f1b399dcf9eb45cf68ad0fcb52ec46aae5520e97"
+        },
+        "date": 1793521049907,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1794447,
+            "range": "± 9037",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 54857830,
+            "range": "± 1226308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 31060,
+            "range": "± 144",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 122886,
+            "range": "± 8994",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1845766,
+            "range": "± 10950",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 6247440,
+            "range": "± 90577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6208271,
+            "range": "± 99975",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 15282101,
+            "range": "± 249922",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 11538197,
+            "range": "± 286266",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 24801678,
+            "range": "± 499263",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 17386650,
+            "range": "± 465886",
             "unit": "ns/iter"
           }
         ]
