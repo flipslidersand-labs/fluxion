@@ -24,7 +24,7 @@ tar xzf fluxion-<version>-linux-x86_64.tar.gz && cd fluxion-<version>-linux-x86_
 ./fluxion run examples/memory-limits-demo.yaml
 ```
 
-Requirements: Linux x86_64, glibc 2.39 or newer (built on Ubuntu 24.04), OpenSSL 3 (`libssl.so.3`).
+Requirements: Linux x86_64, glibc 2.34 or newer, OpenSSL 3 (`libssl.so.3`). The package is built on Ubuntu 22.04 and the build fails if the binary needs a newer glibc symbol than 2.35 (the current binary needs 2.34). It is smoke-tested on Ubuntu 22.04 by CI; other distributions are not tested.
 No Rust toolchain is needed to run the package. Run history is written to `~/.fluxion`
 (set `FLUXION_HOME` to use another directory).
 
