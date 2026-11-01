@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793521050830,
+  "lastUpdate": 1793523005284,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -629,6 +629,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 17386650,
             "range": "± 465886",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1eecac45bb90a2226b3d8dcef59e1c328bc34d91",
+          "message": "docs: README の要件を、実測した glibc に直す (#1) (#9)\n\n試走(run 41287937278、ubuntu-22.04 でビルド)の artifact を取得して独立に検証した。バイナリが\n要求する最大の glibc シンボルは GLIBC_2.34(以前の ubuntu-24.04 ビルドは 2.39)。CI が\nubuntu-22.04 でスモークテストを行うこと、他のディストリビューションは未検証であることを明記する。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-01T17:46:06+09:00",
+          "tree_id": "0495feca2621822d0d7647c2942d61b5013a2670",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/1eecac45bb90a2226b3d8dcef59e1c328bc34d91"
+        },
+        "date": 1793523004511,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1541455,
+            "range": "± 7160",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 41311648,
+            "range": "± 5895642",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 25410,
+            "range": "± 974",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 100094,
+            "range": "± 414",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1595534,
+            "range": "± 6803",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 6619256,
+            "range": "± 1235122",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5460566,
+            "range": "± 172714",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 13358740,
+            "range": "± 2512162",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 12945483,
+            "range": "± 4259706",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 21607453,
+            "range": "± 2543590",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 15003116,
+            "range": "± 330684",
             "unit": "ns/iter"
           }
         ]
