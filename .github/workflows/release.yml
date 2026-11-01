@@ -49,12 +49,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-build
+          # the key carries the OS image: a cache restored from another image (e.g. ubuntu-24.04)
+          # brings binaries that need a newer glibc than this runner has
+          shared-key: release-build-ubuntu-22.04
           cache-bin: true
       - name: Install cargo-component
         run: |
-          if ! command -v cargo-component &>/dev/null; then
-            cargo install cargo-component --locked -j2
+          # run it, do not just look for it: a binary restored from the cache may not start here
+          if ! cargo-component --version &>/dev/null; then
+            cargo install cargo-component --locked --force -j2
           fi
       - name: Build Wasm components (demo set)
         # examples/*.yaml が参照するパス(components/<name>/target/wasm32-wasip1/debug/)に合わせて debug ビルド
