@@ -16,10 +16,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  GLIBC_MAX: "2.35"  # ubuntu-22.04。これを超える glibc を要求するバイナリは配布しない
 
 jobs:
   build:
-    runs-on: ${{ vars.GATE_RUNNER }}
+    # glibc の要求は「ビルドした OS の glibc」で決まる。古めの LTS でビルドして対応 OS を広げる
+    # (ubuntu-latest=24.04 は glibc 2.39 以上を要求した)。上限は GLIBC_MAX で検査する。
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
       # 実行環境のホーム/ワークスペースのパスを成果物に残さない
@@ -62,6 +65,12 @@ jobs:
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
       - name: Build CLI (release)
         run: cargo build --release -p fluxion-cli -j2
+      - name: Check the binary does not require a newer glibc than GLIBC_MAX
+        run: |
+          set -euo pipefail
+          max=$(objdump -T target/release/fluxion | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "max glibc symbol required: ${max} (allowed: GLIBC_${GLIBC_MAX})"
+          [ "$(printf '%s\nGLIBC_%s\n' "$max" "$GLIBC_MAX" | sort -V | tail -1)" = "GLIBC_${GLIBC_MAX}" ]
       - name: Check no build-environment paths leak into artifacts
         run: |
           set -euo pipefail
