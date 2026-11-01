@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793446070470,
+  "lastUpdate": 1793520351916,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -449,6 +449,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 16291718,
             "range": "± 679168",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yukihanastudy@gmail.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5ebd0820821cb53df0ce90bca20a624fb941aae4",
+          "message": "ci(release): ubuntu-22.04 でビルドし、要求 glibc の上限を検査する (#1) (#7)\n\nubuntu-latest(24.04)でビルドしたバイナリは glibc 2.39 以上を要求した。\n22.04 でビルドして対応 OS を広げ、GLIBC_MAX(2.35)を超える要求は失敗にする。\n\nCo-authored-by: flipslidersand <205122478+flipslidersand@users.noreply.github.com>\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-01T17:01:54+09:00",
+          "tree_id": "bcccc93b45dbe6f84fd4bacf2a1bf16cd81d79e3",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/5ebd0820821cb53df0ce90bca20a624fb941aae4"
+        },
+        "date": 1793520351162,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1549228,
+            "range": "± 18786",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 41553425,
+            "range": "± 6233646",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 25249,
+            "range": "± 56",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 100845,
+            "range": "± 3184",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1585981,
+            "range": "± 6639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 10076785,
+            "range": "± 3132664",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 10954392,
+            "range": "± 2567224",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 18431309,
+            "range": "± 5228982",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 10858519,
+            "range": "± 2609899",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 25082358,
+            "range": "± 5950275",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 28423444,
+            "range": "± 4418190",
             "unit": "ns/iter"
           }
         ]
