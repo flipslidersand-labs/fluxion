@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793523005284,
+  "lastUpdate": 1794708944685,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -719,6 +719,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 15003116,
             "range": "± 330684",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "205122478+flipslidersand@users.noreply.github.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6f512ad4b8eb62c7ac05bd531cf8841761d8ea49",
+          "message": "fix(ci): reusable workflow の固定 SHA を qa-workflows main 上の同内容コミットへ差し替える (#10)\n\n現在の固定先は qa-workflows の main から到達できず workflow が起動しない。\n変更は uses: 行の SHA だけで、呼び出す workflow の内容は同じ。\n\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-15T11:01:28+09:00",
+          "tree_id": "e19decad4cd0357b1b7eddd1c090f1bfcd155932",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/6f512ad4b8eb62c7ac05bd531cf8841761d8ea49"
+        },
+        "date": 1794708943938,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1803864,
+            "range": "± 7479",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 58759807,
+            "range": "± 4586705",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 28780,
+            "range": "± 659",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 120653,
+            "range": "± 556",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1859244,
+            "range": "± 8380",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 6979908,
+            "range": "± 555112",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6857096,
+            "range": "± 354152",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 16305465,
+            "range": "± 441259",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 12462686,
+            "range": "± 324524",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 27169498,
+            "range": "± 590744",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 19277400,
+            "range": "± 463446",
             "unit": "ns/iter"
           }
         ]
