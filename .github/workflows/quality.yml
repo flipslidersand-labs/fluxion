@@ -18,7 +18,7 @@ jobs:
     # #241: pinned to a commit SHA (qa-workflows has no tags yet) so a
     # breaking change on qa-workflows main can't silently break this CI.
     # Bump deliberately: `gh api repos/flipslidersand-labs/qa-workflows/commits/main --jq .sha`
-    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@6742b2cd54d0de6387cc1a60d46069518ec331e0
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@d95297c6d2b2d9159e5eccd9c5296970eb7efbe3
     with:
       rust-version: "stable"
       test-args: "--workspace"
