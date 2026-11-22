@@ -12,7 +12,12 @@ all-features = true
 # entry with a reason and an expiry date for each crate reported.
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is unmaintained and has no safe upgrade. It is also pulled in by
+    # `cron` and `opentelemetry-stdout`, so dropping the direct dependency would
+    # not remove it. Expires 2027-02-28: migrate to jiff/time or re-justify.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; transitive via cron and opentelemetry-stdout; review by 2027-02-28" },
+]
 
 [licenses]
 confidence-threshold = 0.8

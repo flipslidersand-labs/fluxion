@@ -24,7 +24,7 @@ tracing-opentelemetry = "0.28"
 opentelemetry         = "0.27"
 opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-stdout  = "0.27"
-rusqlite   = { version = "0.31", features = ["bundled"] }
+rusqlite   = { version = "0.41", features = ["bundled", "fallible_uint"] }
 clap       = { version = "4", features = ["derive"] }
 # Default features minus `cache` (wasmtime-cache -> zstd 0.13 carries RUSTSEC-2026-0391/0398/0403).
 # fluxion has its own precompiled-component cache (fluxion-host/src/cache.rs) and never
