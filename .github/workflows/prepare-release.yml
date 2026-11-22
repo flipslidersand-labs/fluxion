@@ -1,0 +1,55 @@
+name: Prepare release
+
+# #19 (repo-compass ADR-028 decision 3, trial): the only human step is merging the release PR.
+#  - push to main : release-please opens/updates a release PR as a draft (merge-queue only
+#                   picks up ready PRs). Versions of all workspace crates move together.
+#  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
+#                   Release, then this job starts release.yml on that tag to attach the binaries.
+# Needs a GitHub App (vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY). The job is
+# skipped until both exist: GITHUB_TOKEN cannot open PRs here (Actions may not create PRs), and a
+# PR opened with it would get no CI.
+# Not named release*.yml on purpose: repo-compass release_check reads the first release*.yml
+# for C5, which must stay release.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 10
+    steps:
+      - name: GitHub App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Release PR / tag + GitHub Release
+        id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Build and attach binaries (release.yml on the new tag)
+        # The tag may also start release.yml by itself (push: tags); release.yml's concurrency
+        # keeps one run per tag.
+        if: steps.rp.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rp.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

@@ -1,8 +1,10 @@
 name: Release
 
 # #424: 事前ビルド済みバイナリ + デモ用 Wasm コンポーネントを配布する。
-#  - タグ(v*) push      : ビルド → 検査 → draft Release を作成(公開は人が行う)
-#  - workflow_dispatch  : ビルド → 検査 → artifact のみ(Release は作らない。タグ無しで検証できる)
+#  - タグ(v*) push      : ビルド → 検査 → Release に添付。Release が無ければ draft で作る(公開は人が行う)
+#  - workflow_dispatch  : ブランチ指定なら artifact のみ(タグ無しで検証できる)。
+#                         タグ指定(prepare-release.yml が release-please の Release 作成後に起動。#19)は
+#                         タグ push と同じく Release に添付する
 # 手元ビルドは配布しない: バイナリにビルド環境のパス(/home/<user>/...)が埋め込まれるため、
 # CI でビルドし、--remap-path-prefix で消し、残っていれば失敗させる。
 
@@ -13,6 +15,11 @@ on:
 
 permissions:
   contents: read
+
+# #19: 同じタグでタグ push と workflow_dispatch の両方から起動されうるので、ref ごとに 1 本にする
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -135,11 +142,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create draft release
+      - name: Attach to the release (create a draft if none exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Prebuilt Linux x86_64 binary + demo Wasm components. Verify with the .sha256 file. Quick start: tar xzf <file> && cd <dir> && ./fluxion run examples/resource-limits-demo.yaml"
+          # #19: release-please (prepare-release.yml) creates the Release first, then starts this
+          # workflow on the tag. A tag pushed by hand has no Release yet, so create a draft.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Prebuilt Linux x86_64 binary + demo Wasm components. Verify with the .sha256 file. Quick start: tar xzf <file> && cd <dir> && ./fluxion run examples/resource-limits-demo.yaml"
+          fi
