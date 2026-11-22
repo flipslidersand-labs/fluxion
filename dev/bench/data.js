@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794708944685,
+  "lastUpdate": 1795342073931,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -809,6 +809,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 19277400,
             "range": "± 463446",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "205122478+flipslidersand@users.noreply.github.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "936b3ff98f74dad945272788312a15089c60f336",
+          "message": "docs: private リポへの参照ブロックを削除する (#11)\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-22T09:55:09Z",
+          "tree_id": "e06b8dd27055496fe69db74e074427e2f079a0f6",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/936b3ff98f74dad945272788312a15089c60f336"
+        },
+        "date": 1795342073080,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1572651,
+            "range": "± 14996",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 45064449,
+            "range": "± 8492009",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 23924,
+            "range": "± 187",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 99348,
+            "range": "± 946",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1621641,
+            "range": "± 6072",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5460806,
+            "range": "± 231150",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6286664,
+            "range": "± 853688",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 18287419,
+            "range": "± 7430895",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 10313858,
+            "range": "± 860454",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 25339346,
+            "range": "± 16972342",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 15821572,
+            "range": "± 7549174",
             "unit": "ns/iter"
           }
         ]
