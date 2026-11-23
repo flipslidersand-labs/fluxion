@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795416517412,
+  "lastUpdate": 1795417970382,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -1079,6 +1079,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 8303526,
             "range": "± 83770",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "205122478+flipslidersand@users.noreply.github.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "267f0eeb97e9fb0c8701b91b362468804b8ed482",
+          "message": "Merge pull request #23 from flipslidersand-labs/staging\n\nchore(merge-queue): promote staging",
+          "timestamp": "2026-11-23T07:08:49Z",
+          "tree_id": "787b0bb933bc8f09a3011c2d020c1b1cc48b0274",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/267f0eeb97e9fb0c8701b91b362468804b8ed482"
+        },
+        "date": 1795417970021,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1802468,
+            "range": "± 7480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 57460431,
+            "range": "± 1678463",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 28902,
+            "range": "± 454",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 120712,
+            "range": "± 1411",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1863379,
+            "range": "± 6966",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 5961322,
+            "range": "± 72677",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 5869781,
+            "range": "± 67352",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 14532085,
+            "range": "± 174385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 10837410,
+            "range": "± 111044",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 24056322,
+            "range": "± 344501",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 17162085,
+            "range": "± 680273",
             "unit": "ns/iter"
           }
         ]
