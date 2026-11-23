@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795413759939,
+  "lastUpdate": 1795416517412,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -989,6 +989,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 19938396,
             "range": "± 457242",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "205122478+flipslidersand@users.noreply.github.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "011ac5cfacf86ccb361b5f027ad80e2bc5ac1626",
+          "message": "docs: CHANGELOG.md を作る (#17)\n\nKeep a Changelog 形式。未リリースなので [Unreleased] のみで、main のコミット\n(#2〜#10)から起こした。README の Status に更新方法を 1 行足す。\n\nCloses #16\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-23T06:44:29Z",
+          "tree_id": "787b0bb933bc8f09a3011c2d020c1b1cc48b0274",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/011ac5cfacf86ccb361b5f027ad80e2bc5ac1626"
+        },
+        "date": 1795416516712,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1517107,
+            "range": "± 25949",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 40323744,
+            "range": "± 1160834",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 23099,
+            "range": "± 231",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 98180,
+            "range": "± 346",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1599721,
+            "range": "± 2712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 3431951,
+            "range": "± 59146",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 3339511,
+            "range": "± 70261",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 8713430,
+            "range": "± 67120",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 5687808,
+            "range": "± 24884",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 13984288,
+            "range": "± 71252",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 8303526,
+            "range": "± 83770",
             "unit": "ns/iter"
           }
         ]
