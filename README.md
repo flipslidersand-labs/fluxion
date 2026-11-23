@@ -530,6 +530,9 @@ jobs:
 | Phase 5 | OpenTelemetry tracing                      | ✅ Done |
 | Phase 6 | MCP server (5 tools)                       | ✅ Done |
 
+Changes are recorded in [CHANGELOG.md](CHANGELOG.md): add an entry under `[Unreleased]` in the same PR,
+and rename it to the version when tagging a release.
+
 ## License
 
 MIT
