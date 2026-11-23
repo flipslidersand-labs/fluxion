@@ -25,3 +25,8 @@ No version has been released yet; all crates are at `0.1.0`.
 
 - `fire_due_schedules` claim test no longer flakes at minute boundaries (#4).
 - Reusable workflow pins point to the equivalent commit on qa-workflows `main` (#10).
+
+### Security
+
+- Resolved cargo-deny advisories: wasmtime 48.0.10, url 2.5.9, and rusqlite 0.41
+  (bundled SQLite 3.54 or later). chrono stays ignored with a reason and a review date (#13).
