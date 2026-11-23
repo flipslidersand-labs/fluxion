@@ -3,6 +3,8 @@
 [![CI](https://github.com/flipslidersand-labs/fluxion/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand-labs/fluxion/actions/workflows/ci.yml)
 ![coverage floor](https://img.shields.io/badge/coverage%20floor-60%25-blue)
 
+Release type: `library`
+
 Safe Wasm-based job execution engine with capability-controlled sandboxing and DAG scheduling.
 
 Each job runs as a WebAssembly component — isolated, permission-scoped, and language-agnostic.
@@ -527,6 +529,9 @@ jobs:
 | Phase 4 | Persistence (SQLite) + retry from any job  | ✅ Done |
 | Phase 5 | OpenTelemetry tracing                      | ✅ Done |
 | Phase 6 | MCP server (5 tools)                       | ✅ Done |
+
+Changes are recorded in [CHANGELOG.md](CHANGELOG.md): add an entry under `[Unreleased]` in the same PR,
+and rename it to the version when tagging a release.
 
 ## License
 
