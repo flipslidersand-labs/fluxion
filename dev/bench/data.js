@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795417970382,
+  "lastUpdate": 1795418885814,
   "repoUrl": "https://github.com/flipslidersand-labs/fluxion",
   "entries": {
     "Benchmark": [
@@ -1169,6 +1169,96 @@ window.BENCHMARK_DATA = {
             "name": "workflow_run/parallel/5",
             "value": 17162085,
             "range": "± 680273",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "205122478+flipslidersand@users.noreply.github.com",
+            "name": "flipslidersand",
+            "username": "flipslidersand"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e9e999aae1ada44037bf1c0c21dc1355336859a0",
+          "message": "fix(deps): cargo-deny の advisories を解消する(wasmtime・url・rusqlite、chrono は期限つき ignore) (#14)\n\n* fix(deps): cargo-deny の advisories を解消する\n\n- wasmtime / wasmtime-wasi 48.0.8 -> 48.0.10、url 2.5.8 -> 2.5.9(lock のみ)\n- rusqlite 0.31 -> 0.41(libsqlite3-sys 0.28 -> 0.39.1、RUSTSEC-2026-0459)。\n  u64 の ToSql/FromSql は 0.31 と同じ実装が fallible_uint feature に移ったので有効にする\n- chrono(RUSTSEC-2026-0543、unmaintained・安全な更新なし)は cron と\n  opentelemetry-stdout 経由でも入るため、理由と見直し期限つきで ignore\n\nCloses #13\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\n* docs(changelog): cargo-deny の解消を [Unreleased] の Security に記す (#13)\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-23T07:21:25Z",
+          "tree_id": "ab603dbee5ce81439cdd23a661a5ce9b8d4a09ca",
+          "url": "https://github.com/flipslidersand-labs/fluxion/commit/e9e999aae1ada44037bf1c0c21dc1355336859a0"
+        },
+        "date": 1795418885458,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "cache/load_hit",
+            "value": 1820370,
+            "range": "± 14026",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cache/store_cold",
+            "value": 56467034,
+            "range": "± 1548789",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/50",
+            "value": 29168,
+            "range": "± 1232",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_build/200",
+            "value": 120104,
+            "range": "± 699",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "run_component/hello_warm_cache",
+            "value": 1847075,
+            "range": "± 15545",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/1",
+            "value": 6624243,
+            "range": "± 187706",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/1",
+            "value": 6095707,
+            "range": "± 152952",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/3",
+            "value": 15013620,
+            "range": "± 186856",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/3",
+            "value": 11151410,
+            "range": "± 153972",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/sequential/5",
+            "value": 23898345,
+            "range": "± 382888",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "workflow_run/parallel/5",
+            "value": 17174416,
+            "range": "± 268329",
             "unit": "ns/iter"
           }
         ]
