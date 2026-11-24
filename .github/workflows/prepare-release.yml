@@ -1,6 +1,6 @@
 name: Prepare release
 
-# #19 (repo-compass ADR-028 decision 3, trial): the only human step is merging the release PR.
+# #19 (release policy, trial): the only human step is merging the release PR.
 #  - push to main : release-please opens/updates a release PR as a draft (merge-queue only
 #                   picks up ready PRs). Versions of all workspace crates move together.
 #  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
@@ -8,7 +8,7 @@ name: Prepare release
 # Needs a GitHub App (vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY). The job is
 # skipped until both exist: GITHUB_TOKEN cannot open PRs here (Actions may not create PRs), and a
 # PR opened with it would get no CI.
-# Not named release*.yml on purpose: repo-compass release_check reads the first release*.yml
+# Not named release*.yml on purpose: the release-readiness check reads the first release*.yml
 # for C5, which must stay release.yml.
 
 on:
