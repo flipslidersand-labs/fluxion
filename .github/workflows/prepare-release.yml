@@ -5,6 +5,11 @@ name: Prepare release
 #                   picks up ready PRs). Versions of all workspace crates move together.
 #  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
 #                   Release, then this job starts release.yml on that tag to attach the binaries.
+# Version bump: release-type "simple" + extra-files (release-please-config.json), not "rust".
+# The "rust" type throws "is not a package manifest (might be a cargo workspace)" on a root
+# Cargo.toml without [package] (googleapis/release-please#1998). extra-files sets each crate's
+# package.version and its entry in Cargo.lock. A crate added to the workspace must also be
+# added to extra-files.
 # Needs a GitHub App (vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY). The job is
 # skipped until both exist: GITHUB_TOKEN cannot open PRs here (Actions may not create PRs), and a
 # PR opened with it would get no CI.

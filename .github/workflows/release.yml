@@ -74,7 +74,8 @@ jobs:
           done
           (cd components/network-probe && cargo component build --target wasm32-wasip2 -j2)
       - name: Build CLI (release)
-        run: cargo build --release -p fluxion-cli -j2
+        # --locked: a version bump that misses Cargo.lock (extra-files in release-please-config.json) fails here
+        run: cargo build --release --locked -p fluxion-cli -j2
       - name: Check the binary does not require a newer glibc than GLIBC_MAX
         run: |
           set -euo pipefail
